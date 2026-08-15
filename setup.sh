@@ -64,10 +64,13 @@ run_checks() {
     overall=1
   fi
 
+  # webclient/test_webclient.py runs under the system python3, not the
+  # framework venv (README.md: `python3 -m pytest webclient/`) — probe the
+  # same interpreter the tests actually use.
   if command -v python3 >/dev/null 2>&1 && python3 -c "import playwright.sync_api" >/dev/null 2>&1; then
-    echo "CHECK playwright (optional): PASS installed — webclient browser tests will run"
+    echo "CHECK playwright (optional): PASS installed in system python3 — webclient browser tests will run"
   else
-    echo "CHECK playwright (optional): FAIL not installed — webclient browser tests will skip, rest of the suite still runs"
+    echo "CHECK playwright (optional): FAIL not installed in system python3 (webclient tests run there, not the venv) — webclient browser tests will skip, rest of the suite still runs"
   fi
 
   return "$overall"
@@ -93,6 +96,14 @@ python3 -m venv "$INSTALL_DIR/.venv"
 
 echo "Installing speech-to-speech (editable) + extras"
 "$INSTALL_DIR/.venv/bin/pip" install --upgrade pip
+
+# Install CPU-only torch/torchaudio first so the framework's dependency
+# resolve below (which only pins torch>=2.4.0 on Linux) sees them already
+# satisfied, instead of pulling the default CUDA build (~5GB of nvidia-*-cu13
+# + triton). GPU users: swap in a CUDA build post-install if you want one.
+echo "Installing CPU-only torch/torchaudio (default install has no GPU requirement)"
+"$INSTALL_DIR/.venv/bin/pip" install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
+
 "$INSTALL_DIR/.venv/bin/pip" install -e "$INSTALL_DIR[kokoro]"
 "$INSTALL_DIR/.venv/bin/pip" install -e "$INSTALL_DIR[pocket,websocket]"
 

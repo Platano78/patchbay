@@ -14,7 +14,10 @@ output doesn't match. Run the steps in order; do not skip ahead.
   matter which; you supply the URL in step 3.
 - No GPU is required. STT (`parakeet-tdt`) and TTS (`pocket`, the default)
   both run CPU-only; a GPU only helps the LLM, which is a separate process
-  you are pointing at, not something this repo runs for you.
+  you are pointing at, not something this repo runs for you. `setup.sh`
+  installs the CPU build of torch; if you want a CUDA build anyway, swap it
+  in after setup finishes (`pip install torch torchaudio --index-url
+  https://download.pytorch.org/whl/cuXXX` in the venv).
 
 Verify the prerequisites:
 
@@ -32,6 +35,7 @@ continuing — the framework's install step will fail obscurely otherwise.
 git clone <this-repo-url> patchbay
 cd patchbay
 ./setup.sh
+# optional: INSTALL_DIR=/custom/path ./setup.sh
 ```
 
 This clones `huggingface/speech-to-speech` pinned at the commit the patch
@@ -61,6 +65,9 @@ above. Common causes and fixes:
 ./setup.sh --check
 ```
 
+If you set `INSTALL_DIR` in step 1, pass the same value here:
+`INSTALL_DIR=/custom/path ./setup.sh --check`.
+
 Expected output: four lines, each starting `CHECK <name>: PASS ...`, and the
 command exits `0`. `CHECK playwright` is optional and does not affect the
 exit code either way.
@@ -78,12 +85,17 @@ never installs, clones, or writes anything, so loop on it freely.
 cp brains.json.example brains.json
 ```
 
+`setup.sh` already ran this copy for you in step 1 if `brains.json` didn't
+exist yet, so this command is a no-op unless you deleted it — either way,
+edit `brains.json` (setup.sh created it from the example) next.
+
 Edit `brains.json`: for at least one entry, set `base_url` to your LLM
 endpoint's `/v1` base, `model` to the model id it serves, and `available` to
-`true`. Delete or leave `available: false` on entries you don't have
-credentials/endpoints for (`hermes` and `frontier` need an
-`api_key_file` you likely don't have yet — safe to ignore both for a first
-run).
+`true`. Only `coder` ships `available: true` by default; `local`, `hermes`,
+and `frontier` ship `available: false` — leave them that way unless you're
+using them. `local` needs a real `<HOST>` in place of the placeholder;
+`hermes` and `frontier` also need an `api_key_file` you likely don't have
+yet — safe to ignore all three for a first run.
 
 Verify the endpoint answers before starting the pipeline:
 

@@ -9,7 +9,7 @@
     "label": "Local — desktop router (loaded model)",
     "base_url": "http://<HOST>:8081/v1",
     "model": "auto",
-    "available": true
+    "available": false
   },
   "hermes": {
     "label": "Hermes",
@@ -17,7 +17,7 @@
     "model": "auto",
     "api_key_file": "<PATH>/.hermes/shim.env",
     "api_key_var": "HERMES_SHIM_TOKEN",
-    "available": true
+    "available": false
   },
   "frontier": {
     "label": "Frontier — hosted model (any OpenAI-compatible endpoint)",
