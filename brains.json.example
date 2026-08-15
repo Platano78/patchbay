@@ -1,0 +1,31 @@
+{
+  "coder": {
+    "label": "Coder — local GPU LLM",
+    "base_url": "http://localhost:8084/v1",
+    "model": "<YOUR_MODEL_NAME>",
+    "available": true
+  },
+  "local": {
+    "label": "Local — desktop router (loaded model)",
+    "base_url": "http://<HOST>:8081/v1",
+    "model": "auto",
+    "available": true
+  },
+  "hermes": {
+    "label": "Hermes",
+    "base_url": "http://localhost:8087/v1",
+    "model": "auto",
+    "api_key_file": "<PATH>/.hermes/shim.env",
+    "api_key_var": "HERMES_SHIM_TOKEN",
+    "available": true
+  },
+  "frontier": {
+    "label": "Frontier — hosted model (any OpenAI-compatible endpoint)",
+    "base_url": "https://openrouter.ai/api/v1",
+    "model": "<YOUR_FRONTIER_MODEL>",
+    "api_key_file": "<PATH>/openrouter.env",
+    "api_key_var": "OPENROUTER_API_KEY",
+    "available": false,
+    "note": "set your key file and model, then flip available to true. (This lane was previously named \"claude\"; an old brains.json using that key keeps working — brains.json keys are free-form.)"
+  }
+}

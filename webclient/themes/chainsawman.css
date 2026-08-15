@@ -1,0 +1,259 @@
+/* Devil Hunter — rough ink/halftone poster theme.
+   Off-black, blood-red + safety-orange, taped-label panels, stencil display
+   type, hazard-stripe accents. Raw but readable. */
+
+[data-theme="chainsawman"] {
+  --bg: #121110;
+  --surface: #1c1a17;
+  --surface-2: #241f19;
+  --border: rgba(239, 233, 223, 0.14);
+  --text: #efe9df;
+  --text-muted: rgba(239, 233, 223, 0.56);
+  --accent: #ff5a1f;
+  --accent-2: #b3001b;
+  --rec: #d40e14;
+  --ok: #6f9a3c;
+  --warn: #e8a23c;
+  --bad: #b3001b;
+  --radius: 2px;
+  --radius-sm: 1px;
+  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-display: Impact, "Arial Black", Haettenschweiler, "Franklin Gothic Bold", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --tracking-label: 0.1em;
+  --shadow-card: 5px 5px 0 rgba(0,0,0,0.55), inset 0 0 0 1px rgba(255,255,255,0.05);
+  --ptt-shadow-idle: 0 0 0 3px var(--accent), 6px 6px 0 rgba(0,0,0,0.6);
+  --ptt-shadow-rec: 0 0 0 3px var(--rec), 0 0 34px color-mix(in srgb, var(--rec) 65%, transparent), 6px 6px 0 rgba(0,0,0,0.6);
+  --ptt-size: 130px;
+  --ptt-radius: 50%;
+}
+
+/* ── Rough ink/halftone backdrop — CSS gradients only, no images ── */
+[data-theme="chainsawman"] body {
+  background:
+    repeating-radial-gradient(circle at 0 0, rgba(0,0,0,0.5) 0, rgba(0,0,0,0.5) 1px, transparent 1px, transparent 5px),
+    linear-gradient(160deg, #17140f 0%, var(--bg) 55%);
+  background-size: 6px 6px, auto;
+}
+
+/* ── Taped poster panels ──
+   #settingsPanel is excluded from `position: relative` and `transform:
+   rotate(...)` — it's `position: fixed` and animates via `transform:
+   translateX(...)` in the base page for its open/close slide; either
+   override here would silently break that mechanic. Border treatment only. ── */
+[data-theme="chainsawman"] .card,
+[data-theme="chainsawman"] #historyRail,
+[data-theme="chainsawman"] #sessionRail {
+  position: relative;
+  border-width: 2px;
+  border-style: solid;
+  transform: rotate(-0.15deg);
+}
+[data-theme="chainsawman"] #settingsPanel {
+  border-width: 2px;
+  border-style: solid;
+}
+[data-theme="chainsawman"] .card::before,
+[data-theme="chainsawman"] #historyRail::before,
+[data-theme="chainsawman"] #sessionRail::before {
+  content: "";
+  position: absolute;
+  top: -8px;
+  left: 20px;
+  width: 46px;
+  height: 16px;
+  background: rgba(239, 233, 223, 0.65);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.4);
+  transform: rotate(-3deg);
+}
+[data-theme="chainsawman"] .card .label,
+[data-theme="chainsawman"] #historyRail .label,
+[data-theme="chainsawman"] #sessionRail .label,
+[data-theme="chainsawman"] #settingsPanel .label {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+[data-theme="chainsawman"] #assistantText .body { color: var(--accent-2); font-family: var(--font-display); }
+[data-theme="chainsawman"] #assistantText.speaking {
+  border-color: var(--rec);
+  box-shadow: var(--shadow-card), 0 0 0 2px color-mix(in srgb, var(--rec) 45%, transparent);
+}
+[data-theme="chainsawman"] #statusText.shimmer {
+  background: linear-gradient(90deg, var(--text-muted) 0%, var(--accent) 50%, var(--text-muted) 100%);
+  background-size: 200% 100%;
+}
+
+/* ── PTT: pull-cord energy, hazard stripes and dangerous red on rec ── */
+[data-theme="chainsawman"] #ptt { border-radius: var(--ptt-radius); }
+[data-theme="chainsawman"] #pttCaption {
+  font-family: var(--font-display);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+[data-theme="chainsawman"] #ptt.recording {
+  background: repeating-linear-gradient(45deg, var(--rec) 0, var(--rec) 10px, #1a0000 10px, #1a0000 20px);
+}
+[data-theme="chainsawman"] .pttPulse { border-color: var(--rec); border-width: 3px; }
+
+/* ── #pttDeco: bold offset ring — the "HOLD TO RIP" pull-cord's signature ring,
+   ref custom-ref-chainsawman.html #ripcord's thick border + hard offset shadow. ── */
+[data-theme="chainsawman"] #pttDeco {
+  display: block;
+  position: absolute;
+  inset: -8px;
+  border-radius: 50%;
+  border: 5px solid var(--accent);
+  transform: rotate(-4deg);
+  box-shadow: 4px 4px 0 rgba(0,0,0,0.55);
+  pointer-events: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+[data-theme="chainsawman"] #ptt.recording #pttDeco {
+  border-color: var(--rec);
+  box-shadow: 4px 4px 0 rgba(0,0,0,0.55), 0 0 22px color-mix(in srgb, var(--rec) 55%, transparent);
+}
+
+/* ── #meterChrome: aggressive analog VU face — deliberately NOT hifi's cream
+   vintage look. Off-black face, thick red needle, white/red hazard PEAK zone.
+   Ref: custom-ref-chainsawman.html SIGNAL INTENSITY gauge + designsystem
+   "Hard Offsets" / "Inverted Surfaces". Replaces the bar waveform. ── */
+[data-theme="chainsawman"] .waveform { display: none; }
+[data-theme="chainsawman"] #meterChrome {
+  display: block;
+  position: relative;
+  width: 240px;
+  max-width: 92%;
+  height: 92px;
+  margin: 0 auto 4px;
+}
+[data-theme="chainsawman"] .meterFace {
+  position: absolute;
+  inset: 0;
+  display: block;
+  background: linear-gradient(180deg, #0a0908 0%, #1a1613 100%);
+  border: 2px solid var(--text);
+  border-radius: var(--radius);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06), 5px 5px 0 rgba(0,0,0,0.55);
+  transition: box-shadow 0.15s ease, background 0.15s ease;
+}
+[data-theme="chainsawman"] #ptt.recording ~ #meterChrome .meterFace {
+  background: linear-gradient(180deg, #2a0705 0%, #4a0704 100%);
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06), 5px 5px 0 rgba(0,0,0,0.55), 0 0 24px color-mix(in srgb, var(--rec) 60%, transparent);
+}
+[data-theme="chainsawman"] .meterTicks {
+  display: block;
+  position: absolute;
+  left: 10%; right: 10%; top: 14px; height: 1px;
+  background-image: repeating-linear-gradient(90deg, var(--text-muted) 0 2px, transparent 2px 22px);
+}
+[data-theme="chainsawman"] .meterTicks::before {
+  content: "";
+  position: absolute;
+  right: 0; top: -10px;
+  width: 26%; height: 22px;
+  background: repeating-linear-gradient(45deg, var(--text) 0, var(--text) 4px, var(--rec) 4px, var(--rec) 8px);
+  opacity: 0.9;
+}
+[data-theme="chainsawman"] .meterTicks::after {
+  content: "-INF DB \00b7 SIGNAL INTENSITY \00b7 PEAK";
+  position: absolute;
+  top: 4px; left: 0; right: 0;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  text-align: center;
+  white-space: nowrap;
+}
+[data-theme="chainsawman"] .meterNeedle {
+  display: block;
+  position: absolute;
+  left: 50%; bottom: 6px;
+  width: 3px; height: 62px;
+  background: linear-gradient(var(--accent), var(--rec));
+  transform-origin: bottom center;
+  transform: rotate(calc(-45deg + var(--level, 0) * 90deg));
+  transition: transform 0.1s cubic-bezier(.2,1.4,.4,1);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--rec) 70%, transparent);
+}
+[data-theme="chainsawman"] .meterNeedle::after {
+  content: "";
+  position: absolute;
+  bottom: -6px; left: 50%;
+  width: 12px; height: 12px;
+  transform: translateX(-50%);
+  border-radius: 50%;
+  background: var(--rec);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--rec) 70%, transparent);
+}
+
+/* ── .panelFrame: hazard stripe band on the top edge of every card/rail/panel —
+   the poster's signature diagonal orange/black band (designsystem "Hazard
+   Dividers"). Coexists with .card::before's tape mark (different element,
+   different edge treatment) rather than duplicating it. Animates while
+   recording via :has(), guarded for reduced motion. ── */
+[data-theme="chainsawman"] .panelFrame {
+  display: block;
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 6px;
+  background: repeating-linear-gradient(45deg, var(--accent) 0, var(--accent) 10px, #0a0908 10px, #0a0908 20px);
+  background-size: 28px 100%;
+  pointer-events: none;
+}
+[data-theme="chainsawman"] body:has(#ptt.recording) .panelFrame {
+  background: repeating-linear-gradient(45deg, var(--rec) 0, var(--rec) 10px, #0a0908 10px, #0a0908 20px);
+  background-size: 28px 100%;
+  animation: chainsawmanHazardScroll 0.6s linear infinite;
+}
+@keyframes chainsawmanHazardScroll {
+  from { background-position: 0 0; }
+  to { background-position: 28px 0; }
+}
+
+/* ── Waveform: raw chunky bars (fallback path if a future theme swap hides
+   #meterChrome; kept in sync with the .waveform { display:none } above) ── */
+[data-theme="chainsawman"] .wbar { max-width: 9px; border-radius: 0; background: var(--accent); }
+[data-theme="chainsawman"] #ptt.recording ~ #waveform .wbar { background: var(--rec); }
+
+/* ── Hazard accents on rails ── */
+[data-theme="chainsawman"] #historyRail .label,
+[data-theme="chainsawman"] #sessionRail .label {
+  border-bottom: 6px solid;
+  border-image: repeating-linear-gradient(45deg, var(--accent) 0, var(--accent) 8px, #000 8px, #000 16px) 6;
+  padding-bottom: 8px;
+}
+[data-theme="chainsawman"] .historyEntry,
+[data-theme="chainsawman"] .sessionRow { border-bottom-color: var(--border); }
+[data-theme="chainsawman"] .historyTime,
+[data-theme="chainsawman"] .sessionKey { color: var(--accent); font-family: var(--font-mono); }
+
+/* ── Drawer ── */
+[data-theme="chainsawman"] .themeSwatch.active .swatchDot {
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+}
+[data-theme="chainsawman"] .panelBtn.primary {
+  background: var(--accent);
+  border-color: var(--accent-2);
+  color: #1a0d05;
+  font-family: var(--font-display);
+  text-transform: uppercase;
+}
+[data-theme="chainsawman"] #personaInput,
+[data-theme="chainsawman"] #voiceSelect { background: var(--surface-2); }
+[data-theme="chainsawman"] #log { background: var(--surface-2); border-color: var(--border); }
+
+@media (min-width: 1024px) {
+  [data-theme="chainsawman"] #assistantText .body {
+    font-size: 44px;
+    -webkit-text-stroke: 1px rgba(0,0,0,0.5);
+  }
+  [data-theme="chainsawman"] #historyRail,
+  [data-theme="chainsawman"] #sessionRail { transform: rotate(0.1deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-theme="chainsawman"] body:has(#ptt.recording) .panelFrame { animation: none !important; }
+}

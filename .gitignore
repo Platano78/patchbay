@@ -1,0 +1,49 @@
+# Secrets / host-specific config
+brains.json
+webclient/certs/
+
+# Non-redistributable avatar assets (images + local-only refs — see NOTICE)
+webclient/avatar/refs/
+webclient/avatar/**/*.png
+webclient/avatar/**/*.jpg
+
+# Dev snapshots / editor backups (not part of the distribution)
+*.bak
+*.bak.pre-*
+
+# Internal design scratch (reference mockups, not redistributable)
+webclient/themes/_refs/
+webclient/theme-demos/
+
+# Theme artwork (character/background art used while building the themes).
+# Same rule as the avatar images above and what NOTICE already states: not
+# redistributed. themes.json ships colours and lighting only, so a clone
+# renders every theme correctly without these.
+webclient/themes/assets/**/*.png
+webclient/themes/assets/**/*.jpg
+webclient/themes/assets/**/*.webp
+
+# Working notes and local research (scout/borrow write-ups, session scratch) —
+# this repo is public; these are not for publication.
+docs/borrows/
+docs/_next-session-prompt.md
+docs/pronunciation-smoke-test.md
+
+# Local benchmark audio (large, and voice recordings are not distributable)
+bench-wavs/
+
+# Python
+__pycache__/
+*.pyc
+
+# Environments
+.venv/
+
+# Node
+node_modules/
+
+# OS cruft
+.DS_Store
+
+# Scratch
+smoketest_scratch/

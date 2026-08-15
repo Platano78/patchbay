@@ -1,0 +1,121 @@
+/* Terminal — pure black, phosphor green, scanline overlay, mono everywhere.
+   Professional terminal, not movie prop. Amber reserved for warnings/rec. */
+
+[data-theme="hacker"] {
+  --bg: #000000;
+  --surface: #050a05;
+  --surface-2: #0a140a;
+  --border: rgba(51, 255, 102, 0.28);
+  --text: #33ff66;
+  --text-muted: rgba(51, 255, 102, 0.55);
+  --accent: #33ff66;
+  --accent-2: #00cc55;
+  --rec: #ffb000;
+  --ok: #33ff66;
+  --warn: #ffb000;
+  --bad: #ff4444;
+  --radius: 0px;
+  --radius-sm: 0px;
+  --font-body: ui-monospace, "Cascadia Code", SFMono-Regular, Menlo, Consolas, monospace;
+  --font-display: ui-monospace, "Cascadia Code", SFMono-Regular, Menlo, Consolas, monospace;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --tracking-label: 0.16em;
+  --shadow-card: 0 0 0 1px var(--border), inset 0 0 22px rgba(51,255,102,0.05);
+  --ptt-shadow-idle: 0 0 0 1px var(--accent), 0 0 22px color-mix(in srgb, var(--accent) 45%, transparent);
+  --ptt-shadow-rec: 0 0 0 2px var(--rec), 0 0 30px color-mix(in srgb, var(--rec) 60%, transparent);
+  --ptt-size: 90px;
+  --ptt-radius: 4px;
+}
+
+/* ── Scanline overlay: drifting, reduced-motion aware ── */
+[data-theme="hacker"] body {
+  background:
+    repeating-linear-gradient(0deg, rgba(51,255,102,0.05) 0px, rgba(51,255,102,0.05) 1px, transparent 1px, transparent 3px),
+    var(--bg);
+  position: relative;
+}
+[data-theme="hacker"] body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(0deg, rgba(51,255,102,0.04) 0px, rgba(51,255,102,0.04) 1px, transparent 1px, transparent 4px);
+  animation: hackerScan 6s linear infinite;
+  z-index: 999;
+}
+
+[data-theme="hacker"] .card .label,
+[data-theme="hacker"] #historyRail .label,
+[data-theme="hacker"] #sessionRail .label {
+  color: var(--accent-2);
+}
+[data-theme="hacker"] .card .label::before { content: "> "; }
+
+[data-theme="hacker"] #assistantText .body {
+  text-shadow: 0 0 6px color-mix(in srgb, var(--accent) 65%, transparent), 0 0 14px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+[data-theme="hacker"] #assistantText.speaking {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-card), 0 0 24px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+[data-theme="hacker"] #statusText.shimmer {
+  background: linear-gradient(90deg, var(--text-muted) 0%, var(--accent) 50%, var(--text-muted) 100%);
+  background-size: 200% 100%;
+}
+
+/* ── PTT: green glow idle, amber while recording ── */
+[data-theme="hacker"] #ptt {
+  background: #000;
+  color: var(--accent);
+}
+[data-theme="hacker"] #ptt.recording { background: #0a0500; color: var(--rec); }
+[data-theme="hacker"] #pttCaption { text-transform: lowercase; }
+[data-theme="hacker"] #pttCaption::before { content: "$ "; color: var(--accent-2); }
+
+/* ── Waveform: dot/ASCII block bars ── */
+[data-theme="hacker"] .wbar {
+  max-width: 4px;
+  border-radius: 0;
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+[data-theme="hacker"] #ptt.recording ~ #waveform .wbar {
+  background: var(--rec);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--rec) 55%, transparent);
+}
+
+/* ── Rails / history / session ── */
+[data-theme="hacker"] .historyTime,
+[data-theme="hacker"] .sessionKey { color: var(--accent-2); }
+[data-theme="hacker"] .historyEntry,
+[data-theme="hacker"] .sessionRow { border-bottom-color: var(--border); }
+
+/* ── Drawer ── */
+[data-theme="hacker"] .themeSwatch.active .swatchDot {
+  box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
+}
+[data-theme="hacker"] .panelBtn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #000;
+}
+[data-theme="hacker"] #personaInput,
+[data-theme="hacker"] #voiceSelect {
+  background: #000;
+  border-color: var(--border);
+  color: var(--accent);
+}
+[data-theme="hacker"] #log {
+  background: #000;
+  border-color: var(--border);
+  color: var(--accent);
+}
+
+@keyframes hackerScan {
+  0% { transform: translateY(0); }
+  100% { transform: translateY(4px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-theme="hacker"] body::after { animation: none !important; }
+}

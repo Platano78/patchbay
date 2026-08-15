@@ -1,0 +1,57 @@
+This project builds on and redistributes patches for the following
+third-party works. Their own licenses govern their respective code.
+
+1. huggingface/speech-to-speech
+   https://github.com/huggingface/speech-to-speech
+   License: Apache License 2.0
+   Not vendored here — `setup.sh` clones and pins it at a specific commit.
+   `patches/` contains an overlay pack of modified files from this framework
+   (see patches/README.md for exactly which files and why).
+
+2. met4citizen/TalkingHead
+   https://github.com/met4citizen/TalkingHead
+   License: MIT
+   The webclient's avatar rendering code under `webclient/avatar/vendor/`
+   integrates with this library.
+
+3. Bundled avatar heads (webclient/avatar/model/*.glb)
+   Six ready heads are redistributed from the met4citizen/TalkingHead
+   repository, mirroring its own public distribution. They are NOT uniformly
+   licensed — see webclient/avatar/model/LICENSE-NOTE.txt for the per-file
+   terms (mpfb.glb is CC0/public domain; the others are non-commercial /
+   personal-use assets created with Ready Player Me, AvatarSDK, Avaturn, and
+   VRoid Studio). For any non-personal use, replace them with heads you have
+   rights to.
+
+4. Vendored libraries (webclient/avatar/vendor/)
+   - three.js (MIT) — 3D rendering.
+   - met4citizen/TalkingHead modules (MIT) — 3D head render + lip-sync glue,
+     with small local patches marked LOCAL VENDOR PATCH inline (meshopt decoder wiring and
+     the upstream armature-root fallback).
+   - HeadAudio by Mika Suominen (MIT, see its LICENSE) — real-time
+     audio-driven viseme detection (webclient/avatar/vendor/headaudio/).
+
+5. Fonts (webclient/themes/fonts/)
+   Cinzel — SIL Open Font License (see OFL.txt alongside the font files).
+
+Theme reference images and the 2D still-avatar source image used during
+development are NOT redistributed (see .gitignore) — supply your own image
+for the 2D avatar path. Nothing in this NOTICE grants rights to any asset
+not present in the repository.
+
+ACKNOWLEDGMENTS / INSPIRATION
+This cockpit stands on ideas borrowed from projects we admire:
+- huggingface/speech-to-speech — the modular STT/LLM/TTS pipeline this
+  cockpit drives; the patch pack exists to extend it, not replace it.
+- met4citizen/TalkingHead + HeadAudio (Mika Suominen) — the entire 3D
+  avatar + lip-sync approach, the ready-head roster, and the Blender
+  avatar-creation pipelines documented in that repo shaped this project's
+  avatar architecture end to end.
+- Ready Player Me, AvatarSDK, Avaturn, VRoid Studio, and the MakeHuman/MPFB
+  community — creators of the bundled example heads.
+- The 2D still-image lip-sync path was inspired by classic visual-novel /
+  Live2D-style talking portraits: one image, an audio-driven mouth.
+
+This project's own original code (webclient UI beyond the vendored avatar
+library, the patch pack's persona/brain-selector logic, setup scripts, and
+documentation) is licensed under the MIT License — see LICENSE.

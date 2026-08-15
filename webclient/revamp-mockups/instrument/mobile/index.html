@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en" data-state="listening">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark" />
+<title>Cockpit - Voice Instrument (Field Unit)</title>
+<style>
+  :root {
+    --ease: cubic-bezier(.2, 1.4, .4, 1);
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Consolas, "Liberation Mono", monospace;
+    --grotesk: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+    --room: #0d0b09;
+    --metal-hi: #a89c88;
+    --metal-mid: #7c7263;
+    --metal-low: #4d473c;
+    --metal-shadow: #2c2820;
+
+    --ink: #241f1a;
+    --ink-dim: rgba(36, 31, 26, 0.58);
+    --cream: #ece4d2;
+
+    --amber: #ff9e3d;
+    --amber-deep: #d94a1f;
+    --lamp-off: #4a453b;
+
+    --r: 4px;
+    --r-glass: 6px;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background:
+      radial-gradient(120% 60% at 50% -6%, rgba(255, 210, 160, 0.06), transparent 62%),
+      linear-gradient(180deg, var(--room) 0%, #0a0806 100%);
+    color: var(--ink);
+    font-family: var(--grotesk);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 28px 14px;
+    overflow-x: hidden;
+  }
+
+  button { font: inherit; color: inherit; background: none; border: none; padding: 0; cursor: pointer; }
+  button:focus-visible, a:focus-visible, [tabindex]:focus-visible {
+    outline: 2px solid var(--amber);
+    outline-offset: 2px;
+  }
+
+  .nom {
+    font-family: var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink);
+    text-shadow: 0 -1px 0 rgba(0, 0, 0, 0.55), 0 1px 0 rgba(255, 255, 255, 0.28);
+  }
+  .nom.tiny { font-size: 9px; letter-spacing: 0.16em; }
+
+  .lcd-label {
+    font-family: var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: rgba(236, 228, 210, 0.48);
+  }
+  .lcd-label.tiny { font-size: 8px; }
+
+  /* ================= device chassis (portable field unit) ================= */
+  .device {
+    position: relative;
+    width: min(92vw, 390px);
+    border-radius: var(--r);
+    background:
+      repeating-linear-gradient(90deg, rgba(255,255,255,0.035) 0px, rgba(255,255,255,0.035) 1px, rgba(0,0,0,0.045) 2px, rgba(0,0,0,0.045) 3px),
+      linear-gradient(180deg, rgba(255,255,255,0.09) 0%, rgba(255,255,255,0.015) 14%, rgba(0,0,0,0.05) 58%, rgba(0,0,0,0.2) 100%),
+      linear-gradient(150deg, var(--metal-hi) 0%, var(--metal-mid) 46%, var(--metal-low) 80%, var(--metal-shadow) 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.28),
+      inset 0 -2px 0 rgba(0,0,0,0.4),
+      inset 1px 0 0 rgba(255,255,255,0.08),
+      inset -1px 0 0 rgba(0,0,0,0.28),
+      0 30px 60px rgba(0,0,0,0.55),
+      0 10px 20px rgba(0,0,0,0.5);
+    padding: 0;
+  }
+
+  .chassis-screw {
+    position: absolute;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, var(--metal-hi), var(--metal-low) 72%);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(0,0,0,0.4);
+    z-index: 2;
+  }
+  .chassis-screw::after {
+    content: ""; position: absolute; left: 50%; top: 50%;
+    width: 5px; height: 1px; background: rgba(0,0,0,0.55);
+    transform: translate(-50%, -50%) rotate(20deg);
+  }
+  .chassis-screw.tl { top: 8px; left: 8px; }
+  .chassis-screw.tr { top: 8px; right: 8px; }
+  .chassis-screw.tr::after { transform: translate(-50%, -50%) rotate(-35deg); }
+  .chassis-screw.bl { bottom: 8px; left: 8px; }
+  .chassis-screw.bl::after { transform: translate(-50%, -50%) rotate(52deg); }
+  .chassis-screw.br { bottom: 8px; right: 8px; }
+  .chassis-screw.br::after { transform: translate(-50%, -50%) rotate(-12deg); }
+
+  .nameplate {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 20px 12px;
+  }
+  .brand { font-size: 11px; font-weight: 700; letter-spacing: 0.26em; }
+  .brand span { display: block; margin-top: 3px; font-size: 7.5px; font-weight: 400; letter-spacing: 0.16em; opacity: 0.62; }
+  .nameplate-right { display: flex; align-items: center; gap: 8px; }
+  .pwr-lamp { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 6px rgba(255,158,61,0.75), inset 0 0 2px rgba(255,255,255,0.4); }
+
+  .seam { height: 3px; margin: 0 16px; background: linear-gradient(180deg, rgba(0,0,0,0.5), rgba(255,255,255,0.07) 55%, rgba(0,0,0,0.2)); border-radius: 2px; }
+
+  .field-body { display: flex; flex-direction: column; gap: 16px; padding: 18px 18px 20px; }
+
+  /* ================= LEVEL (meter) ================= */
+  .zone-head { display: flex; align-items: center; justify-content: space-between; }
+  .zone-label { font-size: 9px; opacity: 0.82; }
+  .state-lamps { display: flex; gap: 8px; }
+  .lamp { display: flex; flex-direction: column; align-items: center; gap: 3px; }
+  .lamp .bulb { width: 6px; height: 6px; border-radius: 50%; background: var(--lamp-off);
+    box-shadow: inset 0 1px 1px rgba(0,0,0,0.6);
+    transition: background 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  }
+  .lamp.lit .bulb { background: var(--amber); box-shadow: 0 0 7px rgba(255,158,61,0.85), inset 0 0 2px rgba(255,255,255,0.5); }
+  .lamp .nom { font-size: 6.5px; }
+
+  .meter-housing {
+    display: flex; flex-direction: column; justify-content: center;
+    border-radius: var(--r);
+    padding: 12px 14px 9px;
+    background: linear-gradient(180deg, var(--metal-mid), var(--metal-low));
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.15), inset 0 -2px 4px rgba(0,0,0,0.4), 0 3px 8px rgba(0,0,0,0.32);
+  }
+  .meter-face {
+    position: relative; flex: 0 0 auto; width: 100%; aspect-ratio: 2.35 / 1;
+    border-radius: var(--r-glass);
+    background: radial-gradient(120% 90% at 50% 120%, rgba(255,158,61,0.14), transparent 60%), var(--cream);
+    box-shadow: inset 0 3px 8px rgba(0,0,0,0.45), inset 0 -1px 0 rgba(255,255,255,0.5);
+    overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .meter-glass {
+    position: absolute; inset: 0; pointer-events: none;
+    background: linear-gradient(115deg, rgba(255,255,255,0.35) 0%, rgba(255,255,255,0.05) 18%, transparent 34%, transparent 72%, rgba(0,0,0,0.05) 100%);
+    mix-blend-mode: screen; opacity: 0.65;
+  }
+  .meter-face svg { width: 100%; height: 100%; max-width: 340px; overflow: visible; }
+  .gaugeArc { fill: none; stroke: rgba(36,31,26,0.22); stroke-width: 1.6; }
+  .gaugeTick { stroke: rgba(36,31,26,0.4); stroke-width: 1.4; }
+  .gaugeTick.major { stroke: var(--ink); stroke-width: 1.8; }
+  .gaugeLabel { font-family: var(--mono); font-size: 7.5px; fill: rgba(36,31,26,0.62); text-anchor: middle; }
+  .gaugeRedZone { fill: none; stroke: var(--amber-deep); stroke-width: 2.4; opacity: 0.85; }
+
+  #needleWrap {
+    position: absolute; left: 50%; bottom: 12%; width: 2px; height: 0;
+    transform-origin: 50% 100%;
+    transform: rotate(-45deg);
+    transition: transform 0.12s var(--ease);
+    will-change: transform;
+  }
+  #needle {
+    position: absolute; bottom: 0; left: -1.5px; width: 3px; height: 112px;
+    background: linear-gradient(180deg, var(--amber) 0%, var(--ink) 34%, var(--ink) 100%);
+    box-shadow: 0 0 6px rgba(255,158,61,0.55);
+    border-radius: 2px 2px 0 0;
+  }
+  #needlePivot {
+    position: absolute; left: 50%; bottom: 12%; width: 13px; height: 13px;
+    transform: translate(-50%, 50%); border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, var(--metal-hi), var(--metal-low) 75%);
+    border: 1px solid rgba(0,0,0,0.5);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.5);
+    z-index: 2;
+  }
+
+  .meter-readout { display: flex; justify-content: space-between; align-items: center; padding-top: 7px; font-size: 9px; }
+  .meter-readout b { color: var(--amber); font-variant-numeric: tabular-nums; text-shadow: 0 0 4px rgba(255,158,61,0.35); }
+  .state-tag { font-size: 8px; letter-spacing: 0.18em; color: var(--amber); }
+
+  /* ================= LCD transcript ================= */
+  .lcd-window { border-radius: var(--r); padding: 10px 13px 12px;
+    background: linear-gradient(160deg, #1c1712, #100d0a);
+    box-shadow: inset 0 2px 6px rgba(0,0,0,0.7), inset 0 0 0 1px rgba(0,0,0,0.6);
+  }
+  .lcd-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 7px; }
+  .lcd-lamp { width: 6px; height: 6px; border-radius: 50%; background: var(--lamp-off); }
+  .lcd-lamp.lit { background: var(--amber); box-shadow: 0 0 6px rgba(255,158,61,0.7); }
+  .lcd-text { margin: 0; font-family: var(--grotesk); font-size: 13px; line-height: 1.45; color: var(--cream);
+    text-shadow: 0 0 10px rgba(236,228,210,0.1);
+  }
+  .lcd-text.dim { opacity: 0.42; }
+
+  /* ================= INPUT controls (thumb-reachable) ================= */
+  .input-row { display: flex; align-items: center; justify-content: center; gap: 26px; padding: 4px 0 2px; }
+  .control { display: flex; flex-direction: column; align-items: center; gap: 9px; }
+  .toggle-btn { display: flex; flex-direction: column; align-items: center; gap: 7px; min-width: 40px; padding: 6px; border-radius: 4px; }
+  .toggle-track { position: relative; width: 20px; height: 50px; border-radius: 4px;
+    background: linear-gradient(180deg, rgba(0,0,0,0.55), rgba(0,0,0,0.22) 14%, rgba(0,0,0,0.4));
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.65), inset 0 -1px 0 rgba(255,255,255,0.06);
+    border: 1px solid rgba(0,0,0,0.6);
+  }
+  .toggle-lamp { position: absolute; top: -10px; left: 50%; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--lamp-off); transform: translateX(-50%); box-shadow: inset 0 1px 1px rgba(0,0,0,0.6);
+    transition: background 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  }
+  .toggle-track[data-armed="true"] .toggle-lamp { background: var(--amber); box-shadow: 0 0 6px rgba(255,158,61,0.85), inset 0 0 2px rgba(255,255,255,0.5); }
+  .toggle-knob { position: absolute; left: 2px; top: 2px; width: 14px; height: 19px; border-radius: 3px;
+    background: linear-gradient(180deg, var(--metal-hi), var(--metal-mid) 60%, var(--metal-low));
+    box-shadow: 0 2px 3px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.4);
+    transition: top 0.18s var(--ease);
+  }
+  .toggle-track[data-armed="false"] .toggle-knob { top: 29px; }
+
+  .ptt-key { width: 104px; height: 104px; border-radius: var(--r);
+    border: 1px solid rgba(0,0,0,0.55);
+    background: linear-gradient(180deg, var(--metal-hi), var(--metal-mid) 55%, var(--metal-low));
+    box-shadow: 0 6px 0 rgba(20,17,12,0.65), 0 10px 16px rgba(0,0,0,0.5),
+      inset 0 1px 0 rgba(255,255,255,0.5), inset 0 -3px 6px rgba(0,0,0,0.32);
+    display: flex; align-items: center; justify-content: center;
+    transition: transform 0.1s var(--ease), box-shadow 0.1s var(--ease), border-color 0.1s var(--ease);
+  }
+  .ptt-key .nom { font-size: 14px; font-weight: 700; }
+  .ptt-key:hover { filter: brightness(1.05); }
+  .ptt-key:active, .ptt-key.engaged {
+    transform: translateY(4px) scale(0.97);
+    box-shadow: 0 2px 0 rgba(20,17,12,0.6), 0 3px 6px rgba(0,0,0,0.5), inset 0 2px 6px rgba(0,0,0,0.5);
+  }
+  .ptt-key.engaged { border-color: rgba(255,158,61,0.6); }
+  .ptt-key.engaged .nom { color: var(--amber); text-shadow: 0 0 6px rgba(255,158,61,0.6); }
+  .control-caption { font-size: 8px; opacity: 0.68; }
+
+  /* ================= persona / voice position-selectors (stacked) ================= */
+  .selector-row { display: flex; gap: 14px; }
+  .selector { flex: 1; display: flex; flex-direction: column; gap: 7px; }
+  .selector-label { font-size: 8.5px; opacity: 0.75; }
+
+  .rotary { display: flex; flex-direction: column; align-items: center; gap: 5px; }
+  .rotary-row { display: flex; align-items: center; gap: 10px; }
+  .rotary-tick { font-size: 6.5px; color: var(--ink-dim); }
+  .rotary-knob { position: relative; width: 30px; height: 30px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, var(--metal-hi), var(--metal-low) 75%);
+    border: 1px solid rgba(0,0,0,0.5);
+    box-shadow: 0 2px 4px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.3);
+    flex: none;
+  }
+  .rotary-pointer { position: absolute; left: 50%; top: 3px; width: 2px; height: 10px; background: var(--ink);
+    transform: translateX(-50%); border-radius: 1px;
+  }
+  .rotary-current { font-size: 8px; color: var(--amber); text-shadow: 0 0 4px rgba(255,158,61,0.4); font-weight: 700; }
+
+  .rail { display: flex; flex-direction: column; gap: 5px; }
+  .rail-track { position: relative; height: 9px; border-radius: 3px; margin: 8px 4px 0;
+    background: linear-gradient(180deg, rgba(0,0,0,0.5), rgba(0,0,0,0.22));
+    box-shadow: inset 0 2px 3px rgba(0,0,0,0.6);
+  }
+  .rail-stop { position: absolute; top: 50%; width: 6px; height: 6px; border-radius: 50%; background: var(--lamp-off);
+    transform: translate(-50%, -50%); box-shadow: inset 0 1px 1px rgba(0,0,0,0.5);
+  }
+  .rail-stop.s1 { left: 15%; } .rail-stop.s2 { left: 50%; } .rail-stop.s3 { left: 85%; }
+  .rail-stop.active { background: var(--amber); box-shadow: 0 0 6px rgba(255,158,61,0.8); }
+  .rail-pointer { position: absolute; top: -8px; width: 0; height: 0; transform: translateX(-50%);
+    border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 6px solid var(--amber);
+    filter: drop-shadow(0 0 3px rgba(255,158,61,0.55));
+  }
+  .rail-labels { display: flex; justify-content: space-between; margin: 4px 0 0; }
+  .rail-labels span { font-size: 7px; color: var(--ink-dim); }
+  .rail-labels span.active { color: var(--amber); font-weight: 700; text-shadow: 0 0 3px rgba(255,158,61,0.35); }
+
+  .baseplate { display: flex; justify-content: space-between; align-items: center; padding: 10px 20px 15px; opacity: 0.7; }
+  .baseplate .nom { font-size: 7px; letter-spacing: 0.16em; }
+
+  @media (prefers-reduced-motion: reduce) {
+    #needleWrap { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+
+<div class="device">
+  <span class="chassis-screw tl" aria-hidden="true"></span>
+  <span class="chassis-screw tr" aria-hidden="true"></span>
+  <span class="chassis-screw bl" aria-hidden="true"></span>
+  <span class="chassis-screw br" aria-hidden="true"></span>
+
+  <header class="nameplate">
+    <div class="brand nom">COCKPIT<span>FIELD UNIT &middot; VA-1P</span></div>
+    <div class="nameplate-right">
+      <span class="pwr-lamp" aria-hidden="true"></span>
+      <span class="nom tiny">WS 8770</span>
+    </div>
+  </header>
+  <div class="seam" aria-hidden="true"></div>
+
+  <div class="field-body">
+
+    <section aria-label="Voice level meter">
+      <div class="zone-head">
+        <span class="zone-label nom">LEVEL</span>
+        <span class="state-lamps" aria-hidden="true">
+          <span class="lamp" data-lamp="idle"><span class="bulb"></span><span class="nom">IDLE</span></span>
+          <span class="lamp" data-lamp="listening"><span class="bulb"></span><span class="nom">LISTEN</span></span>
+          <span class="lamp" data-lamp="thinking"><span class="bulb"></span><span class="nom">THINK</span></span>
+          <span class="lamp" data-lamp="speaking"><span class="bulb"></span><span class="nom">SPEAK</span></span>
+        </span>
+      </div>
+
+      <div class="meter-housing">
+        <div class="meter-face" id="meterFace">
+          <div class="meter-glass" aria-hidden="true"></div>
+          <svg viewBox="0 0 280 120" aria-hidden="true">
+            <path class="gaugeArc" d="M 46 104 A 94 94 0 0 1 234 104" />
+            <path class="gaugeRedZone" d="M 211.3 45.6 A 94 94 0 0 0 234 104" />
+            <g>
+              <line class="gaugeTick major" x1="46" y1="104" x2="60" y2="104" transform="rotate(0 140 104)" />
+              <line class="gaugeTick" x1="46" y1="104" x2="58" y2="104" transform="rotate(11.25 140 104)" />
+              <line class="gaugeTick major" x1="46" y1="104" x2="60" y2="104" transform="rotate(22.5 140 104)" />
+              <line class="gaugeTick" x1="46" y1="104" x2="58" y2="104" transform="rotate(33.75 140 104)" />
+              <line class="gaugeTick major" x1="46" y1="104" x2="60" y2="104" transform="rotate(45 140 104)" />
+              <line class="gaugeTick" x1="46" y1="104" x2="58" y2="104" transform="rotate(56.25 140 104)" />
+              <line class="gaugeTick major" x1="46" y1="104" x2="60" y2="104" transform="rotate(67.5 140 104)" />
+              <line class="gaugeTick" x1="46" y1="104" x2="58" y2="104" transform="rotate(78.75 140 104)" />
+              <line class="gaugeTick major" x1="46" y1="104" x2="60" y2="104" transform="rotate(90 140 104)" />
+            </g>
+            <text class="gaugeLabel" x="46" y="117">-20</text>
+            <text class="gaugeLabel" x="140" y="15">0</text>
+            <text class="gaugeLabel" x="234" y="117">+3</text>
+          </svg>
+          <div id="needleWrap"><div id="needle"></div></div>
+          <div id="needlePivot"></div>
+        </div>
+        <div class="meter-readout nom">
+          <span>PEAK <b id="gaugePeak">0.06</b></span>
+          <span id="stateTag" class="state-tag" aria-live="polite">STANDBY</span>
+          <span>RMS <b id="gaugeRms">0.04</b></span>
+        </div>
+      </div>
+    </section>
+
+    <section class="lcd-window" aria-label="Assistant output">
+      <div class="lcd-head lcd-label tiny">
+        <span>ASSISTANT</span>
+        <span id="lcdLamp" class="lcd-lamp lit" aria-hidden="true"></span>
+      </div>
+      <p id="assistantText" class="lcd-text" aria-live="polite">Timer set for ten minutes. Anything else?</p>
+    </section>
+
+    <section class="input-row" aria-label="Input controls">
+      <div class="control">
+        <button type="button" id="micToggle" class="toggle-btn" aria-pressed="true" aria-label="Open mic, armed">
+          <span class="nom tiny">ARM</span>
+          <span class="toggle-track" id="toggleTrack" data-armed="true">
+            <span class="toggle-lamp" aria-hidden="true"></span>
+            <span class="toggle-knob" aria-hidden="true"></span>
+          </span>
+          <span class="nom tiny">OFF</span>
+        </button>
+        <div class="control-caption nom tiny">OPEN MIC</div>
+      </div>
+
+      <div class="control">
+        <button type="button" id="ptt" class="ptt-key" aria-pressed="false" aria-label="Push to talk">
+          <span class="nom">TALK</span>
+        </button>
+        <div class="control-caption nom tiny">HOLD TO SPEAK</div>
+      </div>
+    </section>
+
+    <section class="selector-row" aria-label="Persona and voice">
+      <div class="selector">
+        <div class="selector-label nom">PERSONA</div>
+        <div class="rotary" role="img" aria-label="Persona selector, current: Assistant">
+          <div class="rotary-row">
+            <span class="rotary-tick nom">TERSE</span>
+            <div class="rotary-knob" aria-hidden="true"><span class="rotary-pointer"></span></div>
+            <span class="rotary-tick nom">WARM</span>
+          </div>
+          <span class="rotary-current nom">ASSISTANT</span>
+        </div>
+      </div>
+
+      <div class="selector">
+        <div class="selector-label nom">VOICE</div>
+        <div class="rail" role="img" aria-label="Voice selector, current: Jean">
+          <div class="rail-track">
+            <span class="rail-stop s1"></span>
+            <span class="rail-stop s2 active"></span>
+            <span class="rail-stop s3"></span>
+            <span class="rail-pointer" style="left:50%"></span>
+          </div>
+          <div class="rail-labels nom">
+            <span>ROY</span><span class="active">JEAN</span><span>MARA</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+  </div>
+
+  <div class="seam" aria-hidden="true"></div>
+  <footer class="baseplate">
+    <span class="nom">SN VA1P-2026-0813</span>
+    <span class="nom">FIELD UNIT</span>
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var REDUCED = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var html = document.documentElement;
+  var needleWrap = document.getElementById("needleWrap");
+  var peakEl = document.getElementById("gaugePeak");
+  var rmsEl = document.getElementById("gaugeRms");
+  var stateTag = document.getElementById("stateTag");
+  var ptt = document.getElementById("ptt");
+  var lcdLamp = document.getElementById("lcdLamp");
+  var assistantText = document.getElementById("assistantText");
+  var lamps = {};
+  document.querySelectorAll(".lamp").forEach(function (el) {
+    lamps[el.getAttribute("data-lamp")] = el;
+  });
+
+  function setLevel(level) {
+    var clamped = Math.max(0, Math.min(1, level));
+    needleWrap.style.transform = "rotate(" + (-45 + clamped * 90) + "deg)";
+  }
+
+  var STATES = [
+    { id: "idle",      tag: "STANDBY",  ms: 1800 },
+    { id: "listening", tag: "CAPTURING", ms: 2200 },
+    { id: "thinking",  tag: "PROCESSING", ms: 1600 },
+    { id: "speaking",  tag: "PLAYBACK", ms: 2400 }
+  ];
+
+  var jitterTimer = null;
+  function stopJitter() { if (jitterTimer) { clearInterval(jitterTimer); jitterTimer = null; } }
+
+  function startJitter(stateId) {
+    stopJitter();
+    if (REDUCED) return;
+    if (stateId === "idle") { setLevel(0.06); peakEl.textContent = "0.06"; rmsEl.textContent = "0.03"; return; }
+    if (stateId === "thinking") { setLevel(0.17); peakEl.textContent = "0.17"; rmsEl.textContent = "0.12"; return; }
+    var base = stateId === "speaking" ? 0.55 : 0.34;
+    var spread = stateId === "speaking" ? 0.4 : 0.3;
+    jitterTimer = setInterval(function () {
+      var lvl = Math.max(0, Math.min(1, base + (Math.random() - 0.5) * spread * 2));
+      setLevel(lvl);
+      peakEl.textContent = lvl.toFixed(2);
+      rmsEl.textContent = (lvl * 0.7).toFixed(2);
+    }, 130);
+  }
+
+  function apply(idx) {
+    var s = STATES[idx];
+    html.setAttribute("data-state", s.id);
+    stateTag.textContent = s.tag;
+    Object.keys(lamps).forEach(function (k) { lamps[k].classList.toggle("lit", k === s.id); });
+    ptt.classList.toggle("engaged", s.id === "listening");
+    ptt.setAttribute("aria-pressed", s.id === "listening" ? "true" : "false");
+    lcdLamp.classList.toggle("lit", s.id !== "thinking");
+    assistantText.classList.toggle("dim", s.id === "thinking");
+    startJitter(s.id);
+  }
+
+  var i = 1;
+  function loop() {
+    apply(i);
+    if (REDUCED) return;
+    var s = STATES[i];
+    setTimeout(function () { i = (i + 1) % STATES.length; loop(); }, s.ms);
+  }
+  loop();
+
+  var micToggle = document.getElementById("micToggle");
+  var toggleTrack = document.getElementById("toggleTrack");
+  micToggle.addEventListener("click", function () {
+    var armed = micToggle.getAttribute("aria-pressed") === "true";
+    armed = !armed;
+    micToggle.setAttribute("aria-pressed", String(armed));
+    micToggle.setAttribute("aria-label", "Open mic, " + (armed ? "armed" : "off"));
+    toggleTrack.setAttribute("data-armed", String(armed));
+  });
+})();
+</script>
+</body>
+</html>

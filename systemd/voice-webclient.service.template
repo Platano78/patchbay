@@ -1,0 +1,29 @@
+# Template for the static webclient systemd unit.
+# Not installed automatically — copy to /etc/systemd/system/voice-webclient.service,
+# fill in the variables below, then `systemctl daemon-reload && systemctl enable --now voice-webclient`.
+#
+# Variables to substitute:
+#   ${RUN_USER}        - unix user to run the service as
+#   ${HOME_DIR}         - that user's home directory
+#   ${WEBCLIENT_DIR}    - path to this repo's webclient/ directory
+#   ${HTTP_PORT}        - port to serve the cockpit on (default 8770)
+
+[Unit]
+Description=Voice agent static webclient (http :${HTTP_PORT})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${RUN_USER}
+Environment=HOME=${HOME_DIR}
+WorkingDirectory=${WEBCLIENT_DIR}
+ExecStart=/usr/bin/python3 ${WEBCLIENT_DIR}/serve.py --port ${HTTP_PORT}
+Restart=on-failure
+RestartSec=5
+# For HTTPS (required for mic access from non-localhost devices), add
+# --certfile /path/to/cert.pem --keyfile /path/to/key.pem to ExecStart above;
+# see patches/README.md "Remote access / HTTPS".
+
+[Install]
+WantedBy=multi-user.target

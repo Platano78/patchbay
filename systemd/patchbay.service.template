@@ -1,0 +1,47 @@
+# Template for the speech-to-speech pipeline systemd unit.
+# Not installed automatically — copy to /etc/systemd/system/patchbay.service,
+# fill in the variables below, then `systemctl daemon-reload && systemctl enable --now patchbay`.
+#
+# Variables to substitute:
+#   ${RUN_USER}            - unix user to run the service as
+#   ${HOME_DIR}             - that user's home directory
+#   ${VENV_DIR}             - path to the speech-to-speech venv (e.g. $HOME_DIR/speech-to-speech-main/.venv)
+#   ${WORKING_DIR}          - working directory (repo checkout containing brains.json, etc.)
+#   ${WS_PORT}              - WebSocket port the cockpit connects to (default 8765)
+#   ${STT_BACKEND}          - STT backend (default parakeet-tdt)
+#   ${TTS_BACKEND}          - TTS backend (default pocket)
+#   ${TTS_VOICE}            - TTS voice name (default jean)
+#   ${LLM_BASE_URL}         - OpenAI-compatible chat-completions endpoint
+#   ${LLM_MODEL_NAME}       - model id served at that endpoint
+
+[Unit]
+Description=Patchbay speech-to-speech pipeline (ws :${WS_PORT})
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${RUN_USER}
+Environment=HOME=${HOME_DIR}
+WorkingDirectory=${WORKING_DIR}
+# --ws_host 0.0.0.0 binds EVERY interface, including your LAN. Anything that can
+# reach ${WS_PORT} becomes a full screen: live audio, transcripts, persona edits,
+# brain switching. If a VPN is meant to be your perimeter, bind that address (or
+# 127.0.0.1) here instead -- a VPN adds a path, it does not remove the LAN one.
+# Set VOICE_WS_ORIGINS as well; see "Who can connect" in the README.
+ExecStart=${VENV_DIR}/bin/speech-to-speech --mode websocket --ws_host 0.0.0.0 --ws_port ${WS_PORT} --stt ${STT_BACKEND} --parakeet_tdt_device cpu --tts ${TTS_BACKEND} --pocket_tts_voice ${TTS_VOICE} --pocket_tts_device cpu --llm_backend chat-completions --responses_api_base_url ${LLM_BASE_URL} --responses_api_api_key dummy --model_name ${LLM_MODEL_NAME} --responses_api_stream --speculative_reopen_ms=-1 --unanswered_reopen_ms=-1
+Restart=on-failure
+RestartSec=5
+# For remote (non-localhost) mic access over HTTPS, the browser needs wss:// too.
+# See patches/README.md "Remote access / HTTPS" for how to generate a cert.
+# Environment=VOICE_WS_CERTFILE=/path/to/cert.pem
+# Environment=VOICE_WS_KEYFILE=/path/to/key.pem
+
+# Secrets (tokens for optional tool integrations — e.g. HA_TOKEN for the Home
+# Assistant example tool) do NOT belong in Environment= lines: unit files are
+# world-readable via `systemctl cat`. Put them in a mode-0600 env file instead
+# and reference it here:
+# EnvironmentFile=${HOME_DIR}/.config/patchbay/secrets
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="color-scheme" content="dark" />
+<title>Cockpit - Voice Instrument (Service Panel)</title>
+<style>
+  :root {
+    --ease: cubic-bezier(.2, 1.4, .4, 1);
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Consolas, "Liberation Mono", monospace;
+    --grotesk: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+    --room: #0d0b09;
+    --metal-hi: #a89c88;
+    --metal-mid: #7c7263;
+    --metal-low: #4d473c;
+    --metal-shadow: #2c2820;
+
+    --ink: #241f1a;
+    --ink-dim: rgba(36, 31, 26, 0.58);
+    --cream: #ece4d2;
+
+    --amber: #ff9e3d;
+    --amber-deep: #d94a1f;
+    --lamp-off: #4a453b;
+
+    --r: 4px;
+    --r-glass: 6px;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background:
+      radial-gradient(120% 60% at 50% -6%, rgba(255, 210, 160, 0.06), transparent 62%),
+      linear-gradient(180deg, var(--room) 0%, #0a0806 100%);
+    color: var(--ink);
+    font-family: var(--grotesk);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
+    overflow-x: hidden;
+  }
+
+  button, input { font: inherit; color: inherit; background: none; border: none; padding: 0; cursor: pointer; }
+  button:focus-visible, a:focus-visible, input:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
+    outline: 2px solid var(--amber);
+    outline-offset: 2px;
+  }
+  a { color: var(--amber); }
+
+  .nom {
+    font-family: var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: var(--ink);
+    text-shadow: 0 -1px 0 rgba(0, 0, 0, 0.55), 0 1px 0 rgba(255, 255, 255, 0.28);
+  }
+  .nom.tiny { font-size: 9px; letter-spacing: 0.16em; }
+
+  .lcd-label {
+    font-family: var(--mono);
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: rgba(236, 228, 210, 0.48);
+  }
+  .lcd-label.tiny { font-size: 8px; }
+
+  /* ================= device chassis ================= */
+  .device {
+    position: relative;
+    width: min(96vw, 760px);
+    border-radius: var(--r);
+    background:
+      repeating-linear-gradient(90deg, rgba(255,255,255,0.035) 0px, rgba(255,255,255,0.035) 1px, rgba(0,0,0,0.045) 2px, rgba(0,0,0,0.045) 3px),
+      linear-gradient(180deg, rgba(255,255,255,0.09) 0%, rgba(255,255,255,0.015) 14%, rgba(0,0,0,0.05) 58%, rgba(0,0,0,0.2) 100%),
+      linear-gradient(150deg, var(--metal-hi) 0%, var(--metal-mid) 46%, var(--metal-low) 80%, var(--metal-shadow) 100%);
+    box-shadow:
+      inset 0 1px 0 rgba(255,255,255,0.28),
+      inset 0 -2px 0 rgba(0,0,0,0.4),
+      inset 1px 0 0 rgba(255,255,255,0.08),
+      inset -1px 0 0 rgba(0,0,0,0.28),
+      0 30px 60px rgba(0,0,0,0.55),
+      0 10px 20px rgba(0,0,0,0.5);
+    padding: 0;
+  }
+
+  .chassis-screw {
+    position: absolute;
+    width: 9px; height: 9px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, var(--metal-hi), var(--metal-low) 72%);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(0,0,0,0.4);
+    z-index: 2;
+  }
+  .chassis-screw::after {
+    content: ""; position: absolute; left: 50%; top: 50%;
+    width: 6px; height: 1px; background: rgba(0,0,0,0.55);
+    transform: translate(-50%, -50%) rotate(20deg);
+  }
+  .chassis-screw.tl { top: 9px; left: 9px; }
+  .chassis-screw.tr { top: 9px; right: 9px; }
+  .chassis-screw.tr::after { transform: translate(-50%, -50%) rotate(-35deg); }
+  .chassis-screw.bl { bottom: 9px; left: 9px; }
+  .chassis-screw.bl::after { transform: translate(-50%, -50%) rotate(52deg); }
+  .chassis-screw.br { bottom: 9px; right: 9px; }
+  .chassis-screw.br::after { transform: translate(-50%, -50%) rotate(-12deg); }
+
+  .nameplate {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 30px 14px;
+  }
+  .brand { font-size: 13px; font-weight: 700; letter-spacing: 0.28em; }
+  .brand span { display: block; margin-top: 4px; font-size: 8.5px; font-weight: 400; letter-spacing: 0.16em; opacity: 0.62; }
+  .nameplate-right { display: flex; align-items: center; gap: 9px; }
+  .pwr-lamp { width: 6px; height: 6px; border-radius: 50%; background: var(--amber); box-shadow: 0 0 6px rgba(255,158,61,0.75), inset 0 0 2px rgba(255,255,255,0.4); }
+
+  .seam { height: 3px; margin: 0 22px; background: linear-gradient(180deg, rgba(0,0,0,0.5), rgba(255,255,255,0.07) 55%, rgba(0,0,0,0.2)); border-radius: 2px; }
+
+  .panel-body { padding: 26px 30px 8px; display: flex; flex-direction: column; gap: 22px; }
+  .panel-lede { display: flex; justify-content: space-between; align-items: baseline; }
+  .panel-lede .nom { font-size: 10px; opacity: 0.82; }
+  .panel-lede a.nom { font-size: 9px; text-decoration: none; opacity: 0.9; }
+  .panel-lede a.nom:hover { text-shadow: 0 0 6px rgba(255,158,61,0.5); }
+
+  /* ================= front-face controls ================= */
+  .row { display: grid; grid-template-columns: 132px 1fr; align-items: center; gap: 18px; padding: 4px 0; }
+  .row + .row { border-top: 1px solid rgba(0,0,0,0.35); padding-top: 16px; }
+  .row-label { display: flex; flex-direction: column; gap: 3px; }
+  .row-label .nom { font-size: 10px; }
+  .row-label .hint { font-size: 8px; opacity: 0.55; }
+
+  .rail { display: flex; flex-direction: column; gap: 6px; max-width: 340px; }
+  .rail-track { position: relative; height: 10px; border-radius: 3px; margin: 8px 4px 0;
+    background: linear-gradient(180deg, rgba(0,0,0,0.5), rgba(0,0,0,0.22));
+    box-shadow: inset 0 2px 3px rgba(0,0,0,0.6);
+  }
+  .rail-stop { position: absolute; top: 50%; width: 6px; height: 6px; border-radius: 50%; background: var(--lamp-off);
+    transform: translate(-50%, -50%); box-shadow: inset 0 1px 1px rgba(0,0,0,0.5);
+  }
+  .rail-stop.s1 { left: 15%; } .rail-stop.s2 { left: 50%; } .rail-stop.s3 { left: 85%; }
+  .rail-stop.active { background: var(--amber); box-shadow: 0 0 6px rgba(255,158,61,0.8); }
+  .rail-pointer { position: absolute; top: -9px; width: 0; height: 0; transform: translateX(-50%);
+    border-left: 4px solid transparent; border-right: 4px solid transparent; border-top: 6px solid var(--amber);
+    filter: drop-shadow(0 0 3px rgba(255,158,61,0.55));
+  }
+  .rail-labels { display: flex; justify-content: space-between; margin: 4px 0 0; }
+  .rail-labels span { font-size: 8px; color: var(--ink-dim); }
+  .rail-labels span.active { color: var(--amber); font-weight: 700; text-shadow: 0 0 3px rgba(255,158,61,0.35); }
+
+  .effective-readout { margin-top: 8px; padding: 7px 10px; border-radius: var(--r);
+    background: linear-gradient(160deg, #1c1712, #100d0a);
+    box-shadow: inset 0 2px 5px rgba(0,0,0,0.7), inset 0 0 0 1px rgba(0,0,0,0.6);
+    display: flex; justify-content: space-between; gap: 10px; max-width: 340px;
+  }
+  .effective-readout .lcd-label { font-size: 8px; }
+  .effective-readout b { font-family: var(--mono); font-size: 10px; color: var(--amber);
+    text-shadow: 0 0 4px rgba(255,158,61,0.4); font-weight: 700; letter-spacing: 0.02em;
+  }
+
+  .rotary { display: flex; flex-direction: column; align-items: center; gap: 6px; width: fit-content; }
+  .rotary-row { display: flex; align-items: center; gap: 12px; }
+  .rotary-tick { font-size: 7.5px; color: var(--ink-dim); }
+  .rotary-knob { position: relative; width: 32px; height: 32px; border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%, var(--metal-hi), var(--metal-low) 75%);
+    border: 1px solid rgba(0,0,0,0.5);
+    box-shadow: 0 2px 4px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.3);
+    flex: none;
+  }
+  .rotary-pointer { position: absolute; left: 50%; top: 3px; width: 2px; height: 11px; background: var(--ink);
+    transform: translateX(-50%); border-radius: 1px;
+  }
+  .rotary-current { font-size: 9px; color: var(--amber); text-shadow: 0 0 4px rgba(255,158,61,0.4); font-weight: 700; }
+
+  .row-persona { grid-template-columns: 132px 1fr auto; }
+  .persona-link { align-self: center; white-space: nowrap; }
+
+  /* ================= service panel disclosure ================= */
+  .service-panel { margin-top: 6px; }
+  .service-panel summary {
+    list-style: none; cursor: pointer; display: flex; align-items: center; gap: 10px;
+    padding: 11px 14px; border-radius: var(--r);
+    background: linear-gradient(180deg, var(--metal-mid), var(--metal-low));
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.15), inset 0 -2px 4px rgba(0,0,0,0.4), 0 2px 6px rgba(0,0,0,0.3);
+  }
+  .service-panel summary::-webkit-details-marker { display: none; }
+  .service-panel summary .nom { font-size: 10px; }
+  .service-panel summary .disc-lamp { width: 6px; height: 6px; border-radius: 50%; background: var(--lamp-off);
+    box-shadow: inset 0 1px 1px rgba(0,0,0,0.6); transition: background 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  }
+  .service-panel[open] summary .disc-lamp { background: var(--amber); box-shadow: 0 0 6px rgba(255,158,61,0.85), inset 0 0 2px rgba(255,255,255,0.5); }
+  .service-panel summary .disc-caret { margin-left: auto; font-size: 9px; opacity: 0.6; transition: transform 0.15s var(--ease); }
+  .service-panel[open] summary .disc-caret { transform: rotate(90deg); }
+
+  .service-body { margin-top: 10px; padding: 18px 16px 20px; border-radius: var(--r);
+    background: linear-gradient(160deg, #211c16, #14100c);
+    box-shadow: inset 0 2px 8px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(0,0,0,0.5);
+    display: flex; flex-direction: column; gap: 18px;
+  }
+  .service-row { display: grid; grid-template-columns: 140px 1fr; align-items: center; gap: 14px; }
+  .service-row + .service-row { border-top: 1px solid rgba(0,0,0,0.4); padding-top: 16px; }
+  .service-row .lcd-label { font-size: 9px; }
+  .service-row .hint { font-size: 8px; color: rgba(236,228,210,0.32); margin-top: 2px; }
+
+  /* jack input: LCD-lit text field */
+  .jack {
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 10px; border-radius: var(--r); max-width: 380px;
+    background: linear-gradient(160deg, #1c1712, #100d0a);
+    box-shadow: inset 0 2px 6px rgba(0,0,0,0.7), inset 0 0 0 1px rgba(0,0,0,0.6);
+  }
+  .jack .lcd-lamp { width: 5px; height: 5px; border-radius: 50%; background: var(--amber); flex: none;
+    box-shadow: 0 0 5px rgba(255,158,61,0.7);
+  }
+  .jack input { flex: 1; font-family: var(--mono); font-size: 12px; color: var(--cream); letter-spacing: 0.02em; }
+  .jack input::placeholder { color: rgba(236,228,210,0.3); }
+
+  /* horizontal throw switch */
+  .switch-h { display: inline-flex; align-items: center; gap: 8px; }
+  .switch-h .nom { font-size: 8px; }
+  .switch-track-h { position: relative; width: 44px; height: 20px; border-radius: 4px;
+    background: linear-gradient(180deg, rgba(0,0,0,0.55), rgba(0,0,0,0.22) 14%, rgba(0,0,0,0.4));
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.65), inset 0 -1px 0 rgba(255,255,255,0.06);
+    border: 1px solid rgba(0,0,0,0.6);
+  }
+  .switch-lamp-h { position: absolute; top: 50%; right: -10px; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--lamp-off); transform: translateY(-50%); box-shadow: inset 0 1px 1px rgba(0,0,0,0.6);
+    transition: background 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  }
+  .switch-track-h[data-on="true"] .switch-lamp-h { background: var(--amber); box-shadow: 0 0 6px rgba(255,158,61,0.85), inset 0 0 2px rgba(255,255,255,0.5); }
+  .switch-knob-h { position: absolute; top: 2px; left: 2px; width: 18px; height: 14px; border-radius: 3px;
+    background: linear-gradient(180deg, var(--metal-hi), var(--metal-mid) 60%, var(--metal-low));
+    box-shadow: 0 2px 3px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.4);
+    transition: left 0.18s var(--ease);
+  }
+  .switch-track-h[data-on="true"] .switch-knob-h { left: 24px; }
+  .switch-h-btn { display: flex; align-items: center; gap: 10px; }
+
+  /* theme swatches, demoted */
+  .swatch-row { display: flex; align-items: center; gap: 8px; padding-top: 4px; opacity: 0.72; }
+  .swatch-row .lcd-label { font-size: 7.5px; margin-right: 2px; }
+  .swatch { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.5);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.15);
+    transition: transform 0.1s var(--ease), box-shadow 0.1s var(--ease);
+  }
+  .swatch:hover { transform: scale(1.08); }
+  .swatch.active { box-shadow: 0 0 0 2px var(--amber), inset 0 1px 0 rgba(255,255,255,0.15); }
+  .swatch.amber-dark { background: linear-gradient(150deg, #6b6152, #2c2820); }
+  .swatch.slate { background: linear-gradient(150deg, #6c7278, #23262b); }
+  .swatch.olive { background: linear-gradient(150deg, #7a7a52, #2a2a1c); }
+
+  .baseplate { display: flex; justify-content: space-between; align-items: center; padding: 20px 30px 20px; opacity: 0.7; }
+  .baseplate .nom { font-size: 8px; letter-spacing: 0.18em; }
+
+  @media (max-width: 620px) {
+    .row, .service-row { grid-template-columns: 1fr; gap: 8px; }
+    .row-persona { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="device">
+  <span class="chassis-screw tl" aria-hidden="true"></span>
+  <span class="chassis-screw tr" aria-hidden="true"></span>
+  <span class="chassis-screw bl" aria-hidden="true"></span>
+  <span class="chassis-screw br" aria-hidden="true"></span>
+
+  <header class="nameplate">
+    <div class="brand nom">COCKPIT<span>VOICE INSTRUMENT &middot; SERVICE PANEL</span></div>
+    <div class="nameplate-right">
+      <span class="pwr-lamp" aria-hidden="true"></span>
+      <span class="nom tiny">CONNECTED - WS 8770</span>
+    </div>
+  </header>
+  <div class="seam" aria-hidden="true"></div>
+
+  <div class="panel-body">
+    <div class="panel-lede">
+      <span class="nom">FRONT FACE CONTROLS</span>
+      <a class="nom" href="#" tabindex="-1">RETURN TO COCKPIT &rarr;</a>
+    </div>
+
+    <div class="row">
+      <div class="row-label">
+        <span class="nom">BRAIN</span>
+        <span class="hint">reasoning model</span>
+      </div>
+      <div>
+        <div class="rail" role="img" aria-label="Brain selector, current: gemma4-e4b">
+          <div class="rail-track">
+            <span class="rail-stop s1"></span>
+            <span class="rail-stop s2 active"></span>
+            <span class="rail-stop s3"></span>
+            <span class="rail-pointer" style="left:50%"></span>
+          </div>
+          <div class="rail-labels nom">
+            <span>QWEN-27B</span><span class="active">GEMMA4-E4B</span><span>FRONTIER</span>
+          </div>
+        </div>
+        <div class="effective-readout">
+          <span class="lcd-label">EFFECTIVE MODEL</span>
+          <b>gemma-4-e4b-instruct-q6</b>
+        </div>
+      </div>
+    </div>
+
+    <div class="row row-persona">
+      <div class="row-label">
+        <span class="nom">PERSONA</span>
+        <span class="hint">quick pick</span>
+      </div>
+      <div class="rotary" role="img" aria-label="Persona selector, current: Assistant">
+        <div class="rotary-row">
+          <span class="rotary-tick nom">TERSE</span>
+          <div class="rotary-knob" aria-hidden="true"><span class="rotary-pointer"></span></div>
+          <span class="rotary-tick nom">WARM</span>
+        </div>
+        <span class="rotary-current nom">ASSISTANT</span>
+      </div>
+      <a class="nom persona-link" href="#" tabindex="-1">&rarr; PERSONA WORKSHOP</a>
+    </div>
+
+    <div class="row">
+      <div class="row-label">
+        <span class="nom">VOICE</span>
+        <span class="hint">TTS output</span>
+      </div>
+      <div class="rail" role="img" aria-label="Voice selector, current: Jean">
+        <div class="rail-track">
+          <span class="rail-stop s1"></span>
+          <span class="rail-stop s2 active"></span>
+          <span class="rail-stop s3"></span>
+          <span class="rail-pointer" style="left:50%"></span>
+        </div>
+        <div class="rail-labels nom">
+          <span>ALBA</span><span class="active">JEAN</span><span>FANTINE</span>
+        </div>
+        <div class="jack" style="margin-top:4px;">
+          <span class="lcd-lamp" aria-hidden="true"></span>
+          <input type="text" placeholder="SEARCH 26 VOICES..." aria-label="Search voices" />
+        </div>
+      </div>
+    </div>
+
+    <details class="service-panel">
+      <summary>
+        <span class="disc-lamp" aria-hidden="true"></span>
+        <span class="nom">SERVICE PANEL &middot; ADVANCED</span>
+        <span class="disc-caret nom" aria-hidden="true">&#9656;</span>
+      </summary>
+
+      <div class="service-body">
+        <div class="service-row">
+          <div>
+            <div class="lcd-label">WS URL</div>
+            <div class="hint">socket endpoint</div>
+          </div>
+          <div class="jack">
+            <span class="lcd-lamp" aria-hidden="true"></span>
+            <input type="text" value="wss://cockpit.local:8770/ws" aria-label="Websocket URL" />
+          </div>
+        </div>
+
+        <div class="service-row">
+          <div>
+            <div class="lcd-label">WAKE WORD</div>
+            <div class="hint">hey_jarvis / alexa / hey_mycroft</div>
+          </div>
+          <div class="switch-h-btn">
+            <button type="button" class="switch-h" data-toggle="wake" aria-pressed="true" aria-label="Wake word, enabled">
+              <span class="switch-track-h" data-on="true">
+                <span class="switch-knob-h" aria-hidden="true"></span>
+                <span class="switch-lamp-h" aria-hidden="true"></span>
+              </span>
+            </button>
+            <span class="nom tiny">ENABLED</span>
+          </div>
+        </div>
+
+        <div class="service-row">
+          <div>
+            <div class="lcd-label">PHONE CONTEXT</div>
+            <div class="hint">device presence fields</div>
+          </div>
+          <div class="switch-h-btn">
+            <button type="button" class="switch-h" data-toggle="phone" aria-pressed="false" aria-label="Phone context, disabled">
+              <span class="switch-track-h" data-on="false">
+                <span class="switch-knob-h" aria-hidden="true"></span>
+                <span class="switch-lamp-h" aria-hidden="true"></span>
+              </span>
+            </button>
+            <span class="nom tiny">DISABLED</span>
+          </div>
+        </div>
+
+        <div class="service-row">
+          <div>
+            <div class="lcd-label">VOICE CLONING</div>
+            <div class="hint">clip-based voice conditioning</div>
+          </div>
+          <div class="switch-h-btn">
+            <button type="button" class="switch-h" data-toggle="clone" aria-pressed="false" aria-label="Voice cloning, disabled">
+              <span class="switch-track-h" data-on="false">
+                <span class="switch-knob-h" aria-hidden="true"></span>
+                <span class="switch-lamp-h" aria-hidden="true"></span>
+              </span>
+            </button>
+            <span class="nom tiny">DISABLED</span>
+          </div>
+        </div>
+
+        <div class="service-row">
+          <div>
+            <div class="lcd-label">THEME</div>
+            <div class="hint">faceplate finish</div>
+          </div>
+          <div class="swatch-row">
+            <button type="button" class="swatch amber-dark active" aria-label="Amber dark theme" aria-pressed="true"></button>
+            <button type="button" class="swatch slate" aria-label="Slate theme" aria-pressed="false"></button>
+            <button type="button" class="swatch olive" aria-label="Olive theme" aria-pressed="false"></button>
+          </div>
+        </div>
+      </div>
+    </details>
+  </div>
+
+  <div class="seam" aria-hidden="true"></div>
+  <footer class="baseplate">
+    <span class="nom">SN VA1-2026-0813</span>
+    <span class="nom">LOCAL VOICE INSTRUMENT</span>
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  document.querySelectorAll(".switch-h").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var track = btn.querySelector(".switch-track-h");
+      var label = btn.parentElement.querySelector(".nom.tiny");
+      var on = track.getAttribute("data-on") === "true";
+      on = !on;
+      track.setAttribute("data-on", String(on));
+      btn.setAttribute("aria-pressed", String(on));
+      var key = btn.getAttribute("data-toggle");
+      var names = { wake: "Wake word", phone: "Phone context", clone: "Voice cloning" };
+      btn.setAttribute("aria-label", names[key] + ", " + (on ? "enabled" : "disabled"));
+      if (label) label.textContent = on ? "ENABLED" : "DISABLED";
+    });
+  });
+
+  document.querySelectorAll(".swatch").forEach(function (sw) {
+    sw.addEventListener("click", function () {
+      document.querySelectorAll(".swatch").forEach(function (s) {
+        s.classList.remove("active");
+        s.setAttribute("aria-pressed", "false");
+      });
+      sw.classList.add("active");
+      sw.setAttribute("aria-pressed", "true");
+    });
+  });
+})();
+</script>
+</body>
+</html>

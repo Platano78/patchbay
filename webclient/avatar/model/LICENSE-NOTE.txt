@@ -1,0 +1,94 @@
+Avatar: brunette-t.glb (T-pose variant of "brunette.glb")
+
+Source: https://github.com/met4citizen/TalkingHead
+Fetched: https://raw.githubusercontent.com/met4citizen/TalkingHead/main/avatars/brunette-t.glb
+Fetched date: 2026-07-04
+
+Per the TalkingHead repository README (https://github.com/met4citizen/TalkingHead/blob/main/README.md),
+section "Licenses, attributions and notes related to the index.html web app assets":
+
+  Example avatar "brunette.glb" was created at Ready Player Me (https://readyplayer.me/).
+  The avatar is free to all developers for non-commercial use under the
+  CC BY-NC 4.0 DEED (https://creativecommons.org/licenses/by-nc/4.0/).
+
+This is a placeholder/personal-use asset. Per the vendor-staging slice ruling, the user may
+swap in their own Ready Player Me (or other) GLB later for any non-personal use.
+
+---
+
+Avatar: avatarsdk.glb (Tier 1 avatar-theming proof: distinct per-theme model,
+assigned to the "chainsawman" custom theme in themes/themes.json)
+
+Source: https://github.com/met4citizen/TalkingHead
+Fetched: https://raw.githubusercontent.com/met4citizen/TalkingHead/main/avatars/avatarsdk.glb
+Fetched date: 2026-07-04
+
+Per the same TalkingHead README section:
+
+  Example avatar "avatarsdk.glb" was created at AvatarSDK (https://avatarsdk.com) for
+  non-commercial use.
+
+Verified before adoption: loads via TalkingHead's showAvatar() with no console errors,
+and its morph target dictionary includes ARKit-style viseme/blendshape keys (browDownLeft,
+eyeBlinkLeft, etc.) required for lip-sync. Uses its own mesh/material naming convention
+(AvatarBody/AvatarHead/AvatarLeftEyeball/AvatarRightEyeball/outfit_top, not RPM's Wolf3D_*)
+— see avatar/avatar.mjs SLOT_TO_MATERIAL for how both naming conventions are mapped to the
+same semantic material slots (hair/skin/top/eyes) used by themes.json.
+
+Same license tier as brunette-t.glb (non-commercial) — placeholder/personal-use asset.
+
+---
+
+Avatar: avaturn.glb, mpfb.glb, vroid.glb, brunette.glb (4 additional 3D heads
+added to the avatar dropdown; brunette.glb is the A-pose variant of "brunette-t.glb")
+
+Source: https://github.com/met4citizen/TalkingHead
+Fetched: https://raw.githubusercontent.com/met4citizen/TalkingHead/main/avatars/{avaturn,mpfb,vroid,brunette}.glb
+Fetched date: 2026-07-05
+
+Per the same TalkingHead README section, each has its OWN license (they are not uniform):
+
+  Example avatar "brunette.glb" was created at Ready Player Me (https://readyplayer.me/).
+  Free to all developers for non-commercial use under CC BY-NC 4.0 DEED — same terms as
+  brunette-t.glb above.
+
+  Example avatar "mpfb.glb" was created using Blender and the MPFB extension
+  (https://static.makehumancommunity.org/mpfb.html). Licensed under CC0
+  (https://creativecommons.org/public-domain/cc0/) — public domain.
+
+  Example avatar "avatar.glb" (fetched here as "avaturn.glb", matching this repo's own
+  avatars/ filename) was created at Avaturn (https://avaturn.me) for non-commercial use.
+
+  Example avatar "vroid.glb" was created using VRoid Studio (https://vroid.com/en/studio)
+  for non-commercial use. Per the README: "The licensing model is not CC0, but very
+  permissive."
+
+All four are placeholder/personal-use assets, same tier as the two above, except mpfb.glb
+which is CC0 (public domain) and thus unrestricted.
+
+---
+
+Avatar: old-man.glb, young-woman.glb, heavyset-neutral.glb, professional-woman.glb,
+young-man.glb, elder-woman.glb (6 additional 3D heads, added to the avatar dropdown
+as the "Forge" entries)
+
+Source: generated in-house 2026-07-05 by this project's own parametric forge
+(forge.py, headless Blender 4.5.11 LTS + MPFB 2.0.16); spec files live in the
+avatar-forge workspace.
+Generated date: 2026-07-05
+
+Mesh, morph targets, textures, and all fitted assets come from three official
+MakeHuman Community asset packs (makehuman_system_assets CC0 variant, visemes02,
+faceunits01; downloaded from files.makehumancommunity.org 2026-07-05). Every asset
+entry in all three packs declares `license: "CC0"` in the packs' own manifests
+(packs/<name>.json inside the official zips; verified per-entry 2026-07-05:
+94 + 15 + 52 entries, all CC0). Viseme/faceunit morphs authored by Mika Suominen
+(CC0, per manifest).
+
+The armature/skeleton derives from the TalkingHead project's MPFB rig
+(talkinghead.mpfbskel / talkinghead.mhw, https://github.com/met4citizen/TalkingHead,
+MIT license) — attribution provided here per MIT terms.
+
+Net: the GLB files are distributed under CC0 for the mesh/morph/texture content,
+with the embedded rig attributed under MIT license (see TalkingHead's own LICENSE
+for full text). No Ready Player Me content, no non-commercial-restricted content.
