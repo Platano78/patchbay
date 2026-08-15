@@ -1,4 +1,4 @@
-# Voice Client Theme Spec
+# Patchbay Theme Spec
 
 > **STATUS (2026-08-15, instrument port):** the client's base look is now the
 > **Analog Studio Instrument** faceplate (`data-theme="instrument"` is the only
@@ -13,7 +13,7 @@
 > examples, read them from git history (`git show cba3f4c:webclient/index.html` — the last pre-port tree).
 
 Written for an LLM (or a human) tasked with building the user a **custom theme**
-for the voice-agent web client (`webclient/index.html`).
+for the Patchbay web client (`webclient/index.html`).
 
 ## The one rule that matters
 
