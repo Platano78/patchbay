@@ -121,82 +121,19 @@ second copy of STT+TTS on CPU. Per-client sessions inside one instance would
 require restructuring the upstream framework's single-conversation design and
 is not planned.
 
-## Prerequisites
+## Setup
 
-- An **OpenAI-compatible chat-completions LLM endpoint** (local or remote).
-- Enough CPU/GPU for **STT** (`parakeet-tdt`) and **TTS** (`pocket`, the
-  default) — both run fine CPU-only; a GPU only helps the LLM. The optional
-  `remote-speech` TTS backend (see *TTS backends*) offloads synthesis to
-  another server entirely, at the cost of `pocket` still needing to be
-  installed as its fallback.
-- Python 3.10+, `git`.
+Self-hosting this requires an OpenAI-compatible chat-completions LLM
+endpoint (local or remote), Python 3.10+, and `git`. STT (`parakeet-tdt`)
+and TTS (`pocket`, the default) both run CPU-only — a GPU only helps the LLM
+you point it at.
 
-## Self-host setup
-
-```bash
-# 1. Clone and pin the framework at the commit this pack was built against
-git clone https://github.com/huggingface/speech-to-speech.git speech-to-speech-main
-cd speech-to-speech-main
-git checkout 1e63f7e9343e491809d0d60e64f7ea551dbe845a
-
-# 2. Create a venv and install (CPU-only torch/torchaudio is fine)
-python3 -m venv .venv
-.venv/bin/pip install -e ".[kokoro]"
-.venv/bin/pip install -e ".[pocket,websocket]"
-
-# 3. Apply this cockpit's patch pack on top of the editable install
-bash /path/to/patchbay/patches/apply.sh
-
-# 4. Configure your brain(s)
-cp /path/to/patchbay/brains.json.example /path/to/patchbay/brains.json
-# edit brains.json: base_url / model / api_key(_file) for each backend you want.
-# The pipeline locates this file via the BRAINS_JSON env var (default
-# ~/speech-to-speech/brains.json) — export it to point at the file you just
-# created (done in step 5 below), or move the file to that default path.
-#
-# NOTE the two directories are different on purpose:
-#   ~/speech-to-speech-main/   the framework INSTALL tree (step 1, replaceable)
-#   ~/speech-to-speech/        the CONFIG sidecar — brains.json, persona.json,
-#                              model_overrides.json, voices/
-# Config lives outside the install tree so reinstalling or upgrading the
-# framework never touches your brains, personas, or cloned voices.
-
-# 5. Run the pipeline, pointing --responses_api_base_url / --model_name at
-#    your own endpoint (these are the flags patches/apply.sh's target reads
-#    at startup; brains.json lets you add more brains to hot-swap between
-#    afterwards):
-BRAINS_JSON=/path/to/patchbay/brains.json \
-.venv/bin/speech-to-speech \
-  --mode websocket --ws_host 0.0.0.0 --ws_port 8765 \
-  --stt parakeet-tdt --parakeet_tdt_device cpu \
-  --tts pocket --pocket_tts_voice jean --pocket_tts_device cpu \
-  --llm_backend chat-completions \
-  --responses_api_base_url http://localhost:8084/v1 \
-  --responses_api_api_key dummy \
-  --model_name <your-model-name> \
-  --responses_api_stream
-
-# 6. Serve the cockpit
-python3 /path/to/patchbay/webclient/serve.py --port 8770
-```
-
-Then open `http://<host>:8770` in a browser.
-
-Key flags to point at your own infrastructure:
-
-| Flag | Purpose |
-|---|---|
-| `--responses_api_base_url` | your OpenAI-compatible LLM endpoint |
-| `--model_name` | model id served at that endpoint |
-| `--stt` | STT backend (`parakeet-tdt` by default) |
-| `--tts` | TTS backend (`pocket` by default; `remote-speech` is opt-in, see *TTS backends*) |
-| `--remote_speech_base_url` | `remote-speech` server URL (any OpenAI-compatible `/v1/audio/speech` endpoint); unset disables the backend |
-| `--remote_speech_fallback_preload` | preload `remote-speech`'s `pocket` fallback at startup instead of on first failover (default `False`) |
-| `--ws_port` | WebSocket port the cockpit connects to |
-
-See `patches/README.md` for what the patch pack changes and why, and
-`systemd/*.template` for a reference of running both processes as systemd
-services.
+**Full step-by-step runbook: [SETUP.md](SETUP.md).** It's written to be
+followed exactly — one command per step, an expected output to check
+against, and a fallback for when it doesn't match — including `./setup.sh
+--check` to verify an existing install, configuring `brains.json`, the
+`patches/README.md` reference for what the patch pack changes, and
+`systemd/*.template` for running both processes as services.
 
 ## Bundled assets & what you supply
 
