@@ -6,12 +6,16 @@ check-theme.py (gate 1) verifies every selector is scoped under
 [data-theme="<id>"]. It says nothing about whether the id/class names inside
 that selector still exist - a DOM port can silently orphan a rule (the class
 was renamed/removed) and check-theme.py will still pass it. This script
-closes that gap, plus a subtler one a name-grep would miss entirely: a
+closes that gap, plus two subtler ones a name-grep would miss entirely: a
 selector can name two ids/classes that both still exist, joined by a `~`/`+`
 sibling combinator, while the two elements are no longer actual DOM siblings
-- that combinator can then never match anything, forever, silently.
+- that combinator can then never match anything, forever, silently. And a
+selector can put a combinator in front of a bare `html` type selector (e.g.
+`[data-theme="x"] html[data-va-state="connected"] ...`) - `<html>` is the
+document root, so it can never be a descendant/child/sibling of anything,
+and that branch can never match either.
 
-Two checks, per style-rule selector (after the same @keyframes/@media/
+Three checks, per style-rule selector (after the same @keyframes/@media/
 @font-face preprocessing check-theme.py applies):
 
 1. Existence - every `#id` / `.class` token in the selector (including ones
@@ -38,9 +42,18 @@ Two checks, per style-rule selector (after the same @keyframes/@media/
    means), this prints a WARNING naming exactly what couldn't be verified,
    rather than silently skipping it or falsely failing it.
 
+3. Impossible-root-combinator check - for every compound in a selector
+   branch whose type selector is the bare element `html`, confirm it is
+   NOT preceded by a combinator (' ', '>', '~', '+'). `[data-theme="x"]` is
+   itself set on `<html>`, so a compound selector like
+   `[data-theme="x"] html[...]` is a common way to write this bug: it reads
+   as "theme x, then somewhere inside it an html element", which can never
+   exist. No DOM lookup needed - this is purely structural.
+
 Usage: check-hooks.py <path-to-id.css> <path-to-index.html>
-Exit 0: every id/class token exists and every sibling combinator found is
-        structurally possible.
+Exit 0: every id/class token exists, every sibling combinator found is
+        structurally possible, and no combinator precedes an `html` type
+        selector.
 Exit 1: prints each offending selector, one per line, then exits nonzero.
 Stdlib only.
 """
@@ -186,6 +199,14 @@ def extract_hook_tokens(text: str):
     return [(m.group(1), m.group(2)) for m in re.finditer(r"([#.])([\w-]+)", stripped)]
 
 
+def is_html_type_selector(compound: str) -> bool:
+    """True if `compound`'s own type selector is the bare element `html`
+    (optionally followed by attribute selectors / pseudo-classes, e.g.
+    `html[data-va-state="connected"]:not(...)`) - not merely a token that
+    happens to contain "html" as a substring of some other name."""
+    return re.match(r"html(?![\w-])", compound) is not None
+
+
 def anchor_token(compound: str):
     """The one id/class a `~`/`+` combinator check keys off: the compound's
     own id if it has one (most specific), else its first class. `None` if
@@ -218,6 +239,7 @@ def check(css_path: str, html_path: str):
 
     missing = []           # (selector, kind, name)
     combinator_fail = []   # detail string
+    html_combinator_fail = []  # detail string - see is_html_type_selector()
     warnings = []          # detail string
 
     cur = ""
@@ -237,6 +259,20 @@ def check(css_path: str, html_path: str):
 
                     parts = split_combinators(branch)
                     for idx, (comb, compound) in enumerate(parts):
+                        # <html> is the document root - it can never be a
+                        # descendant, child, or sibling of anything, so ANY
+                        # combinator (' ', '>', '~', '+') preceding an `html`
+                        # type selector makes the branch structurally
+                        # impossible, the same defect class as the `~`/`+`
+                        # sibling check below, just against the root instead
+                        # of a sibling.
+                        if comb is not None and is_html_type_selector(compound):
+                            html_combinator_fail.append(
+                                f"{branch}: '{compound}' is preceded by a '{comb}' combinator, "
+                                f"but 'html' is the document root and can never be a descendant, "
+                                f"child, or sibling of anything - this can never match"
+                            )
+
                         if comb not in ("~", "+"):
                             continue
                         left, right = parts[idx - 1][1], compound
@@ -276,7 +312,7 @@ def check(css_path: str, html_path: str):
         else:
             cur += ch
 
-    return missing, combinator_fail, warnings
+    return missing, combinator_fail, html_combinator_fail, warnings
 
 
 def main() -> int:
@@ -284,12 +320,12 @@ def main() -> int:
         print("usage: check-hooks.py <path-to-id.css> <path-to-index.html>", file=sys.stderr)
         return 2
     css_path, html_path = sys.argv[1], sys.argv[2]
-    missing, combinator_fail, warnings = check(css_path, html_path)
+    missing, combinator_fail, html_combinator_fail, warnings = check(css_path, html_path)
 
     for w in warnings:
         print(f"WARNING {css_path}: {w}")
 
-    if not missing and not combinator_fail:
+    if not missing and not combinator_fail and not html_combinator_fail:
         print(f"OK   {css_path}: every id/class hook exists and every sibling combinator found is structurally possible")
         return 0
 
@@ -300,6 +336,10 @@ def main() -> int:
     if combinator_fail:
         print(f"FAIL {css_path}: {len(combinator_fail)} impossible sibling combinator(s):")
         for detail in combinator_fail:
+            print(f"  - {detail}")
+    if html_combinator_fail:
+        print(f"FAIL {css_path}: {len(html_combinator_fail)} impossible 'html'-as-descendant combinator(s):")
+        for detail in html_combinator_fail:
             print(f"  - {detail}")
     return 1
 

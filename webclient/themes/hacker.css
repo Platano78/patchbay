@@ -1,79 +1,80 @@
-/* Terminal — the same Analog Studio Instrument, re-manufactured as 1980s
-   computer-room terminal hardware (VT-series / IBM-3270 plastic), not the
-   "green text on black" hacker cliche. Brushed metal -> beige injection-
-   moulded plastic. Amber lamps -> P1 phosphor green, red-zone -> P3 amber
-   phosphor. Engraved nomenclature -> flat silkscreen legend printing.
-   LCD windows / VU meter -> CRT phosphor glass with scanlines and bloom. */
+/* Terminal — NOT a re-manufactured faceplate. The Analog Studio Instrument
+   is a control panel you look AT (knobs, keys, a VU gauge on machined
+   metal); Terminal is a single phosphor SCREEN you look INTO — a VT-series
+   CRT with no knobs and no meter glass. Everything the instrument prints on
+   bare metal, Terminal renders as green text on a dark tube. The centrepiece
+   changes (an oscilloscope trace replaces the analog needle gauge) and the
+   whole page reflows: instead of INPUT / LEVEL / OUTPUT as three side-by-side
+   columns, Terminal reads top-to-bottom like a session transcript with a
+   command prompt at the bottom.
+
+   Because the "chassis" is now a dark tube rather than bright brushed metal,
+   every engraved-nomenclature surface collapses to the SAME contrast case —
+   light phosphor text on dark glass — everywhere, not the instrument's
+   ink-on-metal / cream-on-panel split. That's why this file needs far fewer
+   per-component contrast overrides than a literal recolor would. */
 
 [data-theme="hacker"] {
-  /* ── Instrument primitives (re-skins the whole faceplate in one move) ── */
-  --room: #141310;
-  --metal-hi: #d9d3c1;
-  --metal-mid: #b7b09b;
-  --metal-low: #948a70;
-  --metal-shadow: #5f5745;
-  --ink: #221e17;
-  --ink-dim: rgba(34, 30, 23, 0.8);
-  --cream: #7dff9f;
-  --amber: #33ff66;
-  --amber-deep: #ffb000;
-  --lamp-off: #3a3830;
-  --r: 4px;
-  --r-glass: 6px;
+  /* ── Instrument primitives, repointed at a CRT tube instead of metal ── */
+  --room: #06080a;
+  --metal-hi: #232a24;   /* raised key/bezel highlight — dark slate-green, never bright */
+  --metal-mid: #171d17;
+  --metal-low: #0c100c;
+  --metal-shadow: #050705;
+  --ink: #7dffa0;        /* printed/engraved text — now phosphor, not carved metal */
+  --ink-dim: rgba(125, 255, 160, 0.45);
+  --cream: #baffce;      /* brighter phosphor for live LCD/CRT text */
+  --amber: #33ff66;      /* P1 phosphor green — the single accent */
+  --amber-deep: #ffb000; /* P3 amber phosphor — alert/red-zone variant */
+  --lamp-off: #1c231c;
+  --r: 3px;
+  --r-glass: 2px;
   --ease: cubic-bezier(.2, 1.4, .4, 1);
   --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Consolas, "Liberation Mono", monospace;
-  --grotesk: var(--mono);
+  --grotesk: var(--mono); /* one phosphor face for everything — no separate display serif/sans */
 
   /* ── 23-token contract ── */
   --bg: var(--room);
-  --surface: #201e18;
-  --surface-2: #16140f;
-  --border: rgba(0, 0, 0, 0.45);
+  --surface: #0a0f0a;
+  --surface-2: #060906;
+  --border: rgba(51, 255, 102, 0.14);
   --text: var(--cream);
-  --text-muted: rgba(125, 255, 159, 0.5);
+  --text-muted: rgba(125, 255, 160, 0.45);
   --accent: var(--amber);
-  --accent-2: #1fae4a;
+  --accent-2: #1a8f3d;
   --rec: var(--amber-deep);
   --ok: var(--amber);
   --warn: var(--amber-deep);
   --bad: #ff5a45;
-  --radius: 4px;
+  --radius: var(--r);
   --radius-sm: 2px;
   --font-body: var(--mono);
   --font-display: var(--mono);
   --font-mono: var(--mono);
-  --tracking-label: 0.14em;
-  --shadow-card: inset 0 2px 6px rgba(0, 0, 0, 0.7), inset 0 0 0 1px rgba(51, 255, 102, 0.08);
-  --ptt-shadow-idle: 0 5px 0 rgba(40, 36, 26, 0.55), 0 8px 14px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.55), inset 0 -3px 6px rgba(0, 0, 0, 0.25);
-  --ptt-shadow-rec: 0 2px 0 rgba(40, 36, 26, 0.5), 0 3px 6px rgba(0, 0, 0, 0.4), inset 0 2px 6px rgba(0, 0, 0, 0.4), 0 0 22px rgba(255, 176, 0, 0.35);
+  --tracking-label: 0.12em;
+  --shadow-card: inset 0 2px 6px rgba(0, 0, 0, 0.75), inset 0 0 0 1px rgba(51, 255, 102, 0.08);
+  --ptt-shadow-idle: 0 3px 0 rgba(0, 0, 0, 0.6), 0 6px 12px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(125, 255, 160, 0.12), inset 0 -2px 5px rgba(0, 0, 0, 0.4);
+  --ptt-shadow-rec: 0 1px 0 rgba(0, 0, 0, 0.55), 0 2px 5px rgba(0, 0, 0, 0.4), inset 0 2px 6px rgba(0, 0, 0, 0.4), 0 0 22px rgba(255, 176, 0, 0.4);
   --ptt-size: 78px;
   --ptt-radius: var(--r);
 }
 
-/* ── Chassis: injection-moulded plastic, pebbled texture, not metal sheen ── */
+/* ── Chassis: a matte CRT bezel, not machined/brushed metal ── */
 [data-theme="hacker"] .device {
-  background:
-    repeating-radial-gradient(circle at 0 0, rgba(0, 0, 0, 0.05) 0, rgba(0, 0, 0, 0.05) 1px, transparent 1px, transparent 3px),
-    linear-gradient(165deg, var(--metal-hi) 0%, var(--metal-mid) 48%, var(--metal-low) 82%, var(--metal-shadow) 100%);
-  background-size: 4px 4px, auto;
+  background: linear-gradient(165deg, #14170f 0%, #0c0e0a 55%, #060704 100%);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.22),
-    inset 0 -2px 0 rgba(0, 0, 0, 0.35),
-    inset 1px 0 0 rgba(255, 255, 255, 0.06),
-    inset -1px 0 0 rgba(0, 0, 0, 0.24),
-    0 30px 60px rgba(0, 0, 0, 0.55),
-    0 10px 20px rgba(0, 0, 0, 0.5);
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    inset 0 0 0 1px rgba(51, 255, 102, 0.08),
+    0 30px 60px rgba(0, 0, 0, 0.6);
 }
 
-/* ── Nomenclature: silkscreened legend printing, not engraved metal —
-   flat DARK ink on the light plastic (real silkscreen on beige is charcoal,
-   never light-grey-on-beige — that's not a material any terminal was ever
-   made of), no groove text-shadow (physically wrong on plastic). `.nom` is
-   printed-on-plastic by definition throughout this app (matches the base
-   sheet's own existing var(--ink) rules, e.g. `.lamp .nom`) — a blanket
-   color here is correct, not a special case, and safely loses to any
-   higher-specificity ID-anchored rule (e.g. `#ptt.recording .ptt-talk-label`
-   staying lit green while recording). ── */
+/* ── Nomenclature: printed on phosphor glass, not engraved into metal —
+   drop the base's carved-groove text-shadow (physically wrong on a screen),
+   use a soft phosphor glow instead. Every one of these already resolves to
+   var(--ink) via the base sheet's own component rules once the primitive is
+   repointed above; this rule only swaps the SHADOW recipe, plus fixes two
+   hardcoded literals the base sheet never runs through a token
+   (#pttCaption, .zone-input .hint — see below). ── */
 [data-theme="hacker"] .nom,
 [data-theme="hacker"] .zone-label,
 [data-theme="hacker"] .control-caption,
@@ -81,41 +82,66 @@
 [data-theme="hacker"] #pttCaption,
 [data-theme="hacker"] .baseplate .nom {
   color: var(--ink);
-  text-shadow: none;
+  text-shadow: 0 0 3px color-mix(in srgb, var(--ink) 55%, transparent);
+}
+[data-theme="hacker"] .zone-input .hint {
+  color: var(--ink);
 }
 [data-theme="hacker"] .hint {
   color: var(--ink-dim);
 }
-[data-theme="hacker"] .rotary-current {
-  color: var(--ink);
-  text-shadow: none;
-}
+/* `.rotary-current` is NOT touched — the base rule already resolves
+   `color: var(--amber)` (this theme's phosphor green) sitting inside its own
+   dark LCD-pill backing; re-overriding it to ink was a shipped bug in an
+   earlier build. */
 
-/* ── .lcd-label is used BOTH on bare plastic (the PERSONA/VOICE selector
-   labels — `.selector` has no background of its own) and on dark panels:
-   real CRT windows (#sessionPersonaWindow's .lcd-head, #avatarPane's
-   .lcd-head, both on --surface-2) AND .stat-strip, which paints its own
-   hardcoded near-black gradient (index.html, not token-driven — the same
-   "hardcoded, --surface doesn't reach it" pattern .lcd-window/.jack already
-   needed a component override for). Printed ink only where the plastic is
-   genuinely bare; phosphor green everywhere the panel underneath is dark —
-   never green on beige, never dark ink on near-black. ── */
+/* ── .lcd-label: the base sheet hardcodes a literal cream-ish rgba(), not a
+   token, so it never repaints on its own. Since every surface in this theme
+   is dark (there is no bright bare "plastic" left to leak onto, unlike the
+   instrument faceplate this class was written for), one phosphor color
+   covers every instance — bare on the chassis or inside a real window. The
+   one exception is `.selector-label.lcd-label`, which the base sheet backs
+   with a literal near-white "chip" specifically to rescue ink-on-bright-metal
+   contrast — on a dark tube that chip is now the thing that looks wrong
+   (and risks light-on-light), so it's replaced with a dark phosphor tag. ── */
 [data-theme="hacker"] .lcd-label {
-  color: var(--ink);
+  color: var(--cream);
+  text-shadow: 0 0 3px color-mix(in srgb, var(--cream) 45%, transparent);
 }
-[data-theme="hacker"] .lcd-window .lcd-label,
-[data-theme="hacker"] .jack .lcd-label,
-[data-theme="hacker"] #avatarPane .lcd-label,
-[data-theme="hacker"] .stat-strip .lcd-label {
+[data-theme="hacker"] .selector-label.lcd-label {
+  background: rgba(0, 0, 0, 0.4);
+  box-shadow: inset 0 0 0 1px rgba(51, 255, 102, 0.18);
   color: var(--cream);
 }
 
-/* ── LCD windows -> CRT phosphor glass: near-black glass, scanlines,
-   soft bloom on the text, subtle vignette. #log gets the same treatment but
-   its legibility is never traded away - it's the escape hatch. ── */
+/* ── Every other recessed/dark surface: the base sheet hardcodes the same
+   warm `linear-gradient(160deg, #1c1712, #100d0a)` literal on `.card`,
+   `.stat-strip`, `#gateBanner`, `#questCard`, and several settings-panel
+   fields — none of it token-driven, so flattening the metal primitives
+   above never reached these. On a phosphor tube there is no warm surface;
+   every one of these becomes the same near-black-green the LCD windows
+   already use, just without their scanline overlay (a form input can't
+   render `::after` content, and a fixed banner's own positioning is left
+   alone rather than risk it). `.rotary-current`'s BACKGROUND chip is
+   included here — its `color` stays untouched, see the note further up. ── */
+[data-theme="hacker"] .card,
+[data-theme="hacker"] .stat-strip,
+[data-theme="hacker"] #gateBanner,
+[data-theme="hacker"] #lowerBay #questCard,
+[data-theme="hacker"] #settingsPanel #brainStatus,
+[data-theme="hacker"] #settingsPanel .modelComboInput,
+[data-theme="hacker"] #settingsPanel .modelComboList,
+[data-theme="hacker"] .rotary-current {
+  background: linear-gradient(160deg, #05130a, #020a05);
+}
+
+/* ── LCD windows -> CRT phosphor glass: near-black glass, scanlines, soft
+   bloom on the text. #log gets the same treatment, legibility never traded
+   away — it's the escape hatch. ── */
 [data-theme="hacker"] .lcd-window,
 [data-theme="hacker"] #settingsPanel .jack,
 [data-theme="hacker"] #settingsPanel #personaInput,
+[data-theme="hacker"] #firstrunOverlay .jack,
 [data-theme="hacker"] #log {
   position: relative;
   overflow: hidden;
@@ -127,6 +153,7 @@
 [data-theme="hacker"] .lcd-window::after,
 [data-theme="hacker"] #settingsPanel .jack::after,
 [data-theme="hacker"] #settingsPanel #personaInput::after,
+[data-theme="hacker"] #firstrunOverlay .jack::after,
 [data-theme="hacker"] #log::after {
   content: "";
   position: absolute;
@@ -152,41 +179,8 @@
   box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
-/* ── VU meter -> phosphor CRT gauge: dark glass face, green arc/ticks/
-   labels, needle a bright green bloom trace, .meter-glass reads as CRT
-   curvature reflection instead of ivory sheen. ── */
-[data-theme="hacker"] .meter-face {
-  background:
-    repeating-linear-gradient(0deg, rgba(51, 255, 102, 0.04) 0px, rgba(51, 255, 102, 0.04) 1px, transparent 1px, transparent 3px),
-    radial-gradient(120% 90% at 50% 120%, rgba(51, 255, 102, 0.12), transparent 60%),
-    linear-gradient(160deg, #04120a, #010805);
-  box-shadow: inset 0 3px 10px rgba(0, 0, 0, 0.75), inset 0 -1px 0 rgba(51, 255, 102, 0.1);
-}
-[data-theme="hacker"] .meter-glass {
-  background: linear-gradient(115deg, rgba(51, 255, 102, 0.18) 0%, rgba(51, 255, 102, 0.03) 18%, transparent 34%, transparent 72%, rgba(0, 0, 0, 0.15) 100%);
-  mix-blend-mode: screen;
-  opacity: 0.55;
-}
-[data-theme="hacker"] .gaugeArc { stroke: rgba(51, 255, 102, 0.28); }
-[data-theme="hacker"] .gaugeTick { stroke: rgba(51, 255, 102, 0.45); }
-[data-theme="hacker"] .gaugeTick.major { stroke: var(--accent); }
-[data-theme="hacker"] .gaugeLabel { fill: rgba(51, 255, 102, 0.7); }
-[data-theme="hacker"] .gaugeRedZone { stroke: var(--rec); }
-[data-theme="hacker"] #needle {
-  background: linear-gradient(180deg, var(--accent) 0%, var(--accent) 60%, color-mix(in srgb, var(--accent) 40%, transparent) 100%);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 75%, transparent), 0 0 16px color-mix(in srgb, var(--accent) 35%, transparent);
-}
-[data-theme="hacker"] .meter-readout {
-  color: var(--accent);
-}
-[data-theme="hacker"] .meter-readout b {
-  text-shadow: 0 0 4px color-mix(in srgb, var(--accent) 55%, transparent);
-}
-
-/* ── Lamps: real panel-mount LEDs, now green when lit (base rules already
-   swap in var(--accent) for background via the primitive cascade; the glow
-   itself is hardcoded amber in the base sheet, so it's re-pointed here). ── */
-[data-theme="hacker"] html[data-va-state="connected"]:not(:has(#ptt.recording)):not(:has(#statusText.shimmer)):not(:has(#assistantText.speaking)) .lamp[data-lamp="idle"] .bulb,
+/* ── Lamps: panel-mount LEDs, green when lit ── */
+html[data-theme="hacker"][data-va-state="connected"]:not(:has(#ptt.recording)):not(:has(#statusText.shimmer)):not(:has(#assistantText.speaking)) .lamp[data-lamp="idle"] .bulb,
 [data-theme="hacker"] body:has(#ptt.recording) .lamp[data-lamp="listening"] .bulb,
 [data-theme="hacker"] body:has(#statusText.shimmer) .lamp[data-lamp="thinking"] .bulb,
 [data-theme="hacker"] body:has(#assistantText.speaking) .lamp[data-lamp="speaking"] .bulb {
@@ -211,21 +205,19 @@
   box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 70%, transparent);
 }
 
-/* ── Keys: beige injection-moulded keycaps, same physical "step" press
-   behaviour as the base (translateY + shadow collapse, untouched here). ── */
+/* ── PTT key: a dark terminal function key, not a machined metal cap ── */
 [data-theme="hacker"] #ptt {
   background: linear-gradient(180deg, var(--metal-hi) 0%, var(--metal-mid) 55%, var(--metal-low) 100%);
   color: var(--ink);
 }
 [data-theme="hacker"] #ptt.recording {
-  background: linear-gradient(180deg, color-mix(in srgb, var(--rec) 30%, var(--metal-mid)) 0%, var(--metal-low) 100%);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--rec) 24%, var(--metal-mid)) 0%, var(--metal-low) 100%);
   color: var(--rec);
 }
-
-/* ── Waveform bars: LED segment blocks ── */
-[data-theme="hacker"] .wbar {
-  border-radius: 1px;
-  box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 50%, transparent);
+[data-theme="hacker"] #pttCaption::before,
+[data-theme="hacker"] .zone-meter .zone-label::before {
+  content: "$ ";
+  opacity: 0.7;
 }
 
 /* ── Assistant readout: phosphor bloom on the hero text ── */
@@ -240,13 +232,25 @@
   background-size: 200% 100%;
 }
 
-/* ── Rails / history / session ── */
+/* ── Rails / history / session — text-first "$ " prompt idiom on labels.
+   The base sheet lays `.card .label` out as a 2-item flex row
+   (`justify-content: space-between`: the label text, then its `::after`
+   lamp dot) so the text sits flush left already. Adding a `::before`
+   prefix turns that into a 3-item row, and space-between then centers the
+   MIDDLE item — exactly the "prompt on the left, label floating in the
+   middle" bug. Force flex-start with an explicit gap instead, and push the
+   dot to the right edge with margin-left:auto so it keeps working. ── */
 [data-theme="hacker"] .card .label,
 [data-theme="hacker"] #historyRail .label,
 [data-theme="hacker"] #sessionRail .label {
   color: var(--accent-2);
 }
+[data-theme="hacker"] .card .label {
+  justify-content: flex-start;
+  gap: 6px;
+}
 [data-theme="hacker"] .card .label::before { content: "> "; }
+[data-theme="hacker"] .card .label::after { margin-left: auto; }
 
 /* ── Drawer ── */
 [data-theme="hacker"] .themeSwatch.active .swatchDot {
@@ -256,4 +260,295 @@
   background: var(--accent);
   border-color: var(--accent);
   color: var(--room);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   CENTREPIECE — a phosphor oscilloscope in #meterChrome, replacing the
+   analog needle gauge entirely. `.meter-housing` (the instrument's VU
+   glass) is hidden outright — this is not an optional "also show a scope"
+   addition, it's a replacement, same as `#meterChrome`'s own doc comment
+   recommends when a theme wants "a genuinely different instrument."
+   ══════════════════════════════════════════════════════════════════════ */
+[data-theme="hacker"] .meter-housing { display: none; }
+[data-theme="hacker"] .waveform { display: none; } /* alternate visualization of the same signal — don't run both */
+
+[data-theme="hacker"] #meterChrome {
+  display: flex;
+  position: relative;
+  height: 44px;
+  border-radius: var(--r);
+  overflow: hidden;
+  background:
+    repeating-linear-gradient(0deg, rgba(51, 255, 102, 0.05) 0px, rgba(51, 255, 102, 0.05) 1px, transparent 1px, transparent 3px),
+    radial-gradient(120% 160% at 50% 50%, rgba(51, 255, 102, 0.07), transparent 70%),
+    linear-gradient(180deg, #030a05, #010402);
+  box-shadow: inset 0 0 0 1px rgba(51, 255, 102, 0.16), inset 0 2px 8px rgba(0, 0, 0, 0.7);
+}
+/* .meterFace = the screen/bezel: a vignette so the tube reads as curved glass */
+[data-theme="hacker"] .meterFace {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  box-shadow: inset 0 0 18px rgba(0, 0, 0, 0.65);
+}
+/* .meterTicks = the graticule: a centerline plus vertical divisions */
+[data-theme="hacker"] .meterTicks {
+  position: absolute;
+  inset: 6px 4px;
+  pointer-events: none;
+  background:
+    linear-gradient(rgba(51, 255, 102, 0.32) 1px, transparent 1px) 0 50% / 100% 1px no-repeat,
+    repeating-linear-gradient(90deg, rgba(51, 255, 102, 0.16) 0, rgba(51, 255, 102, 0.16) 1px, transparent 1px, transparent 12.5%);
+}
+/* .meterNeedle = the trace itself: a level-reactive amplitude line (bar
+   growth keyed off --level, same bus the instrument's needle reads) plus a
+   sweeping beam cursor for idle life — the CRT never sits perfectly still,
+   the same design principle as the instrument's needle-drift keyframe, just
+   expressed as a scope sweep instead of a mechanical jitter. */
+[data-theme="hacker"] .meterNeedle {
+  position: absolute;
+  left: 4%;
+  right: 4%;
+  top: 50%;
+  height: 2px;
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 80%, transparent), 0 0 14px color-mix(in srgb, var(--accent) 40%, transparent);
+  transform: translateY(-50%) scaleY(calc(1 + var(--level, 0) * 9));
+  transform-origin: center;
+  transition: transform 0.1s var(--ease);
+  will-change: transform;
+}
+[data-theme="hacker"] .meterNeedle::after {
+  content: "";
+  position: absolute;
+  top: -21px;
+  bottom: -21px;
+  left: 0%;
+  width: 2px;
+  background: color-mix(in srgb, var(--accent) 85%, white 15%);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 90%, transparent);
+  animation: hackerScopeSweep 3.6s linear infinite;
+  will-change: left;
+}
+@keyframes hackerScopeSweep {
+  0% { left: 0%; }
+  100% { left: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-theme="hacker"] .meterNeedle { transition: none !important; }
+  [data-theme="hacker"] .meterNeedle::after { animation: none !important; left: 50%; }
+}
+/* State-tag readout is lost along with `.meter-readout` (a child of the now-
+   hidden `.meter-housing`) — reproduced here via generated content on the
+   still-visible scope mount, driven by the exact same state carriers the
+   base sheet's own `.state-tag::after` uses (see THEME-SPEC.md § State
+   carriers), so no functional feedback is dropped even though the DOM node
+   that used to show it is hidden. */
+[data-theme="hacker"] #meterChrome::before {
+  content: "SIG";
+  position: absolute;
+  left: 8px;
+  top: 3px;
+  font: 8px var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+[data-theme="hacker"] #meterChrome::after {
+  content: "STANDBY";
+  position: absolute;
+  right: 8px;
+  top: 3px;
+  font: 8px var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  text-shadow: 0 0 4px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+html[data-theme="hacker"][data-va-state="connecting"] #meterChrome::after { content: "CONNECTING"; }
+html[data-theme="hacker"][data-va-state="error"] #meterChrome::after { content: "FAULT"; color: var(--bad); }
+html[data-theme="hacker"] body:has(#ptt.recording) #meterChrome::after { content: "CAPTURING"; }
+html[data-theme="hacker"] body:has(#statusText.shimmer) #meterChrome::after { content: "THINKING"; }
+html[data-theme="hacker"] body:has(#assistantText.speaking) #meterChrome::after { content: "PLAYBACK"; }
+
+/* ── .statCol: slim signal-carrier bars flanking the TALK key, reactive to
+   --level — desktop only, same convention every mount uses. ── */
+@media (min-width: 1024px) {
+  [data-theme="hacker"] #pttWrap { position: relative; }
+  [data-theme="hacker"] .statCol {
+    display: block;
+    position: absolute;
+    top: 6px;
+    bottom: 6px;
+    width: 5px;
+    border-radius: 1px;
+    background: repeating-linear-gradient(180deg, rgba(51, 255, 102, 0.4) 0 2px, transparent 2px 6px);
+    box-shadow: inset 0 0 4px rgba(0, 0, 0, 0.7);
+    opacity: calc(0.35 + var(--level, 0) * 0.65);
+    transition: opacity 0.1s var(--ease);
+  }
+  [data-theme="hacker"] #statColL { left: -14px; }
+  [data-theme="hacker"] #statColR { right: -14px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-theme="hacker"] .statCol { transition: none !important; }
+}
+
+/* ── #fxBack: a phosphor field — faint scanlines + a slow vertical drift,
+   free atmosphere no theme has used before. ── */
+[data-theme="hacker"] #fxBack {
+  display: block;
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  overflow: hidden;
+  background:
+    repeating-linear-gradient(0deg, rgba(51, 255, 102, 0.035) 0px, rgba(51, 255, 102, 0.035) 1px, transparent 1px, transparent 3px),
+    radial-gradient(120% 90% at 50% 45%, rgba(51, 255, 102, 0.05), transparent 65%),
+    var(--room);
+}
+[data-theme="hacker"] #fxBack::after {
+  content: "";
+  position: absolute;
+  inset: -4px 0 0 0;
+  background: repeating-linear-gradient(0deg, rgba(0, 0, 0, 0.09) 0px, rgba(0, 0, 0, 0.09) 2px, transparent 2px, transparent 4px);
+  animation: hackerScanDrift 9s linear infinite;
+  will-change: transform;
+}
+@keyframes hackerScanDrift {
+  0% { transform: translateY(0); }
+  100% { transform: translateY(4px); }
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-theme="hacker"] #fxBack::after { animation: none !important; }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   RELAYOUT — desktop only (>=1024px; below that the base sheet's own
+   mobile reflow is left completely alone, same shape it already uses for
+   #sessionRail: `display: contents` promotes each zone's children into
+   #contentGrid directly, so they can be individually placed with
+   grid-template-areas — no DOM moves). The instrument's 3-column
+   INPUT / LEVEL / OUTPUT panel becomes a single stacked column that reads
+   top-to-bottom like a terminal session: a status/scope strip, the
+   scrollback (You said / Assistant / persona / voice / stats / snippet),
+   then a command-prompt row (ARM + TALK) at the very bottom — the one part
+   of a real terminal that's always the last line on screen. ── */
+@media (min-width: 1024px) {
+  [data-theme="hacker"] #contentGrid {
+    grid-template-columns: auto auto 1fr;
+    grid-template-areas:
+      "status  status  status"
+      "scope   scope   scope"
+      "you     you     you"
+      "reply   reply   reply"
+      "persona persona persona"
+      "voice   voice   voice"
+      "stats   stats   stats"
+      "snippet snippet snippet"
+      "armctl  pttctl  hint";
+    column-gap: 0;
+    row-gap: 0;
+    align-items: stretch;
+  }
+
+  [data-theme="hacker"] .zone-meter {
+    grid-area: status;
+    display: block;
+    border: none;
+    box-shadow: none;
+    padding: 10px 24px 8px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  [data-theme="hacker"] .zone-input {
+    display: contents;
+  }
+  /* The "INPUT" section caption keeps a real, visible text node (never
+     display:none — a landmark label being invisible-when-convenient is
+     exactly the kind of thing that's load-bearing for a screen-reader user
+     and invisible to a sighted review). It shares the "status" row with
+     .zone-meter's own LEVEL caption + lamps: those pin to the row's left
+     and right edges (base's own space-between), leaving the row's middle
+     genuinely empty, so a small, dim, centered "INPUT" reads as a second
+     system-status word on the same line rather than colliding with either. */
+  [data-theme="hacker"] .zone-input .zone-label {
+    grid-area: status;
+    justify-self: center;
+    align-self: center;
+    font-size: 9px;
+    opacity: 0.55;
+  }
+  [data-theme="hacker"] #meterChrome {
+    grid-area: scope;
+    margin: 10px 24px 14px;
+  }
+  [data-theme="hacker"] .zone-input .control:has(#armSwitch) {
+    grid-area: armctl;
+    align-self: center;
+    justify-self: start;
+    margin: 10px 16px 16px 24px;
+  }
+  [data-theme="hacker"] #pttWrap {
+    grid-area: pttctl;
+    align-self: center;
+    justify-self: start;
+    margin: 10px 16px 16px;
+  }
+  [data-theme="hacker"] .zone-input .hint {
+    grid-area: hint;
+    align-self: center;
+    justify-self: stretch;
+    text-align: left;
+    margin: 10px 24px 16px 0;
+  }
+
+  [data-theme="hacker"] #sessionRail {
+    display: contents;
+  }
+  [data-theme="hacker"] #transcript {
+    grid-area: you;
+    width: auto;
+    margin: 16px 24px 0;
+  }
+  [data-theme="hacker"] #assistantText {
+    grid-area: reply;
+    width: auto;
+    margin: 14px 24px 0;
+  }
+  [data-theme="hacker"] #sessionRail .selector:has(#personaDisplay) {
+    grid-area: persona;
+    margin: 16px 24px 0;
+  }
+  [data-theme="hacker"] #sessionRail .selector:has(#voiceDisplay) {
+    grid-area: voice;
+    margin: 8px 24px 0;
+  }
+  [data-theme="hacker"] .stat-strip {
+    grid-area: stats;
+    margin: 16px 24px 0;
+  }
+  [data-theme="hacker"] #sessionPersonaWindow {
+    grid-area: snippet;
+    margin: 14px 24px 16px;
+  }
+
+  /* #lowerBay still ran the instrument's own 2-column monitor/tape/task/
+     links arrangement (monitor spans 3 rows beside a stacked right column)
+     — the one region left wearing the base's layout in green. A single
+     stacked column continues the same top-to-bottom scrollback reading
+     order #contentGrid now uses, and matches the DOM's own source order
+     (monitor, tape, task, links, controls, log) exactly, so nothing needed
+     re-pointing beyond the area map itself. */
+  [data-theme="hacker"] #lowerBay {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "monitor"
+      "tape"
+      "task"
+      "links"
+      "controls"
+      "log";
+  }
 }

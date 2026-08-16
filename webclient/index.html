@@ -1109,10 +1109,19 @@
     background: var(--lamp-off);
     box-shadow: inset 0 1px 1px rgba(0,0,0,0.6);
   }
-  #dot.connected { background: var(--amber); box-shadow: 0 0 6px rgba(255,158,61,0.75), inset 0 0 2px rgba(255,255,255,0.4); }
+  #dot.connected { background: var(--amber); box-shadow: 0 0 6px rgba(255,158,61,0.75), inset 0 0 2px rgba(255,255,255,0.4);
+    animation: instrumentDotBreathe 4.2s ease-in-out infinite; will-change: opacity;
+  }
   #dot.connecting { background: var(--amber); opacity: 0.55; box-shadow: 0 0 4px rgba(255,158,61,0.45); animation: instrumentLampPulse 1.4s ease-in-out infinite; }
   #dot.error { background: var(--amber-deep); box-shadow: 0 0 6px rgba(217,74,31,0.8), inset 0 0 2px rgba(255,255,255,0.3); }
   @keyframes instrumentLampPulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 0.85; } }
+  /* A lit panel lamp is never perfectly flat - a shallow, slow opacity
+     cycle (never box-shadow geometry, per the perf laws) reads as a
+     filament settling rather than a blinking indicator. */
+  @keyframes instrumentDotBreathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.82; } }
+  @media (prefers-reduced-motion: reduce) {
+    #dot.connected { animation: none !important; }
+  }
   #gearBtn {
     width: 30px; height: 30px;
     border-radius: 50%;
@@ -1246,12 +1255,42 @@
   }
   .zone { position: relative; padding: 22px 24px 26px; display: flex; flex-direction: column; gap: 16px; }
   .zone-input { border-right: 1px solid rgba(0,0,0,0.5); box-shadow: inset -1px 0 0 rgba(255,255,255,0.08); align-items: center; justify-content: flex-start; padding-top: 26px; }
+  /* The control cluster (ARM/PTT) reads top-heavy on tall viewports if the
+     hint stays in normal flow right under it - anchoring the hint to the
+     chassis base (baseplate-style) instead of leaving a void under it.
+     Anchored this low the diagonal metal-hi/mid/low/shadow gradient (see
+     .device) has darkened past the ink text's WCAG floor, same trap the
+     footer nomenclature hit - same fix, a deterministic backing plate
+     instead of relying on gradient position. */
+  .zone-input .hint {
+    margin-top: auto; padding: 10px 14px 12px; border-radius: var(--r);
+    background: color-mix(in srgb, var(--metal-mid) 42%, var(--metal-hi));
+  }
   .zone-label { font-size: 10px; opacity: 0.82; font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.14em; color: var(--ink); text-shadow: 0 -1px 0 rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.28); }
 
   /* ── INPUT zone ── */
   .control { display: flex; flex-direction: column; align-items: center; gap: 10px; }
   #pttWrap { margin-top: 0; padding-top: 0; }
   .statCol { display: none; }
+  /* Flanking instrumentation rail, filling the column's dead vertical space
+     either side of the PTT key - scoped to the base look only (not the
+     shared inert-mount rule above, and not visible under any other theme,
+     which never opt in for it) so this composition choice stays instrument's
+     own. A printed tick-ladder on a recessed track, same chrome as the
+     ARM switch's track - decorative chassis trim, not a fake meter, so it
+     never implies a broken/dead reading. */
+  @media (min-width: 1024px) {
+    html[data-theme="instrument"] .statCol {
+      display: block; position: absolute; top: 92px; bottom: 112px; width: 10px;
+      border-radius: var(--r);
+      background: repeating-linear-gradient(180deg, var(--ink-dim) 0 1px, transparent 1px 20px),
+                  linear-gradient(180deg, rgba(0,0,0,0.55), rgba(0,0,0,0.2) 14%, rgba(0,0,0,0.42));
+      box-shadow: inset 0 2px 4px rgba(0,0,0,0.65), inset 0 -1px 0 rgba(255,255,255,0.06);
+      border: 1px solid rgba(0,0,0,0.6);
+    }
+    html[data-theme="instrument"] #statColL { left: 30px; }
+    html[data-theme="instrument"] #statColR { right: 30px; }
+  }
   #armSwitch { display: flex; flex-direction: column; align-items: center; gap: 8px; min-width: 44px; padding: 6px; border-radius: 4px; border: none; background: none; color: inherit; cursor: pointer; }
   #armSwitch[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
   /* ARM/OFF is printed on bare chassis metal, not a powered surface - the
@@ -1318,7 +1357,14 @@
     transition: background 0.15s var(--ease), box-shadow 0.15s var(--ease);
   }
   .lamp .nom { font-family: var(--mono); font-size: 7px; text-transform: uppercase; letter-spacing: 0.14em; color: var(--ink); }
-  html[data-va-state="connected"]:not(:has(#ptt.recording)):not(:has(#statusText.shimmer)):not(:has(#assistantText.speaking)) .lamp[data-lamp="idle"] .bulb { background: var(--amber); box-shadow: 0 0 7px rgba(255,158,61,0.85), inset 0 0 2px rgba(255,255,255,0.5); }
+  html[data-va-state="connected"]:not(:has(#ptt.recording)):not(:has(#statusText.shimmer)):not(:has(#assistantText.speaking)) .lamp[data-lamp="idle"] .bulb {
+    background: var(--amber); box-shadow: 0 0 7px rgba(255,158,61,0.85), inset 0 0 2px rgba(255,255,255,0.5);
+    animation: instrumentLampBreathe 5.4s ease-in-out infinite; will-change: opacity;
+  }
+  @keyframes instrumentLampBreathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.86; } }
+  @media (prefers-reduced-motion: reduce) {
+    .lamp[data-lamp="idle"] .bulb { animation: none !important; }
+  }
   body:has(#ptt.recording) .lamp[data-lamp="listening"] .bulb { background: var(--amber); box-shadow: 0 0 7px rgba(255,158,61,0.85), inset 0 0 2px rgba(255,255,255,0.5); }
   body:has(#statusText.shimmer) .lamp[data-lamp="thinking"] .bulb { background: var(--amber); box-shadow: 0 0 7px rgba(255,158,61,0.85), inset 0 0 2px rgba(255,255,255,0.5); }
   body:has(#assistantText.speaking) .lamp[data-lamp="speaking"] .bulb { background: var(--amber); box-shadow: 0 0 7px rgba(255,158,61,0.85), inset 0 0 2px rgba(255,255,255,0.5); }
@@ -1340,9 +1386,24 @@
     display: flex; align-items: center; justify-content: center;
   }
   .meter-glass {
-    position: absolute; inset: 0; pointer-events: none;
+    position: absolute; inset: 0; pointer-events: none; overflow: hidden;
     background: linear-gradient(115deg, rgba(255,255,255,0.35) 0%, rgba(255,255,255,0.05) 18%, transparent 34%, transparent 72%, rgba(0,0,0,0.05) 100%);
     mix-blend-mode: screen; opacity: 0.65;
+  }
+  /* A very slow specular travel across the meter face - reads as glass
+     catching ambient light, not as an effect. Pre-shaped narrow band
+     translated via transform only (never re-painting the gradient itself). */
+  .meter-glass::before {
+    content: ""; position: absolute; top: -20%; left: -50%; width: 30%; height: 140%;
+    background: linear-gradient(115deg, transparent, rgba(255,255,255,0.16) 45%, transparent 90%);
+    transform: translateX(-30%); will-change: transform;
+  }
+  html[data-va-state="connected"]:not(:has(#ptt.recording)):not(:has(#statusText.shimmer)):not(:has(#assistantText.speaking)) .meter-glass::before {
+    animation: instrumentGlassSweep 10s ease-in-out infinite;
+  }
+  @keyframes instrumentGlassSweep { 0%, 100% { transform: translateX(-30%); } 50% { transform: translateX(360%); } }
+  @media (prefers-reduced-motion: reduce) {
+    .meter-glass::before { animation: none !important; }
   }
   .meter-face svg { width: 100%; height: 100%; max-width: 440px; overflow: visible; }
   .gaugeArc { fill: none; stroke: rgba(36,31,26,0.22); stroke-width: 1.6; }
@@ -1362,6 +1423,23 @@
     background: linear-gradient(180deg, var(--amber) 0%, var(--ink) 34%, var(--ink) 100%);
     box-shadow: 0 0 6px rgba(255,158,61,0.55);
     border-radius: 2px 2px 0 0;
+    transform-origin: 50% 100%;
+  }
+  /* The needle is a child of #needleWrap (which JS drives via --level) - this
+     rotates the child a fraction of a degree on its own, independent of the
+     parent's transform, so the gauge reads as live even at zero signal.
+     Irregular keyframe timing on purpose, so it doesn't read as a metronome. */
+  html[data-va-state="connected"]:not(:has(#ptt.recording)):not(:has(#statusText.shimmer)):not(:has(#assistantText.speaking)) #needle {
+    animation: instrumentNeedleDrift 6.5s ease-in-out infinite; will-change: transform;
+  }
+  @keyframes instrumentNeedleDrift {
+    0%, 100% { transform: rotate(0deg); }
+    28% { transform: rotate(0.4deg); }
+    52% { transform: rotate(-0.25deg); }
+    77% { transform: rotate(0.15deg); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #needle { animation: none !important; }
   }
   #needlePivot {
     position: absolute; left: 50%; bottom: 12%; width: 14px; height: 14px;
@@ -5445,7 +5523,6 @@ const AVATAR_REGISTRY = [
   { id: "forge-elder-woman",   name: "Elder Woman (Forge)",   kind: "3d", model: "./avatar/model/elder-woman.glb" },
   { id: "vroid",      name: "VRoid (Anime 3D)",    kind: "3d", model: "./avatar/model/vroid.glb" },
   { id: "brunette-a", name: "Brunette (A-pose)",   kind: "3d", model: "./avatar/model/brunette.glb" },
-  { id: "monarch",   name: "Monarch (2D)",   kind: "2d" },
 ];
 // Local-only avatars (e.g. Shadow Monarch (Cinematic), which loads a
 // copyright-encumbered 3D texture) live in the gitignored

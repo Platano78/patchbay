@@ -1346,6 +1346,89 @@ def test_saved_local_avatar_id_resolves_instead_of_falling_back(browser, static_
     assert not errors, f"uncaught page errors: {errors}"
 
 
+def _parse_avatar_registry(index_html_src):
+    """Text-scrape the exported index.html's `const AVATAR_REGISTRY = [...]`
+    literal — deliberately not a JS eval, so this stays honest about the
+    exported tree's actual bytes rather than trusting some other module to
+    interpret them. Each entry is one line; id/kind/model are pulled by
+    field, not by a fixed set of known ids, so a future entry is covered
+    automatically."""
+    m = re.search(r"const AVATAR_REGISTRY = \[(.*?)\n\];", index_html_src, re.S)
+    assert m, "AVATAR_REGISTRY literal not found — index.html format changed, update this test's scrape"
+    entries = []
+    for line in m.group(1).splitlines():
+        idm = re.search(r'id:\s*"([^"]+)"', line)
+        if not idm:
+            continue
+        kindm = re.search(r'kind:\s*"([^"]+)"', line)
+        modelm = re.search(r'model:\s*"([^"]+)"', line)
+        entries.append({
+            "id": idm.group(1),
+            "kind": kindm.group(1) if kindm else None,
+            "model": modelm.group(1) if modelm else None,
+        })
+    return entries
+
+
+def test_public_avatar_registry_assets_all_ship(tmp_path):
+    """Every entry in the PUBLIC AVATAR_REGISTRY must resolve to an asset
+    that actually ships in the export — not just checking what's IN the
+    export, but whether what ships can run. The 2D Monarch entry shipped
+    with no image (webclient/avatar/refs/ is gitignored, never tracked),
+    leaving a dead, unloadable row in a downstream stranger's avatar picker.
+
+    Runs against the real `scripts/export-public.sh` output (git-ls-files
+    based), not the browser harness's `_webclient_temp_root` — that fixture
+    only excludes themes/local/ and avatar/local/ by name, so a gitignored
+    asset elsewhere (like avatar/refs/) that still happens to exist on this
+    dev box would pass there without proving anything. The export is the
+    actual clean-clone condition.
+
+    Mechanical, not a hardcoded id list: kind "3d" entries are checked via
+    their own `model` path; kind "2d" entries via avatar2d.mjs's own
+    MONARCH_URL constant, scraped from its source rather than restated here.
+    A future avatar with a missing asset, or an unrecognized kind, fails
+    this automatically."""
+    repo_root = os.path.dirname(HERE)
+    if not _release_tooling_available(repo_root):
+        pytest.skip("release tooling is not part of the public export "
+                    "(scripts/ and git history are private-tree-only)")
+    dest = os.path.join(str(tmp_path), "pbexp")
+    export = subprocess.run(
+        ["bash", "scripts/export-public.sh", dest],
+        cwd=repo_root, capture_output=True, text=True, timeout=60)
+    assert export.returncode == 0, f"export failed:\nstdout: {export.stdout}\nstderr: {export.stderr}"
+
+    web_dir = os.path.join(dest, "webclient")
+    with open(os.path.join(web_dir, "index.html")) as f:
+        registry = _parse_avatar_registry(f.read())
+    assert registry, "empty AVATAR_REGISTRY in the export — parsing regression, not the bug under test"
+
+    with open(os.path.join(web_dir, "avatar", "avatar2d.mjs")) as f:
+        avatar2d_src = f.read()
+    kind_2d_match = re.search(r'MONARCH_URL\s*=\s*"([^"]+)"', avatar2d_src)
+    assert kind_2d_match, "avatar2d.mjs no longer defines MONARCH_URL the same way — update this test's scrape"
+    kind_2d_path = kind_2d_match.group(1)
+
+    failures = []
+    for entry in registry:
+        if entry["kind"] == "3d":
+            rel = entry["model"]
+            if not rel:
+                failures.append(f"{entry['id']}: kind 3d entry with no model path")
+                continue
+        elif entry["kind"] == "2d":
+            rel = kind_2d_path
+        else:
+            failures.append(f"{entry['id']}: unrecognized kind {entry['kind']!r} — teach this test its asset path")
+            continue
+        asset_path = os.path.normpath(os.path.join(web_dir, rel))
+        if not os.path.isfile(asset_path) or os.path.getsize(asset_path) == 0:
+            failures.append(f"{entry['id']} ({rel}): missing or empty asset at {asset_path}")
+
+    assert not failures, "public avatar registry entries with missing/empty assets:\n" + "\n".join(failures)
+
+
 def _release_tooling_available(repo_root):
     """True only in the real dev repo: scripts/ ships there but is
     deliberately excluded from every export (export-public.sh's own
@@ -1753,13 +1836,16 @@ def test_local_chainsawman_overlay_replaces_tracked_entry_in_place(
 
 def test_local_chainsawman_art_overlay_images_resolve(
         browser, static_server, local_theme_dir, chainsawman_local_css):
-    """The 404 trap: themes/local/chainsawman.css's background-image urls
-    are `../assets/chainsawman/...`, one directory deeper than a tracked
-    skin — checked by proving BOTH art images the real committed local file
-    references (gen-halftone-texture.png, denji-part2-portrait.png) 200 with
-    a nonzero body, against the REAL tracked assets directory (untouched by
-    the local_theme_dir fixture — only themes/local/ moves). Skips on a
-    clean clone (see chainsawman_local_css)."""
+    """The 404 trap: themes/local/chainsawman.css's background-image url is
+    `../assets/chainsawman/...`, one directory deeper than a tracked skin —
+    checked by proving the real committed local file's one remaining art
+    reference (gen-halftone-texture.png) 200s with a nonzero body, against
+    the REAL tracked assets directory (untouched by the local_theme_dir
+    fixture — only themes/local/ moves). The earlier Denji character
+    portrait is gone from this file — the huge tachometer now fills the
+    space it used to occupy in .zone-input, and the instrument, not a
+    second competing visual, is meant to own that column. Skips on a clean
+    clone (see chainsawman_local_css)."""
     os.makedirs(local_theme_dir, exist_ok=True)
     _write(os.path.join(local_theme_dir, "themes.json"),
            json.dumps([{"id": "chainsawman", "name": "Devil Hunter", "swatch": ["#121110", "#ff5a1f"]}]))
@@ -1774,8 +1860,6 @@ def test_local_chainsawman_art_overlay_images_resolve(
     def on_response(resp):
         if "gen-halftone-texture.png" in resp.url:
             image_responses["halftone"] = resp
-        elif "denji-part2-portrait.png" in resp.url:
-            image_responses["portrait"] = resp
 
     page.on("response", on_response)
 
@@ -1785,14 +1869,13 @@ def test_local_chainsawman_art_overlay_images_resolve(
     page.evaluate("() => setTheme('chainsawman')")
     page.wait_for_function(
         "() => document.documentElement.getAttribute('data-theme') === 'chainsawman'", timeout=10000)
-    page.wait_for_timeout(500)  # let the background-image fetches settle
+    page.wait_for_timeout(500)  # let the background-image fetch settle
 
-    for key, needle in (("halftone", "gen-halftone-texture.png"), ("portrait", "denji-part2-portrait.png")):
-        assert key in image_responses, f"no network request observed for {needle}"
-        resp = image_responses[key]
-        assert resp.status == 200, f"{needle} did not 200: {resp.status} {resp.url}"
-        body = resp.body()
-        assert len(body) > 0, f"{needle} returned an empty body"
+    assert "halftone" in image_responses, "no network request observed for gen-halftone-texture.png"
+    resp = image_responses["halftone"]
+    assert resp.status == 200, f"gen-halftone-texture.png did not 200: {resp.status} {resp.url}"
+    body = resp.body()
+    assert len(body) > 0, "gen-halftone-texture.png returned an empty body"
 
     ctx.close()
     server.stop()
@@ -1842,31 +1925,66 @@ def _parse_css_color(css_color):
     return tuple(nums)
 
 
-def _dominant_background_pixel(img, box, glyph_rgb, tolerance=45):
+def _dominant_background_pixel(img, box, glyph_rgb, inset=2, bucket=16):
     """The true painted background behind `box` (a Playwright bounding box,
     viewport pixels), read from a real screenshot rather than assumed —
-    crop the element's own rendered pixels and take the most common color
-    OUTSIDE a tolerance sphere around the known glyph color. Text coverage
-    inside a small label's own box is a minority of its area (thin strokes,
-    lots of padding/gaps between glyphs), so the majority color in that crop
-    IS the real background, regardless of what painted it — gradient, image,
-    solid, whatever. Direction-agnostic on purpose: guessing "sample N px
-    above/left" breaks the moment a theme's layout differs even slightly."""
-    left = max(0, int(box["x"]))
-    top = max(0, int(box["y"]))
-    right = min(img.width, int(box["x"] + box["width"]))
-    bottom = min(img.height, int(box["y"] + box["height"]))
+    crop the element's own rendered pixels (inset a couple px on every side,
+    so a neighbouring element's edge doesn't bleed into the sample), bucket
+    them into coarse RGB cubes, and return the most common exact shade
+    inside the heaviest bucket. Direction-agnostic on purpose: guessing
+    "sample N px above/left" breaks the moment a theme's layout differs
+    even slightly.
+
+    Two earlier, both-broken approaches, and why bucketing beats both:
+
+    1. Tolerance-exclude anything near the known glyph color, then take the
+       plain majority. Backfired exactly when text and background are
+       painted close in RGB space (hacker.css's `.rotary-current`
+       dark-ink-on-dark-chip defect, caught 2026-08-16): excluding
+       near-glyph colors threw out the TRUE majority background pixels
+       along with the glyph pixels, leaving a handful of anti-aliased
+       edge-bleed outliers as the fallback "background" — a reading that
+       silently depended on whatever else was painting nearby, and flipped
+       a real ~1:1 pairing to a false-passing ~6.6:1 depending on
+       incidental page state (any CSS animation running elsewhere was
+       enough to tip it).
+    2. Plain majority-by-exact-pixel with no exclusion at all (tried while
+       fixing #1, also wrong): breaks the moment the background is a
+       gradient rather than a flat fill, which most of this faceplate's
+       "lit readout" chips are — a gradient paints a continuum of shades
+       that never exactly repeat, so even though background pixels vastly
+       outnumber a bold glyph's flat anti-aliased fill core in TOTAL area,
+       no single background shade individually beats the glyph's one
+       repeated exact color in a pixel-exact count (measured: 24 identical
+       glyph-color pixels vs. the gradient's shades landing 5-7 times each).
+
+    Bucketing sidesteps both: it sums the gradient's many close shades back
+    into one cluster (fixing #2) using pure mutual-proximity clustering with
+    no reference to glyph_rgb at all (fixing #1, since a near-glyph
+    background cluster's total weight still outnumbers the thinner glyph
+    strokes on its own merits, no exclusion needed). `glyph_rgb` is kept in
+    the signature for callers/future use but no longer needed to compute
+    this."""
+    left = max(0, int(box["x"]) + inset)
+    top = max(0, int(box["y"]) + inset)
+    right = min(img.width, int(box["x"] + box["width"]) - inset)
+    bottom = min(img.height, int(box["y"] + box["height"]) - inset)
+    if right <= left or bottom <= top:  # box too small to inset — use it uncropped
+        left, top = max(0, int(box["x"])), max(0, int(box["y"]))
+        right = min(img.width, int(box["x"] + box["width"]))
+        bottom = min(img.height, int(box["y"] + box["height"]))
     crop = img.crop((left, top, right, bottom))
     colors = crop.getcolors(maxcolors=crop.width * crop.height + 16) or []
-
-    def dist(rgb):
-        return sum((a - b) ** 2 for a, b in zip(rgb, glyph_rgb)) ** 0.5
-
-    background_only = sorted(
-        ((count, rgb) for count, rgb in colors if dist(rgb) > tolerance), reverse=True)
-    if background_only:
-        return background_only[0][1]
-    return colors[0][1] if colors else (0, 0, 0)  # fully glyph-colored box; no better guess
+    if not colors:
+        return (0, 0, 0)
+    buckets = {}
+    for count, rgb in colors:
+        key = tuple(c // bucket for c in rgb)
+        entry = buckets.setdefault(key, {"total": 0, "shades": []})
+        entry["total"] += count
+        entry["shades"].append((count, rgb))
+    winner = max(buckets.values(), key=lambda e: e["total"])
+    return max(winner["shades"])[1]  # most common exact shade inside the heaviest bucket
 
 
 def _measure_pair(page, selector):
@@ -2076,3 +2194,289 @@ def test_settings_drawer_stays_off_canvas_when_closed_across_every_theme(browser
     server.stop()
     assert not errors, f"uncaught page errors: {errors}"
     assert not failures, "settings drawer off-canvas/overlay regression:\n" + "\n".join(failures)
+
+
+# ── Idle life: a connected, idle faceplate is never perfectly still ─────
+# Before the L0 base life pass, document.getAnimations() was empty on a
+# CONNECTED, idle page — the only animations in the sheet were transient
+# (shimmer/pulse/connecting-only). This gate pins the resting vocabulary:
+# named, running, and silenced under prefers-reduced-motion.
+INSTRUMENT_IDLE_ANIMATIONS = {
+    "instrumentDotBreathe", "instrumentLampBreathe",
+    "instrumentGlassSweep", "instrumentNeedleDrift",
+}
+
+
+def test_instrument_faceplate_has_continuous_idle_life(client):
+    page, server = client
+    page.wait_for_function(
+        "() => document.documentElement.getAttribute('data-va-state') === 'connected'")
+    page.wait_for_timeout(200)
+
+    running_names = page.evaluate(
+        "() => document.getAnimations().filter(a => a.playState === 'running')"
+        ".map(a => a.animationName)")
+    assert running_names, "no animations running on a connected, idle page — the faceplate is a still image"
+    assert INSTRUMENT_IDLE_ANIMATIONS.issubset(set(running_names)), (
+        f"expected {INSTRUMENT_IDLE_ANIMATIONS} among the running animations, got {running_names}")
+
+    page.emulate_media(reduced_motion="reduce")
+    page.wait_for_timeout(150)
+    still_running = page.evaluate(
+        "() => document.getAnimations().filter(a => a.playState === 'running' "
+        "&& a.animationName).length")
+    assert still_running == 0, (
+        f"{still_running} continuous animation(s) still running under prefers-reduced-motion: reduce")
+    page.emulate_media(reduced_motion="no-preference")
+
+
+# ── Dead space: .zone-input must not leave a void under its own content ──
+# Before this pass, the 3-column grid stretched every zone to the tallest
+# (the output rail), leaving 351px of nothing below the TALK key on a
+# 1280-wide desktop viewport. 60px is generous breathing room for a machined
+# faceplate's own bottom padding + the baseplate seam below it, while still
+# catching a regression back to a half-empty column.
+ZONE_INPUT_DEAD_SPACE_THRESHOLD_PX = 60
+
+
+def test_zone_input_has_no_dead_space_below_its_content(client):
+    page, server = client
+    page.wait_for_function(
+        "() => document.documentElement.getAttribute('data-va-state') === 'connected'")
+    page.wait_for_timeout(200)
+
+    metrics = page.evaluate("""() => {
+        const zone = document.querySelector('.zone-input');
+        const zr = zone.getBoundingClientRect();
+        let maxBottom = zr.top;
+        zone.querySelectorAll('*').forEach(el => {
+            const cs = getComputedStyle(el);
+            if (cs.display === 'none' || cs.visibility === 'hidden') return;
+            const r = el.getBoundingClientRect();
+            if (r.width === 0 && r.height === 0) return;
+            if (r.bottom > maxBottom) maxBottom = r.bottom;
+        });
+        return { zoneBottom: zr.bottom, contentBottom: maxBottom };
+    }""")
+    tail = metrics["zoneBottom"] - metrics["contentBottom"]
+    assert tail < ZONE_INPUT_DEAD_SPACE_THRESHOLD_PX, (
+        f".zone-input has {tail:.0f}px of empty space below its last visible content "
+        f"(threshold {ZONE_INPUT_DEAD_SPACE_THRESHOLD_PX}px)")
+
+
+# ── Theme divergence gate ─────────────────────────────────────────────────
+# The owner's bug report was literal: "it looks exactly the same, there is
+# no distinct feel between the 3 themes. it's just color changes." A theme
+# that only redefines the 23-token contract will always pass check-theme.py
+# and check-hooks.py (both are selector-hygiene gates, blind to layout) and
+# can still be a recolor. This gate makes a recolor mechanically unpassable
+# by asserting real structural facts: the instrument's centrepiece (the
+# analog needle gauge) must be replaced, not just retextured, and
+# #contentGrid's own layout recipe and a majority of its fixed hooks' screen
+# positions must differ between the two themes at desktop width.
+DIVERGENCE_HOOKS = [
+    "#armSwitch", "#ptt", "#transcript", "#assistantText",
+    "#personaDisplay", "#voiceDisplay", ".stat-strip",
+    "#sessionPersonaWindow", ".zone-meter",
+]
+DIVERGENCE_MOVE_THRESHOLD_PX = 80
+DIVERGENCE_MIN_MOVED_HOOKS = 5
+
+
+def _theme_layout_snapshot(page, theme_id):
+    page.evaluate(f"() => setTheme({theme_id!r})")
+    page.wait_for_function(
+        f"() => document.documentElement.getAttribute('data-theme') === {theme_id!r}")
+    page.wait_for_timeout(150)  # theme <link> fetch + first paint — see _select_and_measure above
+    return page.evaluate("""(hooks) => {
+        const cg = document.getElementById('contentGrid');
+        const cs = getComputedStyle(cg);
+        const rectOf = sel => {
+            const el = document.querySelector(sel);
+            if (!el) return null;
+            const r = el.getBoundingClientRect();
+            return { x: r.left, y: r.top };
+        };
+        const meterHousing = document.querySelector('.meter-housing');
+        const meterChrome = document.getElementById('meterChrome');
+        return {
+            gridTemplateAreas: cs.gridTemplateAreas,
+            meterHousingDisplay: meterHousing ? getComputedStyle(meterHousing).display : null,
+            meterChromeDisplay: meterChrome ? getComputedStyle(meterChrome).display : null,
+            hookRects: hooks.map(rectOf),
+        };
+    }""", DIVERGENCE_HOOKS)
+
+
+# A theme id -> set of clause names ("centrepiece", "meterchrome", "areas",
+# "moved") it is exempted from, each entry requiring an inline comment
+# explaining why that specific theme legitimately cannot satisfy the clause.
+# Empty by default — a theme that needs an entry here is the exception, not
+# the norm, and weakening a threshold for everyone to accommodate one theme
+# is exactly what this dict exists to avoid.
+DIVERGENCE_KNOWN_EXCEPTIONS = {}
+
+
+def test_every_custom_theme_is_structurally_divergent_from_instrument(browser, static_server):
+    """Every registered non-base theme must be a genuinely different
+    interface from the instrument faceplate, not the same panel in a
+    different palette — see the module comment above for why this needs to
+    be a mechanical gate, not a design review. Runs over BUILTIN_THEMES +
+    customThemes as reported live by the page (the same list the drawer
+    itself renders), minus the base `instrument` theme, so a future skin is
+    covered automatically with no test changes required. Desktop width only
+    (1280px, >=1024px breakpoint where relayouts live) — the mobile stack is
+    intentionally untouched by every theme's own convention."""
+    server = StubControlServer()
+    server.start()
+    ctx, page, errors, console_errors = _new_page(browser, static_server, server)
+
+    theme_ids = page.evaluate(
+        "() => BUILTIN_THEMES.map(t => t.id).concat(customThemes.map(t => t.id))")
+    assert theme_ids, "no themes found on the page - fixture/selector is wrong"
+    assert "instrument" in theme_ids, "base theme id changed - update this gate"
+    custom_ids = [t for t in theme_ids if t != "instrument"]
+    assert custom_ids, "no custom themes registered - nothing for this gate to check"
+
+    instrument = _theme_layout_snapshot(page, "instrument")
+    assert instrument["meterHousingDisplay"] != "none", \
+        f"instrument's .meter-housing should be visible, got {instrument['meterHousingDisplay']!r}"
+    assert instrument["meterChromeDisplay"] == "none", \
+        f"instrument doesn't use #meterChrome, got {instrument['meterChromeDisplay']!r}"
+
+    failures = []
+    for theme_id in custom_ids:
+        exceptions = DIVERGENCE_KNOWN_EXCEPTIONS.get(theme_id, set())
+        snap = _theme_layout_snapshot(page, theme_id)
+
+        # (a) the analog needle gauge is the instrument's centrepiece —
+        # hidden outright, not merely recolored.
+        if "centrepiece" not in exceptions and snap["meterHousingDisplay"] != "none":
+            failures.append(
+                f"{theme_id}: must hide .meter-housing (replace the centrepiece), "
+                f"got {snap['meterHousingDisplay']!r}")
+
+        # (b) #meterChrome is the shared inert mount every theme gets for
+        # free, display:none by default — the theme must be the one to claim it.
+        if "meterchrome" not in exceptions and snap["meterChromeDisplay"] in (None, "none"):
+            failures.append(
+                f"{theme_id}: must build its centrepiece in #meterChrome, "
+                f"got {snap['meterChromeDisplay']!r}")
+
+        # (c) #contentGrid's own computed layout recipe must differ, not just its skin
+        if "areas" not in exceptions and snap["gridTemplateAreas"] == instrument["gridTemplateAreas"]:
+            failures.append(
+                f"{theme_id}: #contentGrid's grid-template-areas is identical to instrument "
+                f"({instrument['gridTemplateAreas']!r}) — recolored, not relaid out")
+
+        # (d) a real relayout moves things — count fixed hooks whose
+        # top-left corner shifted by more than DIVERGENCE_MOVE_THRESHOLD_PX.
+        if "moved" not in exceptions:
+            moved = 0
+            detail = []
+            for hook, r1, r2 in zip(DIVERGENCE_HOOKS, instrument["hookRects"], snap["hookRects"]):
+                if r1 is None or r2 is None:
+                    detail.append(f"{hook}: missing in one theme (r1={r1}, r2={r2})")
+                    continue
+                dist = ((r1["x"] - r2["x"]) ** 2 + (r1["y"] - r2["y"]) ** 2) ** 0.5
+                detail.append(f"{hook}: moved {dist:.0f}px  ({r1['x']:.0f},{r1['y']:.0f}) -> ({r2['x']:.0f},{r2['y']:.0f})")
+                if dist > DIVERGENCE_MOVE_THRESHOLD_PX:
+                    moved += 1
+            if moved < DIVERGENCE_MIN_MOVED_HOOKS:
+                failures.append(
+                    f"{theme_id}: only {moved}/{len(DIVERGENCE_HOOKS)} hooks moved more than "
+                    f"{DIVERGENCE_MOVE_THRESHOLD_PX}px vs instrument — reads as a recolor, "
+                    f"not a different interface:\n" + "\n".join(detail))
+
+    ctx.close()
+    server.stop()
+    assert not errors, f"uncaught page errors: {errors}"
+    assert not failures, "\n\n".join(failures)
+
+
+def test_chainsawman_chain_revs_with_mic_level(browser, static_server):
+    """The Devil Hunter centrepiece is a chainsaw rev, not a passive meter —
+    a chainsaw that doesn't rev when spoken to is the defect this test
+    exists to prevent. This asserts that intent against the CURRENT
+    mechanism: the centrepiece is no longer a needle pivoting through a
+    dial (the owner rejected that build outright — "the blades move and it
+    shows action", not a repainted tachometer) but an actual chain, its two
+    rails (`.meterTicks::before`/`::after`) travelling around a guide bar
+    via an animated `background-position`. Speed, not needle angle, is the
+    readout now, so the correct signal is the animation's DURATION, not a
+    transform snapshot: unlike the old needle (whose rotation ANGLE was
+    itself a function of --level baked into the keyframe, requiring
+    phase-pinning via the Web Animations API to compare two samples on the
+    same point in the cycle), the chain's keyframes are fixed regardless of
+    --level — only `animation-duration` changes — so duration is
+    phase-independent and directly comparable with a plain
+    `getComputedStyle(el, '::before').animationDuration` read, no
+    currentTime pinning needed. Drives the live `--level` bus (the same
+    custom property pushWaveform sets every audio frame) directly on
+    documentElement, from 0 to a high value, and asserts the chain's
+    duration shortens (rides faster) — and, separately, that the
+    assistant-speaking fixed mid-speed state is NOT the same duration as
+    idle, since a chain that reads "revving" identically whether idle or
+    replying is exactly the silently-dead defect this test guards against.
+    Also keeps the housing shake duration assertion from the dial-era test
+    unchanged — that mechanism didn't change in this pass."""
+    server = StubControlServer()
+    server.start()
+    ctx, page, errors, console_errors = _new_page(browser, static_server, server)
+
+    page.evaluate("() => setTheme('chainsawman')")
+    page.wait_for_function("() => document.documentElement.getAttribute('data-theme') === 'chainsawman'")
+    page.wait_for_timeout(150)
+
+    def sample(level):
+        return page.evaluate("""(level) => {
+            document.documentElement.style.setProperty('--level', String(level));
+            const ticks = document.querySelector('.meterTicks');
+            const chrome = document.getElementById('meterChrome');
+            return {
+                topRailDuration: getComputedStyle(ticks, '::before').animationDuration,
+                bottomRailDuration: getComputedStyle(ticks, '::after').animationDuration,
+                housingDuration: getComputedStyle(chrome).animationDuration,
+            };
+        }""", level)
+
+    low = sample(0)
+    high = sample(1)
+
+    # Assistant-speaking: fixed mid-speed, independent of --level (reset to
+    # 0 first so a stale high level can't accidentally produce the same
+    # duration by coincidence).
+    assistant = page.evaluate("""() => {
+        document.documentElement.style.setProperty('--level', '0');
+        document.body.classList.remove('recording');
+        const a = document.getElementById('assistantText');
+        a.classList.add('speaking');
+        const ticks = document.querySelector('.meterTicks');
+        const d = getComputedStyle(ticks, '::before').animationDuration;
+        a.classList.remove('speaking');
+        return d;
+    }""")
+
+    ctx.close()
+    server.stop()
+    assert not errors, f"uncaught page errors: {errors}"
+
+    assert low["topRailDuration"] not in ("", "0s"), \
+        f"chain's top rail has no computed animation-duration at level=0: {low}"
+    assert low["topRailDuration"] != high["topRailDuration"], (
+        f"chain's top-rail animation-duration is identical at --level=0 and --level=1 "
+        f"(both {low['topRailDuration']!r}) — the chain doesn't speed up with the mic"
+    )
+    assert low["bottomRailDuration"] != high["bottomRailDuration"], (
+        f"chain's bottom-rail animation-duration is identical at --level=0 and --level=1 "
+        f"(both {low['bottomRailDuration']!r}) — the return rail doesn't speed up with the mic"
+    )
+    assert low["housingDuration"] != high["housingDuration"], (
+        f"#meterChrome's animation-duration is identical at --level=0 and --level=1 "
+        f"({low['housingDuration']!r}) — the shake's SPEED doesn't scale with the mic"
+    )
+    assert assistant not in (low["topRailDuration"], high["topRailDuration"]), (
+        f"assistant-speaking chain duration ({assistant!r}) matches an idle/recording "
+        f"duration (idle={low['topRailDuration']!r}, level=1={high['topRailDuration']!r}) "
+        f"— the assistant reply doesn't read as a distinct sustained rev"
+    )
