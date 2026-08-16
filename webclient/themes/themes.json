@@ -1,36 +1,16 @@
 [
   {
-    "id": "chainsawman",
-    "name": "Devil Hunter",
-    "swatch": [
-      "#121110",
-      "#ff5a1f"
-    ],
+    "id": "chainsawman", "name": "Devil Hunter", "swatch": ["#121110", "#ff5a1f"],
     "avatar": {
       "model": "./avatar/model/avatarsdk.glb",
-      "lighting": {
-        "ambientColor": "#1a0d05",
-        "ambientIntensity": 1.2,
-        "keyColor": "#ff5a1f",
-        "keyIntensity": 32
-      },
+      "lighting": { "ambientColor": "#1a0d05", "ambientIntensity": 1.2, "keyColor": "#ff5a1f", "keyIntensity": 32 },
       "defaultMood": "serious"
     }
   },
   {
-    "id": "hacker",
-    "name": "Terminal",
-    "swatch": [
-      "#000000",
-      "#33ff66"
-    ],
+    "id": "hacker", "name": "Terminal", "swatch": ["#141310", "#33ff66"],
     "avatar": {
-      "lighting": {
-        "ambientColor": "#001a00",
-        "ambientIntensity": 1,
-        "keyColor": "#33ff66",
-        "keyIntensity": 30
-      }
+      "lighting": { "ambientColor": "#001a00", "ambientIntensity": 1, "keyColor": "#33ff66", "keyIntensity": 30 }
     }
   }
 ]

@@ -45,7 +45,7 @@
     --metal-low: #4d473c;
     --metal-shadow: #2c2820;
     --ink: #241f1a;
-    --ink-dim: rgba(36, 31, 26, 0.58);
+    --ink-dim: rgba(36, 31, 26, 0.8);
     --cream: #ece4d2;
     --amber: #ff9e3d;
     --amber-deep: #d94a1f;
@@ -1152,7 +1152,14 @@
     background: rgba(8, 6, 4, 0.82);
   }
   #firstrunOverlay[hidden] { display: none; }
-  #firstrunOverlay .device { max-width: 440px; margin: auto; }
+  /* Same cream-on-chassis leak as the main faceplate, just not in the
+     measured pairs: .brand, .step-num's digit, the step-head captions,
+     .status-text's resting state, .test-btn/.power-key's .nom and
+     .power-hint had no color rule of their own, so they fell through to
+     body's cream. Elements already on a real dark surface (the .jack's
+     .lcd-label, the connected/error status-text variants, the pressed
+     power key) all set their own color and outrank this. */
+  #firstrunOverlay .device { color: var(--ink); max-width: 440px; margin: auto; }
   #firstrunOverlay .nameplate { justify-content: center; padding: 18px 24px 14px; }
   #firstrunOverlay .brand { font-size: 13px; font-weight: 700; letter-spacing: 0.28em; text-align: center; }
   #firstrunOverlay .brand span { display: block; margin-top: 4px; font-size: 8.5px; font-weight: 400; letter-spacing: 0.16em; opacity: 0.62; }
@@ -1247,6 +1254,9 @@
   .statCol { display: none; }
   #armSwitch { display: flex; flex-direction: column; align-items: center; gap: 8px; min-width: 44px; padding: 6px; border-radius: 4px; border: none; background: none; color: inherit; cursor: pointer; }
   #armSwitch[aria-disabled="true"] { opacity: 0.45; cursor: not-allowed; }
+  /* ARM/OFF is printed on bare chassis metal, not a powered surface - the
+     button's `color: inherit` was leaking body's cream text color here. */
+  #armSwitch .nom { color: var(--ink); text-shadow: 0 -1px 0 rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.28); }
   .toggle-track { position: relative; width: 22px; height: 58px; border-radius: 4px;
     background: linear-gradient(180deg, rgba(0,0,0,0.55), rgba(0,0,0,0.22) 14%, rgba(0,0,0,0.4));
     box-shadow: inset 0 2px 4px rgba(0,0,0,0.65), inset 0 -1px 0 rgba(255,255,255,0.06);
@@ -1287,7 +1297,12 @@
     text-shadow: 0 -1px 0 rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.28);
   }
   #ptt.recording .ptt-talk-label { color: var(--amber); text-shadow: 0 0 6px rgba(255,158,61,0.6); }
-  #pttCaption { font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.1em; font-size: 8.5px; opacity: 0.68; color: var(--ink); }
+  /* Was `opacity: 0.68` on top of --ink - opacity dims the actual rendered
+     pixel but isn't visible to a contrast check reading the `color`
+     property, so the near-miss was worse on screen than it measured. A
+     dedicated deeper-ink shade (still the ink family, just weighted darker
+     for this lighter patch of metal) fixes both at once. */
+  #pttCaption { font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.1em; font-size: 8.5px; color: #14110d; }
 
   /* ── LEVEL zone ── */
   #waveform { display: none; }
@@ -1418,9 +1433,22 @@
   .diagToggle:hover { color: var(--ink); filter: brightness(1.08); }
   #log { background: var(--surface-2); border: none; box-shadow: var(--shadow-card); color: var(--text-muted); font-family: var(--mono); }
   .hint { color: var(--text-muted); font-family: var(--grotesk); }
+  /* Printed directly on bare chassis metal (not a card/panel), so it needs
+     the ink family, not the cream/text-muted meant for powered surfaces -
+     see .zone-input .hint's measured bg vs the settings-drawer .hint. */
+  .zone-input .hint { color: #14110d; }
 
   /* ── baseplate ── */
-  .baseplate { display: flex; justify-content: space-between; align-items: center; padding: 12px 34px 18px; opacity: 0.7; }
+  /* Was a flat opacity:0.7 on the whole footer, which (being analytic-alpha,
+     not screen-sampled) let cream/ink text pass the letter of a contrast
+     check while the actual composited pixel was much darker than assumed.
+     An explicit, opaque backing plate reads the same "quieter zone" cue
+     without that trap, and stays visibly darker than the metal-hi-led
+     header above it. */
+  .baseplate {
+    display: flex; justify-content: space-between; align-items: center; padding: 12px 34px 18px;
+    background: color-mix(in srgb, var(--metal-mid) 42%, var(--metal-hi));
+  }
   .baseplate .nom { font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.18em; font-size: 8px; color: var(--ink); text-shadow: 0 -1px 0 rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.28); }
 
   #fxBack { display: none; }
@@ -1429,7 +1457,7 @@
      revamp-mockups/instrument/main/index.html) ── */
   .lcd-label {
     font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.14em;
-    color: rgba(236, 228, 210, 0.48); font-size: 10px;
+    color: rgba(236, 228, 210, 0.55); font-size: 10px;
   }
   .lcd-label.tiny { font-size: 8px; }
   .lcd-window { border-radius: var(--r); padding: 12px 15px 14px;
@@ -1454,6 +1482,18 @@
 
   .selector { display: flex; flex-direction: column; gap: 8px; }
   .selector-label { font-size: 9px; opacity: 0.75; }
+  /* .selector-label always carries .lcd-label too, but both live instances
+     (session rail + firstrun mirror) sit bare on the chassis, never inside
+     a real .lcd-window - unlike .stat .lcd-label (backed by .stat-strip's
+     own dark gradient), cream-on-metal here really is the leak. Ink plus a
+     shallow embossed chip (same idea as the baseplate fix below) lifts the
+     local background just enough for ink to clear the floor. */
+  .selector-label.lcd-label {
+    color: var(--ink); opacity: 1;
+    display: inline-block; align-self: flex-start; padding: 1px 5px; border-radius: 2px;
+    background: rgba(255,255,255,0.32);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.2), inset 0 -1px 1px rgba(0,0,0,0.25);
+  }
 
   .rotary, .rail { border: none; background: none; padding: 4px; border-radius: var(--r); color: inherit; cursor: pointer; width: 100%; }
   .rotary:focus-visible, .rail:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
@@ -1471,8 +1511,15 @@
   .rotary-pointer { position: absolute; left: 50%; top: 3px; width: 2px; height: 12px; background: var(--ink);
     transform: translateX(-50%); border-radius: 1px;
   }
+  /* A "backlit current-value readout" (DESIGN-LANGUAGE) needs to actually
+     sit in a lit window, not bare on the metal - reuse .lcd-window's own
+     dark recessed backing. Amber-on-near-black is exactly the high-contrast
+     pairing a real lit readout should have; the fault was never the color. */
   .rotary-current { font-size: 9px; color: var(--amber); text-shadow: 0 0 4px rgba(255,158,61,0.4); font-weight: 700;
     font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.08em;
+    display: inline-block; padding: 2px 8px; border-radius: var(--r);
+    background: linear-gradient(160deg, #1c1712, #100d0a);
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.7), inset 0 0 0 1px rgba(0,0,0,0.6);
   }
 
   .rail { display: flex; flex-direction: column; gap: 6px; }
@@ -2581,7 +2628,7 @@ function setTheme(id) {
   if (custom && !loadedThemeLinks.has(id)) {
     const link = document.createElement("link");
     link.rel = "stylesheet";
-    link.href = `themes/${id}.css`;
+    link.href = custom.__local ? `themes/local/${id}.css` : `themes/${id}.css`;
     document.head.appendChild(link);
     loadedThemeLinks.add(id);
   }
@@ -2623,22 +2670,41 @@ function renderThemeSwatches() {
   });
 }
 
-async function loadCustomThemes() {
+// Fetches one theme manifest and validates its entries the same way
+// regardless of origin. A missing/unreachable manifest (the normal case for
+// `themes/local/themes.json` on every clone) resolves to [] silently — no
+// console error, no unhandled rejection.
+async function fetchThemeManifest(url, isLocal) {
   try {
-    const res = await fetch("themes/themes.json");
-    if (res.ok) {
-      const data = await res.json();
-      if (Array.isArray(data)) {
-        customThemes = data.filter((t) => {
-          const ok = !!t && typeof t.id === "string" && THEME_ID_RE.test(t.id);
-          if (!ok) console.warn("loadCustomThemes: dropping invalid theme manifest entry", t);
-          return ok;
-        });
-      }
-    }
+    const res = await fetch(url);
+    if (!res.ok) return [];
+    const data = await res.json();
+    if (!Array.isArray(data)) return [];
+    return data
+      .filter((t) => {
+        const ok = !!t && typeof t.id === "string" && THEME_ID_RE.test(t.id);
+        if (!ok) console.warn("loadCustomThemes: dropping invalid theme manifest entry", t);
+        return ok;
+      })
+      .map((t) => ({ ...t, __local: isLocal }));
   } catch {
-    // no manifest yet, or offline — built-ins only, fail silently
+    return [];
   }
+}
+
+async function loadCustomThemes() {
+  const tracked = await fetchThemeManifest("themes/themes.json", false);
+  const local = await fetchThemeManifest("themes/local/themes.json", true);
+  // Tracked entries first, local ones appended — except a local entry whose
+  // id collides with a tracked one REPLACES it in place, so the picker's
+  // ordering doesn't shift just because a local override exists.
+  const merged = tracked.slice();
+  local.forEach((lt) => {
+    const idx = merged.findIndex((t) => t.id === lt.id);
+    if (idx >= 0) merged[idx] = lt;
+    else merged.push(lt);
+  });
+  customThemes = merged;
   renderThemeSwatches();
   // Boot may have saved a custom id before the manifest loaded; apply it now.
   let saved = null;
@@ -5381,6 +5447,19 @@ const AVATAR_REGISTRY = [
   { id: "brunette-a", name: "Brunette (A-pose)",   kind: "3d", model: "./avatar/model/brunette.glb" },
   { id: "monarch",   name: "Monarch (2D)",   kind: "2d" },
 ];
+// Local-only avatars (e.g. Shadow Monarch (Cinematic), which loads a
+// copyright-encumbered 3D texture) live in the gitignored
+// webclient/avatar/local/registry.mjs and are merged in below — the file
+// simply not existing on a clean clone is how the public export drops them,
+// no per-avatar special case needed here.
+async function mergeLocalAvatars() {
+  try {
+    const mod = await import("./avatar/local/registry.mjs");
+    if (mod && Array.isArray(mod.default)) AVATAR_REGISTRY.push(...mod.default);
+  } catch {
+    // no local registry — normal case on a clean clone, fail silently
+  }
+}
 const DEFAULT_AVATAR_ID = "brunette";
 const AVATAR_MODEL_KEY = "va-avatar-model"; // SEPARATE from "va-avatar" (pane expand/collapse)
 function selectedAvatarId() {
@@ -5502,15 +5581,6 @@ function setAvatarWanted(wanted) {
   else syncAvatarRunState();
 }
 
-if (isDesktopViewport() || isImmersiveAvatar(selectedAvatarId())) {
-  const wanted = avatarWanted();
-  els.avatarPane.classList.toggle("collapsed", !wanted);
-  els.avatarToggle.setAttribute("aria-expanded", String(wanted));
-  els.avatarToggle.setAttribute("aria-label", wanted ? "Collapse avatar" : "Expand avatar");
-  if (wanted) loadAvatarModule().then(syncAvatarRunState);
-}
-els.avatarToggle.addEventListener("click", () => setAvatarWanted(!avatarWanted()));
-
 // Avatar dropdown lives in settings (always available client-side, unlike
 // server-pushed voices) — populate/persist regardless of viewport.
 function populateAvatarSelect() {
@@ -5523,8 +5593,26 @@ function populateAvatarSelect() {
     els.avatarSelect.appendChild(opt);
   });
 }
-populateAvatarSelect();
+els.avatarToggle.addEventListener("click", () => setAvatarWanted(!avatarWanted()));
 els.avatarSelect.addEventListener("change", () => switchAvatar(els.avatarSelect.value));
+
+// AVATAR_REGISTRY must carry any local-only entries (see mergeLocalAvatars
+// above) BEFORE anything reads it — the boot-time model load below, the
+// picker's options, and a saved va-avatar-model id resolving to a local
+// avatar all depend on it. mergeLocalAvatars() is awaited first so none of
+// this runs against a registry that's still missing the merge.
+async function bootAvatars() {
+  await mergeLocalAvatars();
+  if (isDesktopViewport() || isImmersiveAvatar(selectedAvatarId())) {
+    const wanted = avatarWanted();
+    els.avatarPane.classList.toggle("collapsed", !wanted);
+    els.avatarToggle.setAttribute("aria-expanded", String(wanted));
+    els.avatarToggle.setAttribute("aria-label", wanted ? "Collapse avatar" : "Expand avatar");
+    if (wanted) loadAvatarModule().then(syncAvatarRunState);
+  }
+  populateAvatarSelect();
+}
+bootAvatars();
 
 // ── First-run calibration: shown once per browser; mirrors live
 // connect/persona/voice state below, owns no connection logic itself. ──

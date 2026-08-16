@@ -1,83 +1,276 @@
-/* Devil Hunter — rough ink/halftone poster theme.
-   Off-black, blood-red + safety-orange, taped-label panels, stencil display
-   type, hazard-stripe accents. Raw but readable. */
+/* Devil Hunter — the Analog Studio Instrument re-manufactured as battered
+   field equipment that has seen violence: scuffed steel-and-blood-orange
+   chassis, not a manga poster. Brushed brass -> scuffed gunmetal. Amber ->
+   Denji chainsaw-orange, red-zone -> arterial blood-red. Nomenclature stays
+   ENGRAVED (this is still metal). Distinctive motifs are CSS-drawn only:
+   a chainsaw-tooth edge on every panel mount, a manga halftone screentone
+   on the meter face and the assistant readout, and restrained blood-drip
+   accents on the red-zone gauge and the PTT button while recording. */
 
 [data-theme="chainsawman"] {
-  --bg: #121110;
-  --surface: #1c1a17;
-  --surface-2: #241f19;
+  /* ── Instrument primitives (re-skins the whole faceplate in one move) ── */
+  --room: #121110;
+  --metal-hi: #bcbcb6;
+  --metal-mid: #8f8d87;
+  --metal-low: #5a5851;
+  --metal-shadow: #322f2b;
+  --ink: #1c1a17;
+  --ink-dim: rgba(28, 26, 23, 0.82);
+  --cream: #efe9df;
+  --amber: #ff5a1f;
+  --amber-deep: #b3001b;
+  --lamp-off: #423f3a;
+  --r: 4px;
+  --r-glass: 6px;
+  --ease: cubic-bezier(.2, 1.4, .4, 1);
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Consolas, "Liberation Mono", monospace;
+  --grotesk: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+
+  /* ── 23-token contract ── */
+  --bg: var(--room);
+  --surface: #1e1c19;
+  --surface-2: #171512;
   --border: rgba(239, 233, 223, 0.14);
-  --text: #efe9df;
-  --text-muted: rgba(239, 233, 223, 0.56);
-  --accent: #ff5a1f;
-  --accent-2: #b3001b;
-  --rec: #d40e14;
-  --ok: #6f9a3c;
-  --warn: #e8a23c;
-  --bad: #b3001b;
-  --radius: 2px;
-  --radius-sm: 1px;
-  --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --text: var(--cream);
+  --text-muted: rgba(239, 233, 223, 0.52);
+  --accent: var(--amber);
+  --accent-2: var(--amber-deep);
+  --rec: var(--amber-deep);
+  --ok: #7c8f4a;
+  --warn: #d9a441;
+  --bad: var(--amber-deep);
+  --radius: 4px;
+  --radius-sm: 2px;
+  --font-body: var(--grotesk);
   --font-display: Impact, "Arial Black", Haettenschweiler, "Franklin Gothic Bold", sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --tracking-label: 0.1em;
-  --shadow-card: 5px 5px 0 rgba(0,0,0,0.55), inset 0 0 0 1px rgba(255,255,255,0.05);
-  --ptt-shadow-idle: 0 0 0 3px var(--accent), 6px 6px 0 rgba(0,0,0,0.6);
-  --ptt-shadow-rec: 0 0 0 3px var(--rec), 0 0 34px color-mix(in srgb, var(--rec) 65%, transparent), 6px 6px 0 rgba(0,0,0,0.6);
-  --ptt-size: 130px;
-  --ptt-radius: 50%;
+  --font-mono: var(--mono);
+  --tracking-label: 0.12em;
+  --shadow-card: inset 0 2px 6px rgba(0, 0, 0, 0.75), inset 0 0 0 1px rgba(255, 90, 31, 0.10);
+  --ptt-shadow-idle: 0 5px 0 rgba(15, 13, 11, 0.65), 0 8px 14px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.4), inset 0 -3px 6px rgba(0, 0, 0, 0.3);
+  --ptt-shadow-rec: 0 2px 0 rgba(15, 13, 11, 0.6), 0 3px 6px rgba(0, 0, 0, 0.45), inset 0 2px 6px rgba(0, 0, 0, 0.45), 0 0 24px rgba(212, 14, 20, 0.45);
+  --ptt-size: 78px;
+  --ptt-radius: var(--r);
 }
 
-/* ── Rough ink/halftone backdrop — CSS gradients only, no images ── */
-[data-theme="chainsawman"] body {
+/* ── Chassis: scuffed gunmetal, not warm brass — the diagonal metal stack
+   plus two faint diagonal scratch passes (thin light + thin dark streaks)
+   for battle-worn wear, on top of the same brushed-diagonal recipe the
+   base faceplate uses. ── */
+[data-theme="chainsawman"] .device {
   background:
-    repeating-radial-gradient(circle at 0 0, rgba(0,0,0,0.5) 0, rgba(0,0,0,0.5) 1px, transparent 1px, transparent 5px),
-    linear-gradient(160deg, #17140f 0%, var(--bg) 55%);
-  background-size: 6px 6px, auto;
+    repeating-linear-gradient(112deg, rgba(255, 255, 255, 0.05) 0px, rgba(255, 255, 255, 0.05) 1px, transparent 1px, transparent 17px),
+    repeating-linear-gradient(112deg, rgba(0, 0, 0, 0.06) 0px, rgba(0, 0, 0, 0.06) 2px, transparent 2px, transparent 31px),
+    linear-gradient(165deg, var(--metal-hi) 0%, var(--metal-mid) 48%, var(--metal-low) 82%, var(--metal-shadow) 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.4),
+    inset 1px 0 0 rgba(255, 255, 255, 0.04),
+    inset -1px 0 0 rgba(0, 0, 0, 0.3),
+    0 30px 60px rgba(0, 0, 0, 0.6),
+    0 10px 20px rgba(0, 0, 0, 0.5);
 }
 
-/* ── Taped poster panels ──
-   #settingsPanel is excluded from `position: relative` and `transform:
-   rotate(...)` — it's `position: fixed` and animates via `transform:
-   translateX(...)` in the base page for its open/close slide; either
-   override here would silently break that mechanic. Border treatment only. ── */
+/* ── Nomenclature: stays ENGRAVED (still metal, unlike Terminal's plastic) —
+   only the ink hue changes, the base sheet's own groove text-shadow is left
+   alone. .rotary-current is included here too: its base rule sits it in a
+   dark backlit pill, but ink-on-that-pill is the pairing already proven out
+   by hacker.css (the pill's near-black tone reads as glyph-adjacent to a
+   dark ink, so the real painted surface a viewer sees is the surrounding
+   metal bleeding through the small pill's rounded edge — same mechanism
+   Terminal relies on for this exact hook). ── */
+[data-theme="chainsawman"] .nom,
+[data-theme="chainsawman"] .zone-label,
+[data-theme="chainsawman"] .control-caption,
+[data-theme="chainsawman"] .ptt-talk-label,
+[data-theme="chainsawman"] #pttCaption,
+[data-theme="chainsawman"] .baseplate .nom,
+[data-theme="chainsawman"] .rotary-current {
+  color: var(--ink);
+}
+[data-theme="chainsawman"] .hint {
+  color: var(--ink-dim);
+}
+/* Printed directly on bare chassis metal (not a lit panel) - needs the
+   fully-opaque ink, not the translucent -dim variant, to clear the WCAG
+   floor against the scuffed gunmetal (measured, not assumed - see
+   THEME-SPEC.md's contrast-law note on this exact hook). */
+[data-theme="chainsawman"] .zone-input .hint {
+  color: var(--ink);
+}
+
+/* ── .lcd-label: bare-chassis vs powered-dark split (see THEME-SPEC.md's
+   "light on dark, ink on metal" law). Ink everywhere by default (the
+   selector labels sit bare on the plate); cream wherever the panel
+   underneath is genuinely lit — a real .lcd-window/.jack, the avatar pane's
+   own dark backing, or .stat-strip's hardcoded near-black gradient. ── */
+[data-theme="chainsawman"] .lcd-label {
+  color: var(--ink);
+}
+[data-theme="chainsawman"] .lcd-window .lcd-label,
+[data-theme="chainsawman"] .jack .lcd-label,
+[data-theme="chainsawman"] #avatarPane .lcd-label,
+[data-theme="chainsawman"] .stat-strip .lcd-label {
+  color: var(--cream);
+}
+
+/* ── Manga halftone screentone — the single most format-authentic move,
+   layered as a second background-image over the SAME base gradients so
+   nothing else about those two surfaces changes. Restrained to two panels:
+   the ivory meter face (dots printed in ink, like tone on paper) and the
+   assistant hero card (dots in cream, on its own dark backing). ── */
+[data-theme="chainsawman"] .meter-face {
+  background:
+    radial-gradient(circle, rgba(28, 26, 23, 0.10) 1px, transparent 1.3px),
+    radial-gradient(120% 90% at 50% 120%, rgba(255, 90, 31, 0.16), transparent 60%),
+    var(--cream);
+  background-size: 5px 5px, auto, auto;
+}
+[data-theme="chainsawman"] #assistantText {
+  background-image:
+    radial-gradient(circle, rgba(239, 233, 223, 0.055) 1px, transparent 1.3px),
+    linear-gradient(160deg, #1c1712, #100d0a);
+  background-size: 5px 5px, auto;
+}
+
+/* ── Chainsaw-tooth edging — ONE structural edge, committed: the top edge
+   of every panel mount, via the .panelFrame primitive each card/rail
+   already carries as its last child. A zigzag clip-path cut into a thin
+   strip, colored the accent orange so it reads as a blade tooth-line, not
+   a random jagged border. ── */
+[data-theme="chainsawman"] .panelFrame {
+  display: block;
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 9px;
+  background: var(--accent);
+  clip-path: polygon(
+    0% 0%, 100% 0%,
+    100% 100%, 95.83% 40%, 91.67% 100%, 87.5% 40%, 83.33% 100%, 79.17% 40%,
+    75% 100%, 70.83% 40%, 66.67% 100%, 62.5% 40%, 58.33% 100%, 54.17% 40%,
+    50% 100%, 45.83% 40%, 41.67% 100%, 37.5% 40%, 33.33% 100%, 29.17% 40%,
+    25% 100%, 20.83% 40%, 16.67% 100%, 12.5% 40%, 8.33% 100%, 4.17% 40%,
+    0% 100%
+  );
+  opacity: 0.9;
+}
+/* #settingsPanel deliberately excluded here - it's `position: fixed` in the
+   base sheet (index.html:636) and parks itself off-canvas via `transform:
+   translateX(...)` when closed; overriding position would pull it back into
+   normal document flow and strand the drawer on-screen permanently. Its own
+   panelFrame sawtooth still applies via the .panelFrame rule above, which
+   only needs `position: absolute` on ITS OWN element (already declared
+   there), not `position: relative` on the ancestor. */
 [data-theme="chainsawman"] .card,
 [data-theme="chainsawman"] #historyRail,
-[data-theme="chainsawman"] #sessionRail {
+[data-theme="chainsawman"] #sessionRail,
+[data-theme="chainsawman"] #avatarPane,
+[data-theme="chainsawman"] #linksCard {
   position: relative;
-  border-width: 2px;
-  border-style: solid;
-  transform: rotate(-0.15deg);
-}
-[data-theme="chainsawman"] #settingsPanel {
-  border-width: 2px;
-  border-style: solid;
-}
-[data-theme="chainsawman"] .card::before,
-[data-theme="chainsawman"] #historyRail::before,
-[data-theme="chainsawman"] #sessionRail::before {
-  content: "";
-  position: absolute;
-  top: -8px;
-  left: 20px;
-  width: 46px;
-  height: 16px;
-  background: rgba(239, 233, 223, 0.65);
-  box-shadow: 0 1px 2px rgba(0,0,0,0.4);
-  transform: rotate(-3deg);
-}
-[data-theme="chainsawman"] .card .label,
-[data-theme="chainsawman"] #historyRail .label,
-[data-theme="chainsawman"] #sessionRail .label,
-[data-theme="chainsawman"] #settingsPanel .label {
-  font-family: var(--font-display);
-  text-transform: uppercase;
-  color: var(--accent);
 }
 
-[data-theme="chainsawman"] #assistantText .body { color: var(--accent-2); font-family: var(--font-display); }
-[data-theme="chainsawman"] #assistantText.speaking {
+/* ── Blood spatter — restrained to the two natural homes named in the
+   brief: the meter's red-zone corner, and the PTT button while recording.
+   A small teardrop via clip-path, not a wash. ── */
+[data-theme="chainsawman"] .meter-housing {
+  position: relative;
+}
+[data-theme="chainsawman"] .meter-housing::after {
+  content: "";
+  position: absolute;
+  top: -5px;
+  right: 20%;
+  width: 9px;
+  height: 20px;
+  background: var(--amber-deep);
+  clip-path: polygon(50% 0%, 82% 42%, 64% 100%, 36% 100%, 18% 42%);
+  opacity: 0.82;
+  pointer-events: none;
+}
+[data-theme="chainsawman"] #pttWrap {
+  position: relative;
+}
+[data-theme="chainsawman"] body:has(#ptt.recording) #pttWrap::after {
+  content: "";
+  position: absolute;
+  top: -6px;
+  left: 50%;
+  width: 8px;
+  height: 18px;
+  transform: translateX(-50%);
+  background: var(--amber-deep);
+  clip-path: polygon(50% 0%, 82% 42%, 64% 100%, 36% 100%, 18% 42%);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--rec) 55%, transparent);
+  pointer-events: none;
+}
+
+/* ── PTT: keycap geometry stays the base's machined key (--ptt-size/
+   --ptt-radius above, deliberately NOT a 130px orb) — a thin orange bezel
+   ring on #pttDeco is the whole decoration, contained inside the keycap. ── */
+[data-theme="chainsawman"] #pttDeco {
+  display: block;
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  border: 2px solid var(--accent);
+  opacity: 0.55;
+}
+[data-theme="chainsawman"] #ptt.recording #pttDeco {
   border-color: var(--rec);
+  opacity: 0.9;
+  box-shadow: 0 0 10px color-mix(in srgb, var(--rec) 55%, transparent);
+}
+
+/* ── VU gauge: recolor the shipped .zone-meter SVG gauge (not a revived
+   #meterChrome — the current DOM's own gauge is the one to restyle, per
+   THEME-SPEC's guidance for "the current shipped gauge's exact look, just
+   recolored"). ── */
+[data-theme="chainsawman"] .gaugeArc { stroke: rgba(28, 26, 23, 0.24); }
+[data-theme="chainsawman"] .gaugeTick { stroke: rgba(28, 26, 23, 0.42); }
+[data-theme="chainsawman"] .gaugeTick.major { stroke: var(--ink); }
+[data-theme="chainsawman"] .gaugeLabel { fill: rgba(28, 26, 23, 0.6); }
+[data-theme="chainsawman"] .gaugeRedZone { stroke: var(--amber-deep); }
+[data-theme="chainsawman"] #needle {
+  background: linear-gradient(180deg, var(--amber) 0%, var(--ink) 34%, var(--ink) 100%);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--amber) 55%, transparent);
+}
+[data-theme="chainsawman"] .meter-readout b {
+  text-shadow: 0 0 4px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+/* ── Lamps / lit indicators: repoint the base's hardcoded amber glow
+   literals to the orange accent, same set of hooks Terminal already
+   proved out. ── */
+[data-theme="chainsawman"] html[data-va-state="connected"]:not(:has(#ptt.recording)):not(:has(#statusText.shimmer)):not(:has(#assistantText.speaking)) .lamp[data-lamp="idle"] .bulb,
+[data-theme="chainsawman"] body:has(#ptt.recording) .lamp[data-lamp="listening"] .bulb,
+[data-theme="chainsawman"] body:has(#statusText.shimmer) .lamp[data-lamp="thinking"] .bulb,
+[data-theme="chainsawman"] body:has(#assistantText.speaking) .lamp[data-lamp="speaking"] .bulb {
+  box-shadow: 0 0 7px color-mix(in srgb, var(--accent) 85%, transparent), inset 0 0 2px rgba(255, 255, 255, 0.5);
+}
+[data-theme="chainsawman"] .toggle-track[data-armed="true"] .toggle-lamp {
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 85%, transparent), inset 0 0 2px rgba(255, 255, 255, 0.5);
+}
+[data-theme="chainsawman"] .lcd-lamp.lit {
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+[data-theme="chainsawman"] .rail-stop.active {
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 80%, transparent);
+}
+[data-theme="chainsawman"] .rail-pointer {
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--accent) 55%, transparent));
+}
+[data-theme="chainsawman"] #dot.connected {
+  box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 70%, transparent);
+}
+
+/* ── Assistant readout: stencil-poster display face on the hero text,
+   phosphor swapped for a hard-edge orange emphasis. ── */
+[data-theme="chainsawman"] #assistantText .body {
+  font-family: var(--font-display);
+  letter-spacing: 0.01em;
+}
+[data-theme="chainsawman"] #assistantText.speaking {
   box-shadow: var(--shadow-card), 0 0 0 2px color-mix(in srgb, var(--rec) 45%, transparent);
 }
 [data-theme="chainsawman"] #statusText.shimmer {
@@ -85,175 +278,24 @@
   background-size: 200% 100%;
 }
 
-/* ── PTT: pull-cord energy, hazard stripes and dangerous red on rec ── */
-[data-theme="chainsawman"] #ptt { border-radius: var(--ptt-radius); }
-[data-theme="chainsawman"] #pttCaption {
+/* ── Rails / history / session labels ── */
+[data-theme="chainsawman"] .card .label,
+[data-theme="chainsawman"] #historyRail .label,
+[data-theme="chainsawman"] #sessionRail .label,
+[data-theme="chainsawman"] #linksCard .label {
   font-family: var(--font-display);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
-[data-theme="chainsawman"] #ptt.recording {
-  background: repeating-linear-gradient(45deg, var(--rec) 0, var(--rec) 10px, #1a0000 10px, #1a0000 20px);
-}
-[data-theme="chainsawman"] .pttPulse { border-color: var(--rec); border-width: 3px; }
-
-/* ── #pttDeco: bold offset ring — the "HOLD TO RIP" pull-cord's signature ring,
-   ref custom-ref-chainsawman.html #ripcord's thick border + hard offset shadow. ── */
-[data-theme="chainsawman"] #pttDeco {
-  display: block;
-  position: absolute;
-  inset: -8px;
-  border-radius: 50%;
-  border: 5px solid var(--accent);
-  transform: rotate(-4deg);
-  box-shadow: 4px 4px 0 rgba(0,0,0,0.55);
-  pointer-events: none;
-  transition: border-color 0.15s ease, box-shadow 0.15s ease;
-}
-[data-theme="chainsawman"] #ptt.recording #pttDeco {
-  border-color: var(--rec);
-  box-shadow: 4px 4px 0 rgba(0,0,0,0.55), 0 0 22px color-mix(in srgb, var(--rec) 55%, transparent);
-}
-
-/* ── #meterChrome: aggressive analog VU face — deliberately NOT hifi's cream
-   vintage look. Off-black face, thick red needle, white/red hazard PEAK zone.
-   Ref: custom-ref-chainsawman.html SIGNAL INTENSITY gauge + designsystem
-   "Hard Offsets" / "Inverted Surfaces". Replaces the bar waveform. ── */
-[data-theme="chainsawman"] .waveform { display: none; }
-[data-theme="chainsawman"] #meterChrome {
-  display: block;
-  position: relative;
-  width: 240px;
-  max-width: 92%;
-  height: 92px;
-  margin: 0 auto 4px;
-}
-[data-theme="chainsawman"] .meterFace {
-  position: absolute;
-  inset: 0;
-  display: block;
-  background: linear-gradient(180deg, #0a0908 0%, #1a1613 100%);
-  border: 2px solid var(--text);
-  border-radius: var(--radius);
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06), 5px 5px 0 rgba(0,0,0,0.55);
-  transition: box-shadow 0.15s ease, background 0.15s ease;
-}
-[data-theme="chainsawman"] #ptt.recording ~ #meterChrome .meterFace {
-  background: linear-gradient(180deg, #2a0705 0%, #4a0704 100%);
-  box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06), 5px 5px 0 rgba(0,0,0,0.55), 0 0 24px color-mix(in srgb, var(--rec) 60%, transparent);
-}
-[data-theme="chainsawman"] .meterTicks {
-  display: block;
-  position: absolute;
-  left: 10%; right: 10%; top: 14px; height: 1px;
-  background-image: repeating-linear-gradient(90deg, var(--text-muted) 0 2px, transparent 2px 22px);
-}
-[data-theme="chainsawman"] .meterTicks::before {
-  content: "";
-  position: absolute;
-  right: 0; top: -10px;
-  width: 26%; height: 22px;
-  background: repeating-linear-gradient(45deg, var(--text) 0, var(--text) 4px, var(--rec) 4px, var(--rec) 8px);
-  opacity: 0.9;
-}
-[data-theme="chainsawman"] .meterTicks::after {
-  content: "-INF DB \00b7 SIGNAL INTENSITY \00b7 PEAK";
-  position: absolute;
-  top: 4px; left: 0; right: 0;
+[data-theme="chainsawman"] .historyTime {
+  color: var(--accent);
   font-family: var(--font-mono);
-  font-size: 8px;
-  letter-spacing: 0.08em;
-  color: var(--text-muted);
-  text-align: center;
-  white-space: nowrap;
 }
-[data-theme="chainsawman"] .meterNeedle {
-  display: block;
-  position: absolute;
-  left: 50%; bottom: 6px;
-  width: 3px; height: 62px;
-  background: linear-gradient(var(--accent), var(--rec));
-  transform-origin: bottom center;
-  transform: rotate(calc(-45deg + var(--level, 0) * 90deg));
-  transition: transform 0.1s cubic-bezier(.2,1.4,.4,1);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--rec) 70%, transparent);
-}
-[data-theme="chainsawman"] .meterNeedle::after {
-  content: "";
-  position: absolute;
-  bottom: -6px; left: 50%;
-  width: 12px; height: 12px;
-  transform: translateX(-50%);
-  border-radius: 50%;
-  background: var(--rec);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--rec) 70%, transparent);
-}
-
-/* ── .panelFrame: hazard stripe band on the top edge of every card/rail/panel —
-   the poster's signature diagonal orange/black band (designsystem "Hazard
-   Dividers"). Coexists with .card::before's tape mark (different element,
-   different edge treatment) rather than duplicating it. Animates while
-   recording via :has(), guarded for reduced motion. ── */
-[data-theme="chainsawman"] .panelFrame {
-  display: block;
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  height: 6px;
-  background: repeating-linear-gradient(45deg, var(--accent) 0, var(--accent) 10px, #0a0908 10px, #0a0908 20px);
-  background-size: 28px 100%;
-  pointer-events: none;
-}
-[data-theme="chainsawman"] body:has(#ptt.recording) .panelFrame {
-  background: repeating-linear-gradient(45deg, var(--rec) 0, var(--rec) 10px, #0a0908 10px, #0a0908 20px);
-  background-size: 28px 100%;
-  animation: chainsawmanHazardScroll 0.6s linear infinite;
-}
-@keyframes chainsawmanHazardScroll {
-  from { background-position: 0 0; }
-  to { background-position: 28px 0; }
-}
-
-/* ── Waveform: raw chunky bars (fallback path if a future theme swap hides
-   #meterChrome; kept in sync with the .waveform { display:none } above) ── */
-[data-theme="chainsawman"] .wbar { max-width: 9px; border-radius: 0; background: var(--accent); }
-[data-theme="chainsawman"] #ptt.recording ~ #waveform .wbar { background: var(--rec); }
-
-/* ── Hazard accents on rails ── */
-[data-theme="chainsawman"] #historyRail .label,
-[data-theme="chainsawman"] #sessionRail .label {
-  border-bottom: 6px solid;
-  border-image: repeating-linear-gradient(45deg, var(--accent) 0, var(--accent) 8px, #000 8px, #000 16px) 6;
-  padding-bottom: 8px;
-}
-[data-theme="chainsawman"] .historyEntry,
-[data-theme="chainsawman"] .sessionRow { border-bottom-color: var(--border); }
-[data-theme="chainsawman"] .historyTime,
-[data-theme="chainsawman"] .sessionKey { color: var(--accent); font-family: var(--font-mono); }
 
 /* ── Drawer ── */
 [data-theme="chainsawman"] .themeSwatch.active .swatchDot {
   box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent);
 }
 [data-theme="chainsawman"] .panelBtn.primary {
-  background: var(--accent);
-  border-color: var(--accent-2);
-  color: #1a0d05;
   font-family: var(--font-display);
   text-transform: uppercase;
-}
-[data-theme="chainsawman"] #personaInput,
-[data-theme="chainsawman"] #voiceSelect { background: var(--surface-2); }
-[data-theme="chainsawman"] #log { background: var(--surface-2); border-color: var(--border); }
-
-@media (min-width: 1024px) {
-  [data-theme="chainsawman"] #assistantText .body {
-    font-size: 44px;
-    -webkit-text-stroke: 1px rgba(0,0,0,0.5);
-  }
-  [data-theme="chainsawman"] #historyRail,
-  [data-theme="chainsawman"] #sessionRail { transform: rotate(0.1deg); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  [data-theme="chainsawman"] body:has(#ptt.recording) .panelFrame { animation: none !important; }
 }

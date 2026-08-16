@@ -23,6 +23,17 @@ webclient/themes/assets/**/*.png
 webclient/themes/assets/**/*.jpg
 webclient/themes/assets/**/*.webp
 
+# Local-only overlay: private/encumbered skins and avatar modules. Never tracked,
+# therefore never exported (the public export copies via `git ls-files`).
+webclient/themes/local/
+webclient/avatar/local/
+
+# Tests that name an encumbered local-overlay theme directly must themselves
+# stay untracked — scripts/export-public.sh's banned-string gate bans that
+# theme's own identifier, and test_webclient.py ships. See
+# webclient/test_local_themes.py's own docstring for the full rationale.
+webclient/test_local_themes.py
+
 # Working notes and local research (scout/borrow write-ups, session scratch) —
 # this repo is public; these are not for publication.
 docs/borrows/

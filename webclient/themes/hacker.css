@@ -1,94 +1,252 @@
-/* Terminal — pure black, phosphor green, scanline overlay, mono everywhere.
-   Professional terminal, not movie prop. Amber reserved for warnings/rec. */
+/* Terminal — the same Analog Studio Instrument, re-manufactured as 1980s
+   computer-room terminal hardware (VT-series / IBM-3270 plastic), not the
+   "green text on black" hacker cliche. Brushed metal -> beige injection-
+   moulded plastic. Amber lamps -> P1 phosphor green, red-zone -> P3 amber
+   phosphor. Engraved nomenclature -> flat silkscreen legend printing.
+   LCD windows / VU meter -> CRT phosphor glass with scanlines and bloom. */
 
 [data-theme="hacker"] {
-  --bg: #000000;
-  --surface: #050a05;
-  --surface-2: #0a140a;
-  --border: rgba(51, 255, 102, 0.28);
-  --text: #33ff66;
-  --text-muted: rgba(51, 255, 102, 0.55);
-  --accent: #33ff66;
-  --accent-2: #00cc55;
-  --rec: #ffb000;
-  --ok: #33ff66;
-  --warn: #ffb000;
-  --bad: #ff4444;
-  --radius: 0px;
-  --radius-sm: 0px;
-  --font-body: ui-monospace, "Cascadia Code", SFMono-Regular, Menlo, Consolas, monospace;
-  --font-display: ui-monospace, "Cascadia Code", SFMono-Regular, Menlo, Consolas, monospace;
-  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --tracking-label: 0.16em;
-  --shadow-card: 0 0 0 1px var(--border), inset 0 0 22px rgba(51,255,102,0.05);
-  --ptt-shadow-idle: 0 0 0 1px var(--accent), 0 0 22px color-mix(in srgb, var(--accent) 45%, transparent);
-  --ptt-shadow-rec: 0 0 0 2px var(--rec), 0 0 30px color-mix(in srgb, var(--rec) 60%, transparent);
-  --ptt-size: 90px;
-  --ptt-radius: 4px;
+  /* ── Instrument primitives (re-skins the whole faceplate in one move) ── */
+  --room: #141310;
+  --metal-hi: #d9d3c1;
+  --metal-mid: #b7b09b;
+  --metal-low: #948a70;
+  --metal-shadow: #5f5745;
+  --ink: #221e17;
+  --ink-dim: rgba(34, 30, 23, 0.8);
+  --cream: #7dff9f;
+  --amber: #33ff66;
+  --amber-deep: #ffb000;
+  --lamp-off: #3a3830;
+  --r: 4px;
+  --r-glass: 6px;
+  --ease: cubic-bezier(.2, 1.4, .4, 1);
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Consolas, "Liberation Mono", monospace;
+  --grotesk: var(--mono);
+
+  /* ── 23-token contract ── */
+  --bg: var(--room);
+  --surface: #201e18;
+  --surface-2: #16140f;
+  --border: rgba(0, 0, 0, 0.45);
+  --text: var(--cream);
+  --text-muted: rgba(125, 255, 159, 0.5);
+  --accent: var(--amber);
+  --accent-2: #1fae4a;
+  --rec: var(--amber-deep);
+  --ok: var(--amber);
+  --warn: var(--amber-deep);
+  --bad: #ff5a45;
+  --radius: 4px;
+  --radius-sm: 2px;
+  --font-body: var(--mono);
+  --font-display: var(--mono);
+  --font-mono: var(--mono);
+  --tracking-label: 0.14em;
+  --shadow-card: inset 0 2px 6px rgba(0, 0, 0, 0.7), inset 0 0 0 1px rgba(51, 255, 102, 0.08);
+  --ptt-shadow-idle: 0 5px 0 rgba(40, 36, 26, 0.55), 0 8px 14px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.55), inset 0 -3px 6px rgba(0, 0, 0, 0.25);
+  --ptt-shadow-rec: 0 2px 0 rgba(40, 36, 26, 0.5), 0 3px 6px rgba(0, 0, 0, 0.4), inset 0 2px 6px rgba(0, 0, 0, 0.4), 0 0 22px rgba(255, 176, 0, 0.35);
+  --ptt-size: 78px;
+  --ptt-radius: var(--r);
 }
 
-/* ── Scanline overlay: drifting, reduced-motion aware ── */
-[data-theme="hacker"] body {
+/* ── Chassis: injection-moulded plastic, pebbled texture, not metal sheen ── */
+[data-theme="hacker"] .device {
   background:
-    repeating-linear-gradient(0deg, rgba(51,255,102,0.05) 0px, rgba(51,255,102,0.05) 1px, transparent 1px, transparent 3px),
-    var(--bg);
-  position: relative;
+    repeating-radial-gradient(circle at 0 0, rgba(0, 0, 0, 0.05) 0, rgba(0, 0, 0, 0.05) 1px, transparent 1px, transparent 3px),
+    linear-gradient(165deg, var(--metal-hi) 0%, var(--metal-mid) 48%, var(--metal-low) 82%, var(--metal-shadow) 100%);
+  background-size: 4px 4px, auto;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 -2px 0 rgba(0, 0, 0, 0.35),
+    inset 1px 0 0 rgba(255, 255, 255, 0.06),
+    inset -1px 0 0 rgba(0, 0, 0, 0.24),
+    0 30px 60px rgba(0, 0, 0, 0.55),
+    0 10px 20px rgba(0, 0, 0, 0.5);
 }
-[data-theme="hacker"] body::after {
+
+/* ── Nomenclature: silkscreened legend printing, not engraved metal —
+   flat DARK ink on the light plastic (real silkscreen on beige is charcoal,
+   never light-grey-on-beige — that's not a material any terminal was ever
+   made of), no groove text-shadow (physically wrong on plastic). `.nom` is
+   printed-on-plastic by definition throughout this app (matches the base
+   sheet's own existing var(--ink) rules, e.g. `.lamp .nom`) — a blanket
+   color here is correct, not a special case, and safely loses to any
+   higher-specificity ID-anchored rule (e.g. `#ptt.recording .ptt-talk-label`
+   staying lit green while recording). ── */
+[data-theme="hacker"] .nom,
+[data-theme="hacker"] .zone-label,
+[data-theme="hacker"] .control-caption,
+[data-theme="hacker"] .ptt-talk-label,
+[data-theme="hacker"] #pttCaption,
+[data-theme="hacker"] .baseplate .nom {
+  color: var(--ink);
+  text-shadow: none;
+}
+[data-theme="hacker"] .hint {
+  color: var(--ink-dim);
+}
+[data-theme="hacker"] .rotary-current {
+  color: var(--ink);
+  text-shadow: none;
+}
+
+/* ── .lcd-label is used BOTH on bare plastic (the PERSONA/VOICE selector
+   labels — `.selector` has no background of its own) and on dark panels:
+   real CRT windows (#sessionPersonaWindow's .lcd-head, #avatarPane's
+   .lcd-head, both on --surface-2) AND .stat-strip, which paints its own
+   hardcoded near-black gradient (index.html, not token-driven — the same
+   "hardcoded, --surface doesn't reach it" pattern .lcd-window/.jack already
+   needed a component override for). Printed ink only where the plastic is
+   genuinely bare; phosphor green everywhere the panel underneath is dark —
+   never green on beige, never dark ink on near-black. ── */
+[data-theme="hacker"] .lcd-label {
+  color: var(--ink);
+}
+[data-theme="hacker"] .lcd-window .lcd-label,
+[data-theme="hacker"] .jack .lcd-label,
+[data-theme="hacker"] #avatarPane .lcd-label,
+[data-theme="hacker"] .stat-strip .lcd-label {
+  color: var(--cream);
+}
+
+/* ── LCD windows -> CRT phosphor glass: near-black glass, scanlines,
+   soft bloom on the text, subtle vignette. #log gets the same treatment but
+   its legibility is never traded away - it's the escape hatch. ── */
+[data-theme="hacker"] .lcd-window,
+[data-theme="hacker"] #settingsPanel .jack,
+[data-theme="hacker"] #settingsPanel #personaInput,
+[data-theme="hacker"] #log {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(120% 100% at 50% 0%, rgba(0, 0, 0, 0) 0%, rgba(0, 0, 0, 0.55) 100%),
+    linear-gradient(160deg, #05130a, #020a05);
+  box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.8), inset 0 0 0 1px rgba(51, 255, 102, 0.12);
+}
+[data-theme="hacker"] .lcd-window::after,
+[data-theme="hacker"] #settingsPanel .jack::after,
+[data-theme="hacker"] #settingsPanel #personaInput::after,
+[data-theme="hacker"] #log::after {
   content: "";
-  position: fixed;
+  position: absolute;
   inset: 0;
   pointer-events: none;
-  background: repeating-linear-gradient(0deg, rgba(51,255,102,0.04) 0px, rgba(51,255,102,0.04) 1px, transparent 1px, transparent 4px);
-  animation: hackerScan 6s linear infinite;
-  z-index: 999;
+  background: repeating-linear-gradient(0deg, rgba(51, 255, 102, 0.05) 0px, rgba(51, 255, 102, 0.05) 1px, transparent 1px, transparent 3px);
+}
+[data-theme="hacker"] .lcd-text {
+  text-shadow: 0 0 4px color-mix(in srgb, var(--accent) 70%, transparent), 0 0 10px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+[data-theme="hacker"] #log:not([hidden]) {
+  color: var(--cream);
+}
+[data-theme="hacker"] #settingsPanel .jack input,
+[data-theme="hacker"] #settingsPanel #personaInput {
+  color: var(--cream);
+}
+[data-theme="hacker"] #settingsPanel .jack input::placeholder {
+  color: var(--text-muted);
+}
+[data-theme="hacker"] #settingsPanel .jack:focus-within .lcd-lamp {
+  background: var(--accent);
+  box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
-[data-theme="hacker"] .card .label,
-[data-theme="hacker"] #historyRail .label,
-[data-theme="hacker"] #sessionRail .label {
-  color: var(--accent-2);
+/* ── VU meter -> phosphor CRT gauge: dark glass face, green arc/ticks/
+   labels, needle a bright green bloom trace, .meter-glass reads as CRT
+   curvature reflection instead of ivory sheen. ── */
+[data-theme="hacker"] .meter-face {
+  background:
+    repeating-linear-gradient(0deg, rgba(51, 255, 102, 0.04) 0px, rgba(51, 255, 102, 0.04) 1px, transparent 1px, transparent 3px),
+    radial-gradient(120% 90% at 50% 120%, rgba(51, 255, 102, 0.12), transparent 60%),
+    linear-gradient(160deg, #04120a, #010805);
+  box-shadow: inset 0 3px 10px rgba(0, 0, 0, 0.75), inset 0 -1px 0 rgba(51, 255, 102, 0.1);
 }
-[data-theme="hacker"] .card .label::before { content: "> "; }
+[data-theme="hacker"] .meter-glass {
+  background: linear-gradient(115deg, rgba(51, 255, 102, 0.18) 0%, rgba(51, 255, 102, 0.03) 18%, transparent 34%, transparent 72%, rgba(0, 0, 0, 0.15) 100%);
+  mix-blend-mode: screen;
+  opacity: 0.55;
+}
+[data-theme="hacker"] .gaugeArc { stroke: rgba(51, 255, 102, 0.28); }
+[data-theme="hacker"] .gaugeTick { stroke: rgba(51, 255, 102, 0.45); }
+[data-theme="hacker"] .gaugeTick.major { stroke: var(--accent); }
+[data-theme="hacker"] .gaugeLabel { fill: rgba(51, 255, 102, 0.7); }
+[data-theme="hacker"] .gaugeRedZone { stroke: var(--rec); }
+[data-theme="hacker"] #needle {
+  background: linear-gradient(180deg, var(--accent) 0%, var(--accent) 60%, color-mix(in srgb, var(--accent) 40%, transparent) 100%);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 75%, transparent), 0 0 16px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+[data-theme="hacker"] .meter-readout {
+  color: var(--accent);
+}
+[data-theme="hacker"] .meter-readout b {
+  text-shadow: 0 0 4px color-mix(in srgb, var(--accent) 55%, transparent);
+}
 
+/* ── Lamps: real panel-mount LEDs, now green when lit (base rules already
+   swap in var(--accent) for background via the primitive cascade; the glow
+   itself is hardcoded amber in the base sheet, so it's re-pointed here). ── */
+[data-theme="hacker"] html[data-va-state="connected"]:not(:has(#ptt.recording)):not(:has(#statusText.shimmer)):not(:has(#assistantText.speaking)) .lamp[data-lamp="idle"] .bulb,
+[data-theme="hacker"] body:has(#ptt.recording) .lamp[data-lamp="listening"] .bulb,
+[data-theme="hacker"] body:has(#statusText.shimmer) .lamp[data-lamp="thinking"] .bulb,
+[data-theme="hacker"] body:has(#assistantText.speaking) .lamp[data-lamp="speaking"] .bulb {
+  box-shadow: 0 0 7px color-mix(in srgb, var(--accent) 85%, transparent), inset 0 0 2px rgba(255, 255, 255, 0.5);
+}
+[data-theme="hacker"] .toggle-track[data-armed="true"] .toggle-lamp {
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 85%, transparent), inset 0 0 2px rgba(255, 255, 255, 0.5);
+}
+[data-theme="hacker"] .lcd-lamp.lit {
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 70%, transparent);
+}
+[data-theme="hacker"] .rail-stop.active {
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 80%, transparent);
+}
+[data-theme="hacker"] .rail-pointer {
+  border-top-color: var(--accent);
+}
+[data-theme="hacker"] .rotary-current {
+  text-shadow: 0 0 4px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+[data-theme="hacker"] #dot.connected {
+  box-shadow: 0 0 10px color-mix(in srgb, var(--ok) 70%, transparent);
+}
+
+/* ── Keys: beige injection-moulded keycaps, same physical "step" press
+   behaviour as the base (translateY + shadow collapse, untouched here). ── */
+[data-theme="hacker"] #ptt {
+  background: linear-gradient(180deg, var(--metal-hi) 0%, var(--metal-mid) 55%, var(--metal-low) 100%);
+  color: var(--ink);
+}
+[data-theme="hacker"] #ptt.recording {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--rec) 30%, var(--metal-mid)) 0%, var(--metal-low) 100%);
+  color: var(--rec);
+}
+
+/* ── Waveform bars: LED segment blocks ── */
+[data-theme="hacker"] .wbar {
+  border-radius: 1px;
+  box-shadow: 0 0 5px color-mix(in srgb, var(--accent) 50%, transparent);
+}
+
+/* ── Assistant readout: phosphor bloom on the hero text ── */
 [data-theme="hacker"] #assistantText .body {
-  text-shadow: 0 0 6px color-mix(in srgb, var(--accent) 65%, transparent), 0 0 14px color-mix(in srgb, var(--accent) 30%, transparent);
+  text-shadow: 0 0 5px color-mix(in srgb, var(--accent) 60%, transparent), 0 0 12px color-mix(in srgb, var(--accent) 28%, transparent);
 }
 [data-theme="hacker"] #assistantText.speaking {
-  border-color: var(--accent);
-  box-shadow: var(--shadow-card), 0 0 24px color-mix(in srgb, var(--accent) 40%, transparent);
+  box-shadow: var(--shadow-card), 0 0 20px color-mix(in srgb, var(--accent) 35%, transparent);
 }
 [data-theme="hacker"] #statusText.shimmer {
   background: linear-gradient(90deg, var(--text-muted) 0%, var(--accent) 50%, var(--text-muted) 100%);
   background-size: 200% 100%;
 }
 
-/* ── PTT: green glow idle, amber while recording ── */
-[data-theme="hacker"] #ptt {
-  background: #000;
-  color: var(--accent);
-}
-[data-theme="hacker"] #ptt.recording { background: #0a0500; color: var(--rec); }
-[data-theme="hacker"] #pttCaption { text-transform: lowercase; }
-[data-theme="hacker"] #pttCaption::before { content: "$ "; color: var(--accent-2); }
-
-/* ── Waveform: dot/ASCII block bars ── */
-[data-theme="hacker"] .wbar {
-  max-width: 4px;
-  border-radius: 0;
-  background: var(--accent);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 55%, transparent);
-}
-[data-theme="hacker"] #ptt.recording ~ #waveform .wbar {
-  background: var(--rec);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--rec) 55%, transparent);
-}
-
 /* ── Rails / history / session ── */
-[data-theme="hacker"] .historyTime,
-[data-theme="hacker"] .sessionKey { color: var(--accent-2); }
-[data-theme="hacker"] .historyEntry,
-[data-theme="hacker"] .sessionRow { border-bottom-color: var(--border); }
+[data-theme="hacker"] .card .label,
+[data-theme="hacker"] #historyRail .label,
+[data-theme="hacker"] #sessionRail .label {
+  color: var(--accent-2);
+}
+[data-theme="hacker"] .card .label::before { content: "> "; }
 
 /* ── Drawer ── */
 [data-theme="hacker"] .themeSwatch.active .swatchDot {
@@ -97,25 +255,5 @@
 [data-theme="hacker"] .panelBtn.primary {
   background: var(--accent);
   border-color: var(--accent);
-  color: #000;
-}
-[data-theme="hacker"] #personaInput,
-[data-theme="hacker"] #voiceSelect {
-  background: #000;
-  border-color: var(--border);
-  color: var(--accent);
-}
-[data-theme="hacker"] #log {
-  background: #000;
-  border-color: var(--border);
-  color: var(--accent);
-}
-
-@keyframes hackerScan {
-  0% { transform: translateY(0); }
-  100% { transform: translateY(4px); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  [data-theme="hacker"] body::after { animation: none !important; }
+  color: var(--room);
 }

@@ -21,8 +21,12 @@ All of it is skipped when any of that is missing, so the suite still passes on
 a machine that only ever runs the pipeline.
 """
 
+import io
 import json
 import os
+import re
+import shutil
+import subprocess
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
@@ -30,6 +34,11 @@ import pytest
 
 websockets = pytest.importorskip("websockets", reason="websockets not installed")
 sync_api = pytest.importorskip("playwright.sync_api", reason="playwright not installed")
+# Already in this venv (not a new project dependency) — used only to sample real
+# rendered background pixels for the WCAG contrast gate below, since a token- or
+# backgroundColor-based guess can't see gradient/image backgrounds and produced
+# a false pass once already (see CONTRAST_PAIRS' comment).
+Image = pytest.importorskip("PIL.Image", reason="Pillow not installed")
 
 import asyncio  # noqa: E402  — only reachable once the two imports above succeed
 
@@ -172,12 +181,45 @@ class StubControlServer:
 
 
 @pytest.fixture(scope="module")
-def static_server():
-    """Serves this directory, so index.html loads over http (a secure context,
-    which getUserMedia requires) rather than file://."""
+def _webclient_temp_root(tmp_path_factory):
+    """A disposable, copy-on-write webclient root — this is what
+    `static_server` actually serves, so the real gitignored
+    `themes/local/`/`avatar/local/` are NEVER opened, moved, written to, or
+    deleted by anything in this suite (the previous mechanism did all four,
+    and cost this developer real, unrecoverable local-only content twice).
+
+    Every top-level entry in `HERE` is SYMLINKED into a fresh temp dir
+    (near-zero cost — no real file copying) except `themes/` and `avatar/`,
+    which get REAL directories whose own children are individually
+    symlinked except `local/` — left as a genuine, empty, throwaway
+    directory local_theme_dir/local_avatar_dir below read/write freely.
+    Absent by default, exactly like a fresh clone; each test's own
+    os.makedirs(...)/_write(...) populates it, or doesn't, per scenario."""
+    root = tmp_path_factory.mktemp("webclient_root")
+    for name in os.listdir(HERE):
+        if name in ("themes", "avatar"):
+            continue
+        os.symlink(os.path.join(HERE, name), os.path.join(root, name))
+    for sub, local_name in (("themes", "local"), ("avatar", "local")):
+        sub_root = os.path.join(root, sub)
+        os.makedirs(sub_root, exist_ok=True)
+        real_sub_dir = os.path.join(HERE, sub)
+        for name in os.listdir(real_sub_dir):
+            if name == local_name:
+                continue
+            os.symlink(os.path.join(real_sub_dir, name), os.path.join(sub_root, name))
+        # sub_root/local intentionally NOT created here — see docstring.
+    return str(root)
+
+
+@pytest.fixture(scope="module")
+def static_server(_webclient_temp_root):
+    """Serves the disposable temp root (never the real repo directory), so
+    index.html loads over http (a secure context, which getUserMedia
+    requires) rather than file://."""
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self, *a, **kw):
-            super().__init__(*a, directory=HERE, **kw)
+            super().__init__(*a, directory=_webclient_temp_root, **kw)
 
         def log_message(self, *a):
             pass
@@ -1012,6 +1054,380 @@ def test_camera_uses_saved_device(browser, static_server):
     assert not errors, f"uncaught page errors: {errors}"
 
 
+# ── Local overlay (themes/local, avatar/local): gitignored dirs that hold
+# encumbered/private skins and avatar modules, merged in at boot if present.
+# This developer's own clone has real, unrecoverable content there (see
+# .gitignore) — these fixtures point at the disposable directories inside
+# `_webclient_temp_root` (see that fixture, above `static_server`), never
+# the real ones. Zero writes/moves/deletes ever touch the real repo dirs;
+# only the temp root's own throwaway `themes/local`/`avatar/local` are
+# created, populated, or reset between tests.
+
+
+@pytest.fixture
+def local_theme_dir(_webclient_temp_root):
+    path = os.path.join(_webclient_temp_root, "themes", "local")
+    yield path
+    shutil.rmtree(path, ignore_errors=True)  # reset for the next test — the temp root only
+
+
+@pytest.fixture
+def local_avatar_dir(_webclient_temp_root):
+    path = os.path.join(_webclient_temp_root, "avatar", "local")
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
+def _write(path, content):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(content)
+
+
+def _new_page(browser, static_server, server, extra_init="", console_records=None):
+    """A page pointed at the stub control server, avatar module loading
+    disabled (not under test here) — same shape as the `client` fixture, but
+    self-contained so callers can write themes/local or avatar/local content
+    on disk BEFORE navigating, with no fixture-ordering ambiguity.
+
+    `console_records`: optional mutable list. If given, every console ERROR
+    also gets appended there as (text, location) — location carries the
+    failing resource's own url, which Chromium's generic "Failed to load
+    resource" text never does — so a caller can narrow-filter by URL rather
+    than by the (identical for every 404) text alone. `console_errors` (the
+    plain-text list, unchanged) stays the default for every existing caller."""
+    ctx = browser.new_context(permissions=["microphone"], viewport={"width": 1280, "height": 900})
+    page = ctx.new_page()
+    errors = []
+    console_errors = []
+
+    def _on_console(m):
+        if m.type != "error":
+            return
+        console_errors.append(m.text)
+        if console_records is not None:
+            console_records.append((m.text, m.location))
+
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    # Attached before goto — a listener added after navigation would miss any
+    # console.error a fast local fetch/import fires before the caller gets
+    # around to checking it.
+    page.on("console", _on_console)
+    page.add_init_script(
+        f"localStorage.setItem('va-ws-url', 'ws://127.0.0.1:{server.port}');"
+        "localStorage.setItem('va-avatar', 'off');"
+        "try{localStorage.setItem('va-firstrun-done','1')}catch(e){}" + extra_init)
+    page.goto(f"http://127.0.0.1:{static_server}/index.html")
+    page.wait_for_function("() => ws && ws.readyState === 1", timeout=15000)
+    return ctx, page, errors, console_errors
+
+
+def test_local_theme_appears_and_loads_from_local_path(browser, static_server, local_theme_dir):
+    """A theme registered only in themes/local/themes.json shows up in the
+    picker, and selecting it injects a stylesheet from themes/local/<id>.css
+    — not themes/<id>.css, which doesn't exist for a local-only id."""
+    os.makedirs(local_theme_dir, exist_ok=True)
+    _write(os.path.join(local_theme_dir, "themes.json"),
+           json.dumps([{"id": "localskin", "name": "Local Skin", "swatch": ["#111111", "#eeeeee"]}]))
+    _write(os.path.join(local_theme_dir, "localskin.css"), "body{}")
+
+    server = StubControlServer()
+    server.start()
+    ctx, page, errors, console_errors = _new_page(browser, static_server, server)
+    page.wait_for_function(
+        "() => typeof customThemes !== 'undefined' && customThemes.some(t => t.id === 'localskin')",
+        timeout=10000)
+
+    names = page.evaluate("() => Array.from(document.querySelectorAll('#themeSwatches .swatchName'))"
+                           ".map(n => n.textContent)")
+    assert "Local Skin" in names, "local-only theme did not appear in the picker"
+
+    page.evaluate("() => setTheme('localskin')")
+    hrefs = page.evaluate("() => Array.from(document.querySelectorAll('link[rel=\"stylesheet\"]'))"
+                           ".map(l => l.getAttribute('href'))")
+    assert "themes/local/localskin.css" in hrefs, f"wrong stylesheet path, got: {hrefs}"
+    assert "themes/localskin.css" not in hrefs
+
+    ctx.close()
+    server.stop()
+    assert not errors, f"uncaught page errors: {errors}"
+
+
+def test_local_theme_font_faces_fetch_from_tracked_fonts_dir(browser, static_server, local_theme_dir):
+    """A local skin lives one directory deeper than a tracked one
+    (themes/local/<id>.css vs themes/<id>.css), so a CSS-relative @font-face
+    url pointing at the shared TRACKED themes/fonts/ dir needs `../` to reach
+    it — `url("fonts/...")` would resolve to the nonexistent
+    themes/local/fonts/ and 404 silently. Covers BOTH weights (700 Bold, 900
+    Black): checking only one is exactly what let a broken second url()
+    through undetected once already. Asserts on the actual network response
+    (status + a nonzero body), not document.fonts.check(), which can report
+    true off a fallback face."""
+    os.makedirs(local_theme_dir, exist_ok=True)
+    _write(os.path.join(local_theme_dir, "themes.json"),
+           json.dumps([{"id": "localskin", "name": "Local Skin", "swatch": ["#111111", "#eeeeee"]}]))
+    _write(os.path.join(local_theme_dir, "localskin.css"), (
+        '@font-face { font-family: "LocalSkinTestFont"; '
+        'src: url("../fonts/Cinzel-Bold.woff2") format("woff2"); '
+        'font-weight: 700; font-style: normal; }\n'
+        '@font-face { font-family: "LocalSkinTestFont"; '
+        'src: url("../fonts/Cinzel-Black.woff2") format("woff2"); '
+        'font-weight: 900; font-style: normal; }\n'
+    ))
+
+    server = StubControlServer()
+    server.start()
+    ctx, page, errors, console_errors = _new_page(browser, static_server, server)
+
+    font_responses = {}  # weight -> Response, keyed as the requests are observed
+
+    def on_response(resp):
+        if "Cinzel-Bold.woff2" in resp.url:
+            font_responses["700"] = resp
+        elif "Cinzel-Black.woff2" in resp.url:
+            font_responses["900"] = resp
+
+    page.on("response", on_response)
+
+    page.wait_for_function(
+        "() => typeof customThemes !== 'undefined' && customThemes.some(t => t.id === 'localskin')",
+        timeout=10000)
+    page.evaluate("() => setTheme('localskin')")
+    # The @font-face rules only exist in the CSSOM once the injected <link>'s
+    # stylesheet has actually loaded — race document.fonts.load() against
+    # that and it can resolve empty before the rules are even parsed.
+    page.wait_for_function(
+        "() => Array.from(document.styleSheets).some(s => (s.href || '').includes('themes/local/localskin.css')"
+        " && s.cssRules && s.cssRules.length > 0)",
+        timeout=10000)
+
+    # Awaited sequentially inside one evaluate() call so both network
+    # requests have settled (success or failure) by the time it returns —
+    # forces the fetch regardless of whether anything in the (known-broken,
+    # pre-port) skin DOM currently renders text in this font.
+    page.evaluate("""async () => {
+        for (const w of ['700', '900']) {
+            try { await document.fonts.load(w + ' 16px LocalSkinTestFont'); } catch {}
+        }
+    }""")
+
+    for weight, needle in (("700", "Cinzel-Bold.woff2"), ("900", "Cinzel-Black.woff2")):
+        assert weight in font_responses, f"no network request observed for {needle} ({weight})"
+        resp = font_responses[weight]
+        assert resp.status == 200, f"{needle} ({weight}) did not 200: {resp.status} {resp.url}"
+        body = resp.body()
+        assert len(body) > 0, f"{needle} ({weight}) returned an empty body"
+
+    ctx.close()
+    server.stop()
+    assert not errors, f"uncaught page errors: {errors}"
+
+
+def test_local_theme_collision_replaces_tracked_entry_in_place(browser, static_server, local_theme_dir):
+    """A local id colliding with a tracked one replaces it IN PLACE — the
+    picker's entry count and ordering versus the tracked-only case
+    (chainsawman, hacker) must not shift just because a local override
+    exists."""
+    os.makedirs(local_theme_dir, exist_ok=True)
+    _write(os.path.join(local_theme_dir, "themes.json"),
+           json.dumps([{"id": "chainsawman", "name": "Local Override", "swatch": ["#010101", "#020202"]}]))
+
+    server = StubControlServer()
+    server.start()
+    ctx, page, errors, console_errors = _new_page(browser, static_server, server)
+    page.wait_for_function(
+        "() => typeof customThemes !== 'undefined' && customThemes.length === 2", timeout=10000)
+
+    merged = page.evaluate("() => customThemes.map(t => ({id: t.id, name: t.name}))")
+    assert merged == [{"id": "chainsawman", "name": "Local Override"}, {"id": "hacker", "name": "Terminal"}], \
+        f"collision did not replace in place / order shifted: {merged}"
+
+    ctx.close()
+    server.stop()
+    assert not errors, f"uncaught page errors: {errors}"
+
+
+def test_absent_local_theme_manifest_is_silent(browser, static_server, local_theme_dir):
+    """The clean-clone case: no themes/local/ directory at all. Tracked
+    themes load as normal, with zero console errors and no unhandled
+    rejection."""
+    assert not os.path.isdir(local_theme_dir)  # fixture backed up any real content; nothing recreated it
+
+    server = StubControlServer()
+    server.start()
+    ctx, page, errors, console_errors = _new_page(browser, static_server, server)
+    page.wait_for_function(
+        "() => typeof customThemes !== 'undefined' && customThemes.length === 2", timeout=10000)
+
+    tracked = page.evaluate("() => customThemes.map(t => t.id)")
+    assert tracked == ["chainsawman", "hacker"]
+    # Chromium logs its own "Failed to load resource: 404" devtools network
+    # entry for the local manifest 404 regardless of app code — unrelated to
+    # and unsuppressable by loadCustomThemes; only app-level console.error
+    # calls indicate a regression here.
+    app_errors = [e for e in console_errors if "Failed to load resource" not in e]
+    assert app_errors == [], f"console.error fired for an absent local manifest: {app_errors}"
+
+    ctx.close()
+    server.stop()
+    assert not errors, f"uncaught page errors: {errors}"
+
+
+LOCAL_AVATAR_REGISTRY_MJS = (
+    "export default [{ id: 'localhead', name: 'Local Head', kind: '2d' }];\n"
+)
+
+
+def test_local_avatar_registry_entry_appears_in_picker(browser, static_server, local_avatar_dir):
+    """An avatar contributed only by avatar/local/registry.mjs shows up in
+    #avatarSelect."""
+    os.makedirs(local_avatar_dir, exist_ok=True)
+    _write(os.path.join(local_avatar_dir, "registry.mjs"), LOCAL_AVATAR_REGISTRY_MJS)
+
+    server = StubControlServer()
+    server.start()
+    ctx, page, errors, console_errors = _new_page(browser, static_server, server)
+    page.wait_for_function(
+        "() => Array.from(document.getElementById('avatarSelect').options).some(o => o.value === 'localhead')",
+        timeout=10000)
+
+    ctx.close()
+    server.stop()
+    assert not errors, f"uncaught page errors: {errors}"
+
+
+def test_absent_local_avatar_registry_is_silent(browser, static_server, local_avatar_dir):
+    """No avatar/local/registry.mjs (the normal case) — the built-in
+    registry populates the picker and logs no error."""
+    assert not os.path.isdir(local_avatar_dir)
+
+    server = StubControlServer()
+    server.start()
+    ctx, page, errors, console_errors = _new_page(browser, static_server, server)
+    page.wait_for_function(
+        "() => document.getElementById('avatarSelect').options.length > 0", timeout=10000)
+
+    values = page.evaluate("() => Array.from(document.getElementById('avatarSelect').options).map(o => o.value)")
+    assert "localhead" not in values
+    assert "brunette" in values
+    # Same native 404 devtools noise as the theme manifest case (see there);
+    # filtered out, only app-level console.error calls should remain.
+    app_errors = [e for e in console_errors if "Failed to load resource" not in e]
+    assert app_errors == [], f"console.error fired for an absent local registry: {app_errors}"
+
+    ctx.close()
+    server.stop()
+    assert not errors, f"uncaught page errors: {errors}"
+
+
+def test_saved_local_avatar_id_resolves_instead_of_falling_back(browser, static_server, local_avatar_dir):
+    """The async-import ordering seam: a saved va-avatar-model pointing at a
+    LOCAL avatar id must resolve to that entry once the local registry has
+    merged, not silently fall back to DEFAULT_AVATAR_ID because the picker
+    (and selectedAvatarId's validity check) ran before the merge landed."""
+    os.makedirs(local_avatar_dir, exist_ok=True)
+    _write(os.path.join(local_avatar_dir, "registry.mjs"), LOCAL_AVATAR_REGISTRY_MJS)
+
+    server = StubControlServer()
+    server.start()
+    ctx, page, errors, console_errors = _new_page(
+        browser, static_server, server,
+        extra_init="localStorage.setItem('va-avatar-model', 'localhead');")
+    page.wait_for_function(
+        "() => document.getElementById('avatarSelect').options.length > 0", timeout=10000)
+
+    assert page.evaluate("() => selectedAvatarId()") == "localhead", \
+        "saved local avatar id fell back to the default instead of resolving"
+    assert page.evaluate("() => document.getElementById('avatarSelect').value") == "localhead", \
+        "the picker's selected option did not reflect the saved local avatar id"
+
+    ctx.close()
+    server.stop()
+    assert not errors, f"uncaught page errors: {errors}"
+
+
+def _release_tooling_available(repo_root):
+    """True only in the real dev repo: scripts/ ships there but is
+    deliberately excluded from every export (export-public.sh's own
+    EXCLUDES — "release/QA tooling stays private"), and an exported tree
+    has no `.git` at all, so `git show`/`git ls-files` history is
+    unavailable too. Tests that need either are private-tree-only and
+    should skip cleanly wherever this is false, not fail — a downstream
+    stranger running the full suite off their own clone ships this exact
+    file verbatim and would otherwise hit a nuisance failure for a dev-only
+    reason unrelated to anything they broke."""
+    if not os.path.isfile(os.path.join(repo_root, "scripts", "export-public.sh")):
+        return False
+    result = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        cwd=repo_root, capture_output=True, text=True)
+    return result.returncode == 0 and result.stdout.strip() == "true"
+
+
+def test_export_script_excludes_local_overlay_dirs(tmp_path):
+    """scripts/export-public.sh must exit 0 and produce a tree with neither
+    webclient/themes/local/ nor webclient/avatar/local/ anywhere — they're
+    untracked (git ls-files already skips them), so the export needs no
+    special-case transform for them at all."""
+    repo_root = os.path.dirname(HERE)
+    if not _release_tooling_available(repo_root):
+        pytest.skip("release tooling is not part of the public export "
+                    "(scripts/ and git history are private-tree-only)")
+    dest = os.path.join(str(tmp_path), "pbexp")
+    result = subprocess.run(
+        ["bash", "scripts/export-public.sh", dest],
+        cwd=repo_root, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, f"export failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+    assert os.path.isfile(dest + ".report.txt")
+
+    local_hits = [os.path.join(root, d) for root, dirs, _ in os.walk(dest) for d in dirs if d == "local"]
+    assert local_hits == [], f"local overlay dir(s) leaked into the export: {local_hits}"
+
+
+def test_exported_tree_test_suite_still_collects(tmp_path):
+    """The export gate above only sweeps for banned strings — it says
+    nothing about whether the exported test_webclient.py can even be
+    IMPORTED by pytest on a clean clone, where themes/local/ never exists.
+    A module-level file read at collection time (this exact defect shipped
+    once already) makes pytest abort with "N errors during collection" and
+    ZERO tests run — worse than a failing test, since a stranger reasonably
+    reads that as the whole project being broken. --collect-only keeps this
+    fast (no browser launch) while still exercising the failure mode that
+    matters: import-time explosion. Collecting is not passing, though — this
+    is also the release gate, so a second, real (non-collect-only) run
+    follows: zero failures allowed, skips fine (the genuinely
+    private-tree-only tests each skip with their own clear reason)."""
+    repo_root = os.path.dirname(HERE)
+    if not _release_tooling_available(repo_root):
+        pytest.skip("release tooling is not part of the public export "
+                    "(scripts/ and git history are private-tree-only)")
+    dest = os.path.join(str(tmp_path), "pbexp")
+    export = subprocess.run(
+        ["bash", "scripts/export-public.sh", dest],
+        cwd=repo_root, capture_output=True, text=True, timeout=60)
+    assert export.returncode == 0, f"export failed:\nstdout: {export.stdout}\nstderr: {export.stderr}"
+
+    collect = subprocess.run(
+        ["python3", "-m", "pytest", "test_webclient.py", "--collect-only", "-q"],
+        cwd=os.path.join(dest, "webclient"), capture_output=True, text=True, timeout=60)
+    assert collect.returncode == 0, (
+        f"exported test_webclient.py failed to COLLECT (not just run) on a clean clone:\n"
+        f"stdout: {collect.stdout}\nstderr: {collect.stderr}")
+
+    # "N/... tests collected" (or "no tests ran" if deps are missing here, which
+    # would itself be a false pass) - assert a real nonzero count was found.
+    match = re.search(r"(\d+) tests? collected", collect.stdout)
+    assert match and int(match.group(1)) > 0, (
+        f"expected a nonzero collected-test count, got:\n{collect.stdout}")
+
+    run = subprocess.run(
+        ["python3", "-m", "pytest", "test_webclient.py", "-q"],
+        cwd=os.path.join(dest, "webclient"), capture_output=True, text=True, timeout=120)
+    assert run.returncode == 0, (
+        f"exported test_webclient.py collected but did not pass cleanly on a clean clone "
+        f"(skips are fine, failures are not):\nstdout: {run.stdout}\nstderr: {run.stderr}")
+
+
 # ── serve.py: clickjacking headers + /models query-string & HEAD handling ──
 #
 # Plain http.client requests against the REAL serve.py Handler (not the
@@ -1066,3 +1482,597 @@ def test_models_endpoint_supports_head(serve_py_server):
     assert resp.status in (200, 503)
     assert body == b""
     assert resp.getheader("Content-Length") not in (None, "0")
+
+
+# ── check-hooks.py gate (Terminal skin rebuild) ─────────────────────────
+# check-theme.py only verifies scoping; it says nothing about whether a
+# selector's id/class still exists post-port. check-hooks.py closes that
+# gap — these three prove it does, on the actual page and the actual themes.
+
+THEMES_DIR = os.path.join(HERE, "themes")
+CHECK_HOOKS = os.path.join(THEMES_DIR, "check-hooks.py")
+INDEX_HTML = os.path.join(HERE, "index.html")
+
+
+# The absent local overlay (themes/local/, avatar/local/ — untracked-by-design,
+# normal on every clone but this developer's own) makes Chromium emit its own
+# unsuppressable native "Failed to load resource: 404" console line for these
+# two urls specifically — no application code can silence a devtools network
+# log, and the app itself already handles both absences silently and
+# correctly (see the local-overlay tests elsewhere in this file). Filtering
+# is by URL (from the console message's .location, which Chromium's generic
+# 404 text never carries), not by text alone — a genuinely missing
+# stylesheet/font must still fail whatever asserts against this.
+KNOWN_OPTIONAL_LOCAL_OVERLAY_404_URLS = ("avatar/local/registry.mjs", "themes/local/themes.json")
+
+
+def _filter_known_optional_404s(console_records):
+    out = []
+    for text, location in console_records:
+        url = (location or {}).get("url", "")
+        if "Failed to load resource" in text and any(
+                url.endswith(u) for u in KNOWN_OPTIONAL_LOCAL_OVERLAY_404_URLS):
+            continue
+        out.append(text)
+    return out
+
+
+def test_hacker_theme_applies_and_repaints_with_no_console_errors(browser, static_server):
+    """Selecting the Terminal (hacker) theme sets data-theme on <html>,
+    injects themes/hacker.css, and leaves the page with zero console errors —
+    and it must have actually re-skinned, not merely loaded (see the
+    computed-style assertion below)."""
+    server = StubControlServer()
+    server.start()
+    console_records = []
+    ctx, page, errors, console_errors = _new_page(
+        browser, static_server, server, console_records=console_records)
+
+    default_device_bg = page.evaluate(
+        "() => getComputedStyle(document.querySelector('.device')).backgroundImage")
+
+    page.evaluate("() => setTheme('hacker')")
+    page.wait_for_function("() => document.documentElement.getAttribute('data-theme') === 'hacker'")
+    # data-theme flipping is not enough — the injected <link> still needs its
+    # stylesheet to actually fetch/parse before computed values reflect it.
+    # Under load this raced and intermittently read hacker.css hrefs, into
+    # a page still painted with the previous theme's rules (observed twice:
+    # once as a reported flake, once as a false screenshot of `instrument`
+    # captioned `chainsawman`) — see THEME-SPEC.md and this file's history.
+    page.wait_for_function(
+        "() => Array.from(document.styleSheets).some(s => (s.href || '').includes('themes/hacker.css')"
+        " && s.cssRules && s.cssRules.length > 0)",
+        timeout=10000)
+    hrefs = page.evaluate("() => Array.from(document.querySelectorAll('link[rel=\"stylesheet\"]'))"
+                           ".map(l => l.getAttribute('href'))")
+    assert "themes/hacker.css" in hrefs, f"hacker.css was not injected, got: {hrefs}"
+
+    themed_accent = page.evaluate(
+        "() => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()")
+    assert themed_accent.lower() == "#33ff66"
+
+    # .device's chassis background is component-fidelity work, not a token
+    # swap (the old hacker.css never touched it — see the pre-rewrite proof
+    # below) — this is what proves the skin actually re-manufactured the
+    # faceplate rather than just recoloring CSS variables.
+    themed_device_bg = page.evaluate(
+        "() => getComputedStyle(document.querySelector('.device')).backgroundImage")
+    assert themed_device_bg != default_device_bg, \
+        "theme selection loaded but .device's chassis background did not actually change"
+
+    ctx.close()
+    server.stop()
+    assert not errors, f"uncaught page errors: {errors}"
+    app_errors = _filter_known_optional_404s(console_records)
+    assert not app_errors, f"console errors after selecting hacker theme: {app_errors}"
+
+
+# chainsawman.css previously carried real, pre-existing dead selectors
+# (.sessionRow / .sessionKey, plus the same "~ can never match" combinator
+# bug hacker.css had — #ptt.recording ~ #meterChrome / ~ #waveform aren't
+# siblings either). The T3 Devil Hunter rebuild fixed both — this set is now
+# empty, kept (rather than deleted) as the documented home for a future
+# theme file that's known to fail check-hooks.py for reasons out of scope
+# for its own slice.
+KNOWN_DEAD_HOOK_THEMES = set()
+
+
+def test_check_hooks_passes_on_every_tracked_theme_css():
+    """Regression guard for the gate itself: every theme CSS file tracked in
+    this repo must pass check-hooks.py against the real index.html, so a
+    future skin can never reintroduce a dead selector (a class renamed out
+    from under it, or a `~`/`+` combinator that can no longer match) without
+    the test suite catching it."""
+    theme_files = sorted(
+        f for f in os.listdir(THEMES_DIR)
+        if f.endswith(".css") and os.path.isfile(os.path.join(THEMES_DIR, f))
+    )
+    assert theme_files, "no tracked theme CSS files found — fixture path is wrong"
+    for css_name in theme_files:
+        css_path = os.path.join(THEMES_DIR, css_name)
+        result = subprocess.run(
+            ["python3", CHECK_HOOKS, css_path, INDEX_HTML],
+            capture_output=True, text=True)
+        if css_name in KNOWN_DEAD_HOOK_THEMES:
+            assert result.returncode == 1, (
+                f"{css_name} was expected to still have known dead hooks (returncode 1) "
+                f"but check-hooks.py now reports it clean — update KNOWN_DEAD_HOOK_THEMES:\n"
+                f"{result.stdout}{result.stderr}")
+            continue
+        assert result.returncode == 0, (
+            f"check-hooks.py failed on {css_name}:\n{result.stdout}{result.stderr}")
+
+
+def test_check_hooks_catches_the_known_dead_hacker_selectors(tmp_path):
+    """Proves the gate itself actually works, not just that today's hacker.css
+    happens to be clean: feed it the pre-rewrite hacker.css (git history,
+    commit a028973) and confirm it fails and names the id/class removed by
+    the DOM port, plus the sibling combinator that can never match."""
+    if not _release_tooling_available(os.path.dirname(HERE)):
+        pytest.skip("release tooling is not part of the public export "
+                    "(scripts/ and git history are private-tree-only)")
+    old_hacker = subprocess.run(
+        ["git", "show", "a028973:webclient/themes/hacker.css"],
+        cwd=HERE, capture_output=True, text=True, check=True).stdout
+    old_path = tmp_path / "hacker.css"
+    old_path.write_text(old_hacker)
+
+    result = subprocess.run(
+        ["python3", CHECK_HOOKS, str(old_path), INDEX_HTML],
+        capture_output=True, text=True)
+    assert result.returncode == 1
+    assert "sessionKey" in result.stdout
+    assert "sessionRow" in result.stdout
+    assert "'#ptt.recording' and '#waveform' are not siblings" in result.stdout
+
+
+# ── chainsawman (Devil Hunter): tracked motif skin + local art overlay ──────
+# The tracked file ships publicly and must carry zero references to
+# `assets/` (that's the whole point of the split — real character art never
+# leaves this developer's own clone). The local file at themes/local/
+# REPLACES the tracked one in place when both share an id (see THEME-SPEC.md
+# "Local overlay") rather than cascading on top of it.
+#
+# themes/local/ is gitignored and therefore absent on every clone but this
+# developer's own — that absence is the NORMAL case, not an error, so its
+# content must never be read at MODULE level (an exported/clean-clone import
+# would raise FileNotFoundError and abort collection for the WHOLE file,
+# taking every other test down with it — this exact defect shipped once).
+# `chainsawman_local_css` below is a module-scoped fixture instead: pytest
+# instantiates module-scoped fixtures before function-scoped ones for the
+# same test, so it still reads the file before `local_theme_dir` moves the
+# real directory aside (preserving the "exercise the ACTUAL shipping file"
+# property), and tests that depend on it skip cleanly when it's absent
+# rather than exploding collection.
+CHAINSAWMAN_TRACKED_CSS_PATH = os.path.join(THEMES_DIR, "chainsawman.css")
+CHAINSAWMAN_LOCAL_CSS_PATH = os.path.join(THEMES_DIR, "local", "chainsawman.css")
+
+
+@pytest.fixture(scope="module")
+def chainsawman_local_css():
+    if not os.path.isfile(CHAINSAWMAN_LOCAL_CSS_PATH):
+        pytest.skip("themes/local/chainsawman.css absent (normal on a clean clone — "
+                    "the local art overlay is untracked-by-design and only exists on "
+                    "this developer's own machine)")
+    with open(CHAINSAWMAN_LOCAL_CSS_PATH, encoding="utf-8") as f:
+        return f.read()
+
+
+def test_chainsawman_tracked_css_contains_no_assets_reference():
+    """The public/tracked skin must be pure CSS motif work — no `assets/`
+    url anywhere — so the export can never leak character art. This is the
+    guard that would catch the split being done backwards (art rules landing
+    in the tracked file instead of the local overlay)."""
+    with open(CHAINSAWMAN_TRACKED_CSS_PATH, encoding="utf-8") as f:
+        css_text = f.read()
+    assert "assets/" not in css_text, \
+        "tracked chainsawman.css references assets/ — character art must only live in themes/local/chainsawman.css"
+
+
+def test_chainsawman_theme_applies_and_repaints_with_no_console_errors(browser, static_server, local_theme_dir):
+    """Selecting Devil Hunter (chainsawman) sets data-theme on <html>,
+    injects the TRACKED themes/chainsawman.css (this developer's own real
+    themes/local/ overlay is swapped aside by the fixture so this proves the
+    public file specifically, not whatever local override happens to be on
+    disk), and leaves the page with zero console errors — and it must have
+    actually re-skinned, not merely loaded."""
+    assert not os.path.isdir(local_theme_dir)  # fixture backed up any real content; nothing recreated it
+
+    server = StubControlServer()
+    server.start()
+    ctx, page, errors, console_errors = _new_page(browser, static_server, server)
+
+    default_device_bg = page.evaluate(
+        "() => getComputedStyle(document.querySelector('.device')).backgroundImage")
+
+    page.evaluate("() => setTheme('chainsawman')")
+    page.wait_for_function("() => document.documentElement.getAttribute('data-theme') === 'chainsawman'")
+    # See test_hacker_theme_applies_and_repaints_with_no_console_errors above
+    # for why this wait is required, not optional: data-theme flipping alone
+    # does not guarantee the injected stylesheet has parsed yet.
+    page.wait_for_function(
+        "() => Array.from(document.styleSheets).some(s => (s.href || '').includes('themes/chainsawman.css')"
+        " && s.cssRules && s.cssRules.length > 0)",
+        timeout=10000)
+    hrefs = page.evaluate("() => Array.from(document.querySelectorAll('link[rel=\"stylesheet\"]'))"
+                           ".map(l => l.getAttribute('href'))")
+    assert "themes/chainsawman.css" in hrefs, f"chainsawman.css was not injected, got: {hrefs}"
+    assert "themes/local/chainsawman.css" not in hrefs
+
+    themed_accent = page.evaluate(
+        "() => getComputedStyle(document.documentElement).getPropertyValue('--accent').trim()")
+    assert themed_accent.lower() == "#ff5a1f"
+
+    themed_device_bg = page.evaluate(
+        "() => getComputedStyle(document.querySelector('.device')).backgroundImage")
+    assert themed_device_bg != default_device_bg, \
+        "theme selection loaded but .device's chassis background did not actually change"
+
+    ctx.close()
+    server.stop()
+    assert not errors, f"uncaught page errors: {errors}"
+    # local_theme_dir is absent for this test (proving the TRACKED file) —
+    # Chromium logs its own devtools 404 for that manifest fetch regardless
+    # of app code, same noise test_absent_local_theme_manifest_is_silent
+    # already filters; only app-level console.error calls matter here.
+    app_errors = [e for e in console_errors if "Failed to load resource" not in e]
+    assert app_errors == [], f"console errors after selecting chainsawman theme: {app_errors}"
+
+
+def test_local_chainsawman_overlay_replaces_tracked_entry_in_place(
+        browser, static_server, local_theme_dir, chainsawman_local_css):
+    """A local chainsawman entry REPLACES the tracked one in place — the
+    picker's entry count and ordering versus the tracked-only case must not
+    shift, and selecting it must inject themes/local/chainsawman.css, not
+    themes/chainsawman.css. Skips on a clean clone (see chainsawman_local_css)."""
+    os.makedirs(local_theme_dir, exist_ok=True)
+    _write(os.path.join(local_theme_dir, "themes.json"),
+           json.dumps([{"id": "chainsawman", "name": "Devil Hunter", "swatch": ["#121110", "#ff5a1f"]}]))
+    _write(os.path.join(local_theme_dir, "chainsawman.css"), chainsawman_local_css)
+
+    server = StubControlServer()
+    server.start()
+    ctx, page, errors, console_errors = _new_page(browser, static_server, server)
+    page.wait_for_function(
+        "() => typeof customThemes !== 'undefined' && customThemes.length === 2", timeout=10000)
+
+    merged = page.evaluate("() => customThemes.map(t => ({id: t.id, name: t.name}))")
+    assert merged == [{"id": "chainsawman", "name": "Devil Hunter"}, {"id": "hacker", "name": "Terminal"}], \
+        f"collision did not replace in place / order shifted: {merged}"
+
+    page.evaluate("() => setTheme('chainsawman')")
+    hrefs = page.evaluate("() => Array.from(document.querySelectorAll('link[rel=\"stylesheet\"]'))"
+                           ".map(l => l.getAttribute('href'))")
+    assert "themes/local/chainsawman.css" in hrefs, f"local override path was not injected, got: {hrefs}"
+    assert "themes/chainsawman.css" not in hrefs
+
+    ctx.close()
+    server.stop()
+    assert not errors, f"uncaught page errors: {errors}"
+
+
+def test_local_chainsawman_art_overlay_images_resolve(
+        browser, static_server, local_theme_dir, chainsawman_local_css):
+    """The 404 trap: themes/local/chainsawman.css's background-image urls
+    are `../assets/chainsawman/...`, one directory deeper than a tracked
+    skin — checked by proving BOTH art images the real committed local file
+    references (gen-halftone-texture.png, denji-part2-portrait.png) 200 with
+    a nonzero body, against the REAL tracked assets directory (untouched by
+    the local_theme_dir fixture — only themes/local/ moves). Skips on a
+    clean clone (see chainsawman_local_css)."""
+    os.makedirs(local_theme_dir, exist_ok=True)
+    _write(os.path.join(local_theme_dir, "themes.json"),
+           json.dumps([{"id": "chainsawman", "name": "Devil Hunter", "swatch": ["#121110", "#ff5a1f"]}]))
+    _write(os.path.join(local_theme_dir, "chainsawman.css"), chainsawman_local_css)
+
+    server = StubControlServer()
+    server.start()
+    ctx, page, errors, console_errors = _new_page(browser, static_server, server)
+
+    image_responses = {}
+
+    def on_response(resp):
+        if "gen-halftone-texture.png" in resp.url:
+            image_responses["halftone"] = resp
+        elif "denji-part2-portrait.png" in resp.url:
+            image_responses["portrait"] = resp
+
+    page.on("response", on_response)
+
+    page.wait_for_function(
+        "() => typeof customThemes !== 'undefined' && customThemes.some(t => t.id === 'chainsawman')",
+        timeout=10000)
+    page.evaluate("() => setTheme('chainsawman')")
+    page.wait_for_function(
+        "() => document.documentElement.getAttribute('data-theme') === 'chainsawman'", timeout=10000)
+    page.wait_for_timeout(500)  # let the background-image fetches settle
+
+    for key, needle in (("halftone", "gen-halftone-texture.png"), ("portrait", "denji-part2-portrait.png")):
+        assert key in image_responses, f"no network request observed for {needle}"
+        resp = image_responses[key]
+        assert resp.status == 200, f"{needle} did not 200: {resp.status} {resp.url}"
+        body = resp.body()
+        assert len(body) > 0, f"{needle} returned an empty body"
+
+    ctx.close()
+    server.stop()
+    assert not errors, f"uncaught page errors: {errors}"
+
+
+# ── WCAG contrast gate ───────────────────────────────────────────────────
+# check-hooks.py proves a selector still matches something; check-theme.py
+# proves it's scoped. Neither can see that the result is unreadable — a
+# selector matching a real element with a real background says nothing about
+# whether the text on it is legible. This closes that third gap.
+#
+# The background is sampled from REAL RENDERED PIXELS (a Playwright
+# screenshot decoded with Pillow), not assumed from a CSS custom-property
+# name or walked from ancestor `backgroundColor`. Both of those alternatives
+# were tried and both lie: `.stat-strip` and `.device` both paint with
+# `background-image` gradients, so every ancestor's `backgroundColor` reads
+# as transparent, and a hand-picked "expected" token (`--metal-mid`, guessed
+# for `.stat .lcd-label` on the assumption it sat on bare plastic) scored a
+# confident 7.66:1 for text that was actually invisible — `.stat-strip` paints
+# its own hardcoded near-black panel. A gate that reports a passing ratio for
+# unreadable text is worse than no gate; pixel sampling can't make that
+# mistake because it measures what a human eye actually receives, immune to
+# gradients, images, blend modes, and ancestor opacity.
+
+def _linearize(channel_0_255):
+    c = channel_0_255 / 255
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _relative_luminance(rgb):
+    r, g, b = rgb
+    return 0.2126 * _linearize(r) + 0.7152 * _linearize(g) + 0.0722 * _linearize(b)
+
+
+def _wcag_ratio(rgb_a, rgb_b):
+    la, lb = _relative_luminance(rgb_a), _relative_luminance(rgb_b)
+    la, lb = max(la, lb), min(la, lb)
+    return (la + 0.05) / (lb + 0.05)
+
+
+def _parse_css_color(css_color):
+    """'rgb(r, g, b)' / 'rgba(r, g, b, a)' -> (r, g, b, a) floats."""
+    nums = [float(n) for n in re.findall(r"[\d.]+", css_color)]
+    if len(nums) == 3:
+        nums.append(1.0)
+    return tuple(nums)
+
+
+def _dominant_background_pixel(img, box, glyph_rgb, tolerance=45):
+    """The true painted background behind `box` (a Playwright bounding box,
+    viewport pixels), read from a real screenshot rather than assumed —
+    crop the element's own rendered pixels and take the most common color
+    OUTSIDE a tolerance sphere around the known glyph color. Text coverage
+    inside a small label's own box is a minority of its area (thin strokes,
+    lots of padding/gaps between glyphs), so the majority color in that crop
+    IS the real background, regardless of what painted it — gradient, image,
+    solid, whatever. Direction-agnostic on purpose: guessing "sample N px
+    above/left" breaks the moment a theme's layout differs even slightly."""
+    left = max(0, int(box["x"]))
+    top = max(0, int(box["y"]))
+    right = min(img.width, int(box["x"] + box["width"]))
+    bottom = min(img.height, int(box["y"] + box["height"]))
+    crop = img.crop((left, top, right, bottom))
+    colors = crop.getcolors(maxcolors=crop.width * crop.height + 16) or []
+
+    def dist(rgb):
+        return sum((a - b) ** 2 for a, b in zip(rgb, glyph_rgb)) ** 0.5
+
+    background_only = sorted(
+        ((count, rgb) for count, rgb in colors if dist(rgb) > tolerance), reverse=True)
+    if background_only:
+        return background_only[0][1]
+    return colors[0][1] if colors else (0, 0, 0)  # fully glyph-colored box; no better guess
+
+
+def _measure_pair(page, selector):
+    """(ratio, foreground rgb, background rgb) for one selector, against a
+    freshly captured screenshot so scroll position matches bounding_box()."""
+    # Several of these classes repeat inside #firstrunOverlay (hidden, and
+    # earlier in DOM order than the main content) — ":visible" plus .first
+    # picks the one instance a user can actually see, regardless of DOM order.
+    locator = page.locator(f"{selector}:visible").first
+    locator.scroll_into_view_if_needed()
+    page.wait_for_timeout(30)
+    color_css = page.evaluate(
+        f"() => getComputedStyle(document.querySelector({selector!r})).color")
+    box = locator.bounding_box()
+    img = Image.open(io.BytesIO(page.screenshot())).convert("RGB")
+    r, g, b, a = _parse_css_color(color_css)
+    bg_rgb = _dominant_background_pixel(img, box, (r, g, b))
+    fg_composited = tuple(a * fg + (1 - a) * bgc for fg, bgc in zip((r, g, b), bg_rgb))
+    return _wcag_ratio(fg_composited, bg_rgb), (r, g, b), bg_rgb
+
+
+# (selector, size bucket, min ratio, what/where). Every selector is
+# disambiguated to the specific instance the bug report was about — several
+# of these classes repeat inside #firstrunOverlay and #settingsPanel too, and
+# a bare querySelector() silently grabs whichever comes first in DOM order
+# (usually one of those, not the visible one). No assumed background here —
+# see the module comment above for why that's the whole point.
+CONTRAST_PAIRS = [
+    ("#pttCaption", "normal", 4.5, "PTT caption"),
+    (".zone-input .hint", "normal", 4.5, "'Hold to talk...' hint under the TALK key"),
+    ("#sessionRail .selector-label", "normal", 4.5, "PERSONA/VOICE selector label"),
+    ("#sessionRail .rotary-current", "normal", 4.5, "persona rotary readout ('DEFAULT')"),
+    (".baseplate .nom", "normal", 4.5, "footer nomenclature"),
+    ("#armSwitch .nom", "normal", 4.5, "ARM/OFF toggle label"),
+    (".stat .lcd-label", "normal", 4.5, "session stat-strip label (BRAIN/VOICE/...)"),
+]
+
+# `instrument`'s cream-on-chassis leak (as low as 1.77:1 on the footer) was
+# fixed directly in the base stylesheet (T2b, 2026-08-15) — see
+# themes/THEME-SPEC.md's "light on dark, ink on metal, never light-on-light"
+# note. Kept as a named, currently-empty set (rather than deleted) so a
+# future theme that's known to fail for reasons out of scope for its own
+# slice — the way `instrument` itself was, and the way a custom theme's own
+# CSS defect might be — has somewhere to go without disabling the assertion
+# for everyone; still measured and printed every run either way.
+CONTRAST_KNOWN_FAILING_THEMES = set()
+
+
+def _select_and_measure(page, theme_id, pairs):
+    page.evaluate(f"() => setTheme({theme_id!r})")
+    page.wait_for_function(
+        f"() => document.documentElement.getAttribute('data-theme') === {theme_id!r}")
+    page.wait_for_timeout(150)  # theme <link> fetch + first paint
+    results = []
+    for selector, bucket, min_ratio, desc in pairs:
+        ratio, fg_rgb, bg_rgb = _measure_pair(page, selector)
+        results.append((selector, bucket, min_ratio, ratio, fg_rgb, bg_rgb, desc))
+    return results
+
+
+def test_hacker_theme_faceplate_text_meets_wcag_contrast(client):
+    """Terminal's beige plastic faceplate is only legible if the printed
+    nomenclature is dark ink on it, never light/phosphor-green text — and a
+    dark panel (.stat-strip, an .lcd-window) needs the opposite. This gate
+    doesn't enforce a color, only legibility, measured from real pixels.
+    Also measures `instrument` for comparison and prints both, so a
+    regression review always has the real numbers, not just a pass/fail bit."""
+    page, server = client
+
+    for theme_id in ("instrument", "hacker"):
+        results = _select_and_measure(page, theme_id, CONTRAST_PAIRS)
+        print(f"\n-- {theme_id} --")
+        for selector, bucket, min_ratio, ratio, fg_rgb, bg_rgb, desc in results:
+            print(f"  {ratio:5.2f}:1 (need >={min_ratio}, {bucket})  fg={fg_rgb} bg={bg_rgb}  "
+                  f"{selector}  — {desc}")
+        if theme_id in CONTRAST_KNOWN_FAILING_THEMES:
+            continue
+        for selector, bucket, min_ratio, ratio, fg_rgb, bg_rgb, desc in results:
+            assert ratio >= min_ratio, (
+                f"{theme_id}/{selector} ({desc}) is {ratio:.2f}:1 (fg={fg_rgb} bg={bg_rgb}), "
+                f"below the {min_ratio}:1 WCAG floor for {bucket} text")
+
+
+def test_chainsawman_theme_faceplate_text_meets_wcag_contrast(browser, static_server, local_theme_dir):
+    """Devil Hunter's scuffed gunmetal chassis is only legible with engraved
+    ink on the bare metal and cream on the powered-dark panels, same law as
+    every other skin. Measures the TRACKED motif-only file (local overlay
+    swapped aside) — always runs, clean clone included. The local-art
+    variant is measured separately (see the test right below) since it must
+    skip, not run, when themes/local/chainsawman.css is absent."""
+    assert not os.path.isdir(local_theme_dir)  # fixture backed up any real content; nothing recreated it
+
+    server = StubControlServer()
+    server.start()
+    ctx, page, errors, console_errors = _new_page(browser, static_server, server)
+
+    tracked_results = _select_and_measure(page, "chainsawman", CONTRAST_PAIRS)
+    print("\n-- chainsawman (tracked) --")
+    for selector, bucket, min_ratio, ratio, fg_rgb, bg_rgb, desc in tracked_results:
+        print(f"  {ratio:5.2f}:1 (need >={min_ratio}, {bucket})  fg={fg_rgb} bg={bg_rgb}  "
+              f"{selector}  — {desc}")
+    for selector, bucket, min_ratio, ratio, fg_rgb, bg_rgb, desc in tracked_results:
+        assert ratio >= min_ratio, (
+            f"chainsawman(tracked)/{selector} ({desc}) is {ratio:.2f}:1 (fg={fg_rgb} bg={bg_rgb}), "
+            f"below the {min_ratio}:1 WCAG floor for {bucket} text")
+
+    ctx.close()
+    server.stop()
+    assert not errors, f"uncaught page errors: {errors}"
+
+
+def test_local_chainsawman_art_overlay_faceplate_text_meets_wcag_contrast(
+        browser, static_server, local_theme_dir, chainsawman_local_css):
+    """Same law, with the real local art layer active (halftone + character
+    portrait) — the art must never sit under live text badly enough to drop
+    a pair below the floor. Skips on a clean clone (see chainsawman_local_css)."""
+    os.makedirs(local_theme_dir, exist_ok=True)
+    _write(os.path.join(local_theme_dir, "themes.json"),
+           json.dumps([{"id": "chainsawman", "name": "Devil Hunter", "swatch": ["#121110", "#ff5a1f"]}]))
+    _write(os.path.join(local_theme_dir, "chainsawman.css"), chainsawman_local_css)
+
+    server = StubControlServer()
+    server.start()
+    ctx, page, errors, console_errors = _new_page(browser, static_server, server)
+
+    local_results = _select_and_measure(page, "chainsawman", CONTRAST_PAIRS)
+    print("\n-- chainsawman (local, art overlay active) --")
+    for selector, bucket, min_ratio, ratio, fg_rgb, bg_rgb, desc in local_results:
+        print(f"  {ratio:5.2f}:1 (need >={min_ratio}, {bucket})  fg={fg_rgb} bg={bg_rgb}  "
+              f"{selector}  — {desc}")
+    for selector, bucket, min_ratio, ratio, fg_rgb, bg_rgb, desc in local_results:
+        assert ratio >= min_ratio, (
+            f"chainsawman(local-art)/{selector} ({desc}) is {ratio:.2f}:1 (fg={fg_rgb} bg={bg_rgb}), "
+            f"below the {min_ratio}:1 WCAG floor for {bucket} text")
+
+    ctx.close()
+    server.stop()
+    assert not errors, f"uncaught page errors: {errors}"
+
+
+# ── Settings drawer off-canvas regression gate ───────────────────────────
+# A theme overriding #settingsPanel's `position` (base: `fixed`, parked
+# off-canvas via `transform: translateX(...)` when closed) strands the
+# drawer on-screen permanently — this exact defect shipped in
+# chainsawman.css twice (once pre-port, once in this rebuild's first pass).
+# Loops over every theme actually registered on the page (BUILTIN_THEMES +
+# the tracked customThemes — real local overlay swapped aside for a
+# deterministic fresh-clone list) so a future skin is covered automatically,
+# the same shape as check-hooks' every-tracked-theme regression test above.
+def _rect_intersects_viewport(rect, viewport):
+    return not (rect["right"] <= 0 or rect["left"] >= viewport["w"]
+                or rect["bottom"] <= 0 or rect["top"] >= viewport["h"])
+
+
+def test_settings_drawer_stays_off_canvas_when_closed_across_every_theme(browser, static_server, local_theme_dir):
+    """CLOSED: #settingsPanel's rect must not intersect the viewport, and
+    #settingsOverlay's opacity must be 0. OPEN (`.open` added directly,
+    bypassing the gear button): the opposite of both. Checked for every
+    theme id the page itself reports registered."""
+    assert not os.path.isdir(local_theme_dir)  # fixture backed up any real content; nothing recreated it
+
+    server = StubControlServer()
+    server.start()
+    ctx, page, errors, console_errors = _new_page(browser, static_server, server)
+
+    theme_ids = page.evaluate(
+        "() => BUILTIN_THEMES.map(t => t.id).concat(customThemes.map(t => t.id))")
+    assert theme_ids, "no themes found on the page - fixture/selector is wrong"
+
+    viewport = page.evaluate("() => ({w: window.innerWidth, h: window.innerHeight})")
+    failures = []
+
+    for theme_id in theme_ids:
+        page.evaluate(f"() => setTheme({theme_id!r})")
+        page.wait_for_function(f"() => document.documentElement.getAttribute('data-theme') === {theme_id!r}")
+        page.wait_for_timeout(60)
+
+        closed_rect = page.evaluate(
+            "() => document.getElementById('settingsPanel').getBoundingClientRect().toJSON()")
+        if _rect_intersects_viewport(closed_rect, viewport):
+            failures.append(f"{theme_id}: #settingsPanel intersects the viewport while CLOSED: {closed_rect}")
+        overlay_closed = page.evaluate(
+            "() => getComputedStyle(document.getElementById('settingsOverlay')).opacity")
+        if overlay_closed != "0":
+            failures.append(f"{theme_id}: #settingsOverlay opacity is {overlay_closed} while CLOSED (want 0)")
+
+        page.evaluate(
+            "() => { document.getElementById('settingsPanel').classList.add('open');"
+            " document.getElementById('settingsOverlay').classList.add('open'); }")
+        page.wait_for_timeout(400)  # base sheet's 0.2s transform/opacity transition
+
+        open_rect = page.evaluate(
+            "() => document.getElementById('settingsPanel').getBoundingClientRect().toJSON()")
+        if not _rect_intersects_viewport(open_rect, viewport):
+            failures.append(f"{theme_id}: #settingsPanel does NOT intersect the viewport while OPEN: {open_rect}")
+        overlay_open = page.evaluate(
+            "() => getComputedStyle(document.getElementById('settingsOverlay')).opacity")
+        if overlay_open != "1":
+            failures.append(f"{theme_id}: #settingsOverlay opacity is {overlay_open} while OPEN (want 1)")
+
+        page.evaluate(
+            "() => { document.getElementById('settingsPanel').classList.remove('open');"
+            " document.getElementById('settingsOverlay').classList.remove('open'); }")
+        page.wait_for_timeout(250)
+
+    ctx.close()
+    server.stop()
+    assert not errors, f"uncaught page errors: {errors}"
+    assert not failures, "settings drawer off-canvas/overlay regression:\n" + "\n".join(failures)
