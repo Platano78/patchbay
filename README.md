@@ -3,6 +3,14 @@
 Patchbay — a local voice instrument. Talk to your own models on your own
 hardware.
 
+![The Patchbay cockpit: an analog-instrument faceplate with a level gauge,
+talk key, control deck, transcript tape and a silkscreened command legend](docs/screenshot-instrument.png)
+
+*A freshly installed instance — no brain configured, no deck provider, nothing
+connected yet. The deck fills in from whatever state provider you point it at
+(Home Assistant is the one implementation shipped today), and the legend plate
+lists whichever tools your pipeline actually armed at startup.*
+
 A self-hostable local voice-agent cockpit: the Hugging Face
 [`speech-to-speech`](https://github.com/huggingface/speech-to-speech) framework
 paired with a static web cockpit (`webclient/`) that includes an avatar pane
@@ -370,6 +378,53 @@ regardless of what any client has toggled.
 Any browser works — a phone gives GPS-grade accuracy, a desktop typically
 falls back to coarser IP/network-based geolocation, which is still useful for
 timezone/weather purposes.
+
+## Install as an app
+
+The web client (`webclient/`) is an installable Progressive Web App
+(`manifest.json` + `sw.js`) — installing it gives you an icon that launches
+straight to the cockpit, no browser chrome, on whatever device you install it
+on. This is the same install flow every PWA uses; nothing here is specific to
+this project.
+
+**A service worker only registers in a secure context**, so this needs one of:
+- `https://` — your own reverse proxy in front of `serve.py`, or `serve.py
+  --certfile ... --keyfile ...` directly (see `serve.py --help`).
+- `http://localhost` / `http://127.0.0.1` — works with no certificate at all,
+  which is why this is the easiest way to try it on the same machine the
+  server runs on.
+
+A plain `http://` LAN address (e.g. `http://192.0.2.50:8770`) is **not** a
+secure context, so install won't be offered there — this is a browser
+restriction, not something this app can opt out of. If you want to install
+on a phone or tablet over your LAN, put a reverse proxy with a trusted
+certificate in front of it, or use a self-signed cert and install its CA on
+the device first (browsers won't offer install behind an untrusted cert
+warning either).
+
+**Per platform:**
+- **Chrome/Edge (desktop):** an install icon appears in the address bar, or
+  use the menu → "Install Patchbay…" / "Cast, save, and share" → "Install page
+  as app".
+- **Chrome (Android):** menu → "Add to Home screen" / "Install app".
+- **Safari (iOS/iPadOS):** Share sheet → "Add to Home Screen". iOS doesn't
+  fire the same install-prompt event Chrome does, so there's no in-app
+  install button here — this is the only path on iOS, and it's what the
+  `apple-mobile-web-app-*` meta tags and touch icon in `index.html` are for.
+- **Fire OS / Silk (e.g. Echo Show):** **cannot install a PWA.** Fire OS's
+  Silk browser has no PWA install support at all — the install control in
+  the settings panel simply never appears there, same as on any browser that
+  doesn't support it. Getting an installable icon on an Echo Show needs a
+  native APK wrapping a WebView (or a TWA-style shell) pointed at your
+  cockpit's URL; that's outside what a PWA manifest can do.
+
+Once installed, an update banner appears in the **service panel** (the gear
+icon) whenever a newer `index.html` is deployed and you're still on the old
+one — click it to reload onto the new version. The service worker itself
+(`webclient/sw.js`) never caches dynamic state (brain/config/HA endpoints) and
+serves the shell network-first, so an offline load only ever shows the last
+version you actually had open, never something stale served in place of a
+live connection.
 
 ## Tests
 

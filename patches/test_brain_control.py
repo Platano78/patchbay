@@ -1925,3 +1925,38 @@ def test_load_voice_choice_helpers(tmp_path, monkeypatch, caplog):
 
     brain_control.save_voice_choice("")
     assert not path.exists()
+
+
+# ── armed tool names published alongside the count ──────────────────────
+
+
+def test_state_payload_carries_armed_tool_names(tmp_path, monkeypatch):
+    """`_state_payload` used to expose only `tools_armed` (a count) -- the
+    panel wants the actual names, both at boot and after a live reload."""
+    monkeypatch.setattr(
+        brain_control.voice_tools,
+        "get_tool_defs",
+        lambda: [{"name": "get_weather"}, {"name": "web_search"}],
+    )
+
+    bc = _make_brain_control(tmp_path)
+
+    payload = bc._state_payload()
+    assert payload["tools"] == ["get_weather", "web_search"]
+    assert payload["tools_armed"] == 2
+
+
+def test_reload_tools_config_set_updates_armed_tool_names(tmp_path, monkeypatch):
+    bc = _make_brain_control(tmp_path)
+
+    monkeypatch.setattr(
+        brain_control.voice_tools,
+        "get_tool_defs",
+        lambda: [{"name": "home_assistant"}],
+    )
+
+    ack = bc._config_set({"reload_tools": True})
+
+    assert ack["ok"] is True
+    assert ack["tools"] == ["home_assistant"]
+    assert ack["tools_armed"] == 1

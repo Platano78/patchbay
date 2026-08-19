@@ -447,19 +447,45 @@ html[data-theme="hacker"] body:has(#assistantText.speaking) #meterChrome::after 
       "voice   voice   voice"
       "stats   stats   stats"
       "snippet snippet snippet"
-      "armctl  pttctl  hint";
+      "armctl  pttctl  hint"
+      "deck    deck    deck";
     column-gap: 0;
     row-gap: 0;
     align-items: stretch;
   }
 
+  /* `.zone-meter` itself becomes a pass-through: R10 gives `#vaDeck` (its
+     last child, see index.html's own DOM comment -- a sibling of the
+     hidden `.meter-housing`, not `.zone-meter` itself) a real grid area of
+     its own instead of leaving it to flow inside a thin `status`-area box
+     sized for just the LEVEL caption + lamps. `display: contents` promotes
+     `.zone-head` and `#vaDeck` to direct #contentGrid items so each can be
+     placed independently by name -- same mechanism `.zone-input` and
+     `#sessionRail` already use below. The status strip's own visual
+     treatment (padding, bottom rule) moves onto `.zone-head`, the element
+     that now actually renders the box. */
   [data-theme="hacker"] .zone-meter {
+    display: contents;
+  }
+  [data-theme="hacker"] .zone-head {
     grid-area: status;
-    display: block;
-    border: none;
-    box-shadow: none;
     padding: 10px 24px 8px;
     border-bottom: 1px solid var(--border);
+  }
+  /* R10: the deck gets its own row at the very bottom of the scrollback,
+     below the command prompt -- an attached-peripherals panel, not part
+     of the session transcript. A fixed height (not the base sheet's
+     `flex: 1 1 auto`, which only ever meant anything inside `.zone-meter`'s
+     old flex-column box) keeps it well clear of the ~200px usability floor
+     while forcing `#deckTiles`' own `overflow-y: auto` to actually engage
+     instead of the card growing to fit every tile in flow. */
+  [data-theme="hacker"] #vaDeck {
+    grid-area: deck;
+    /* 210px, tighter margins than the first cut -- keeps the deck's real
+       footprint from adding net vertical pressure at wide, uncapped
+       viewports. */
+    height: 210px;
+    margin: 8px 24px 12px;
   }
 
   [data-theme="hacker"] .zone-input {

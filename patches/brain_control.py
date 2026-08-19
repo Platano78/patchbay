@@ -558,10 +558,12 @@ class BrainControl:
         # overwrite the other's in-flight result.
         self._probed_model_ids = threading.local()
         self.tools_armed = 0
+        self.tools_armed_names: list[str] = []
         try:
             armed = voice_tools.get_tool_defs()
             runtime_config.session.tools = armed
             self.tools_armed = len(armed)
+            self.tools_armed_names = [t["name"] for t in armed]
         except Exception as e:
             logger.warning("BrainControl: failed to arm voice tools: %s", e)
         # Startup precedence, same spirit as the persona store above: a voice
@@ -847,6 +849,7 @@ class BrainControl:
             "custom_voices": voice_clone.list_custom_voices() if self.tts_handler else [],
             "speech_style": (getattr(self.tts_handler, "instructions", "") or "") if self.tts_handler else "",
             "tools_armed": self.tools_armed,
+            "tools": list(self.tools_armed_names),
             "wake_word": self._wake_word_state(),
             "brains": [
                 {
@@ -950,6 +953,7 @@ class BrainControl:
                     armed = voice_tools.get_tool_defs()
                     self.runtime_config.session.tools = armed
                     self.tools_armed = len(armed)
+                    self.tools_armed_names = [t["name"] for t in armed]
                     logger.info("BrainControl: tools reloaded (%d armed)", self.tools_armed)
                 except Exception as e:
                     logger.warning("BrainControl: tool reload failed: %s", e)

@@ -19,6 +19,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Patchbay — Voice Instrument</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><circle cx='12' cy='12' r='11' fill='%230a0a12'/><path d='M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3Z' fill='%2322d3ee'/><path d='M19 11a1 1 0 1 0-2 0 5 5 0 0 1-10 0 1 1 0 1 0-2 0 7 7 0 0 0 6 6.93V21H9a1 1 0 1 0 0 2h6a1 1 0 1 0 0-2h-2v-3.07A7 7 0 0 0 19 11Z' fill='%2322d3ee'/></svg>">
+<!-- PWA install (see README "Install as an app" + webclient/sw.js). scope/start_url
+     are relative so this works from whatever root a downstream fork serves it at. -->
+<link rel="manifest" href="./manifest.json">
+<meta name="theme-color" content="#0d0b09">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon-180.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Patchbay">
 <!-- Only consumed by the lazy, desktop-only avatar module (avatar/avatar.mjs);
      must be declared before any module script/dynamic import runs. -->
 <script type="importmap">
@@ -30,6 +38,68 @@
 }
 </script>
 <style>
+  /* --level and --hold-progress are written every animation frame (mic
+     worklet / hold-to-confirm rAF loop); registering them typed rejects
+     invalid values instead of silently poisoning the cascade and makes
+     them interpolatable rather than a jumping string swap. --level MUST
+     stay inherits:true — shipped themes read it from descendants of
+     :root (see themes/chainsawman.css, themes/hacker.css), and one
+     theme's #fxBack reads it from OUTSIDE .device entirely.
+     GRANDFATHERED as of S4b: measured at ~1.8-2.7ms/frame style-recalc
+     cost (240-frame burst, CDP Performance.getMetrics) with a forced
+     layout every frame — but every scoping option tried either breaks a
+     shipped theme (element-scoping off :root) or recovers only ~25% of
+     the cost (.device-scoping, because .device is nearly the whole
+     page). Left as-is with the cost documented; see THEME-SPEC.md's
+     "Visual buses" section for the full measured table and --heat /
+     --level-fast below, which are ADDED alongside --level rather than
+     replacing it. */
+  @property --level {
+    syntax: "<number>";
+    inherits: true;
+    initial-value: 0;
+  }
+  @property --hold-progress {
+    syntax: "<number>";
+    inherits: false;
+    initial-value: 0;
+  }
+  /* --heat: the SLOW, inherited "room" bus (S4b). Same measurement that
+     grandfathered --level above showed the expense is the act of writing
+     ANY registered inherits:true property on documentElement, not what
+     reads it — a property nothing consumes cost the same as --level
+     itself (~1.8ms/frame vs ~1.84ms/frame). --heat pays that cost at only
+     ~12Hz instead of every audio frame (pushWaveform writes it far less
+     often than --level; see the cadence comment there), which is the
+     entire reason it can stay inherited: a slow inherited write is cheap
+     enough to afford, a fast one isn't. Use it for ambient/room reactions
+     (#fxBack, chassis, anything wanting ANY live element in the tree to
+     read a smoothed level via plain inheritance) — not for anything that
+     needs true per-frame responsiveness. */
+  @property --heat {
+    syntax: "<number>";
+    inherits: true;
+    initial-value: 0;
+  }
+  /* --level-fast: the FAST, non-inherited "centrepiece" bus (S4b), scoped
+     to #meterChrome — the confirmed rig centrepiece mount (a rig whose
+     centrepiece IS a full-panel canvas must claim #meterChrome per the
+     theme-rigs plan §10.4). inherits:false is the entire point: it
+     confines invalidation to #meterChrome itself instead of the whole
+     document, which is what buys the ~20x over --level's root write
+     (measured element-scoped cost ~0.09-0.31ms/frame vs --level's
+     ~1.8-2.7ms/frame, same harness). The tradeoff is real and intentional
+     — descendants of #meterChrome genuinely cannot read it via CSS
+     inheritance — but rigs render their reactive content to <canvas>, not
+     through the cascade, so nothing needs to. Do NOT change this to
+     inherits:true "so descendants can see it too"; that reintroduces the
+     exact cost this property exists to avoid. */
+  @property --level-fast {
+    syntax: "<number>";
+    inherits: false;
+    initial-value: 0;
+  }
+
   /* ── Design tokens ──────────────────────────────────────────────────
      Every theme (built-in or custom) redefines this exact set of custom
      properties under a [data-theme="<id>"] selector. Nothing outside this
@@ -421,9 +491,11 @@
   .gateHoldFill {
     position: absolute;
     inset: 0;
-    width: calc(var(--hold-progress, 0) * 100%);
+    width: 100%;
+    transform: scaleX(var(--hold-progress, 0));
+    transform-origin: left;
     background: color-mix(in srgb, var(--accent) 35%, transparent);
-    transition: width 0.05s linear;
+    transition: transform 0.05s linear;
   }
   .gateHoldLabel {
     position: relative;
@@ -454,6 +526,10 @@
   .swatchDot { width: 28px; height: 28px; border-radius: 50%; border: 1px solid var(--border); }
   .themeSwatch.active .swatchDot { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
   .themeSwatch .swatchName { font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  /* A theme whose manifest hostApi outruns this build's rig contract stays
+     visible (never silently vanishes from the picker) but can't be selected
+     — see setTheme()'s hostApi refusal. */
+  .themeSwatch.unavailable { opacity: 0.4; cursor: not-allowed; }
 
   /* ── PTT orb ─────────────────────────────────────────────────────── */
   #pttWrap {
@@ -711,7 +787,8 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     padding: 6px 8px;
-    font: 12px/1.4 inherit;
+    font-size: 12px;
+    line-height: 1.4;
   }
   /* Second line under a brain's label -- note/unreachable-error plus the
      effective model, so "what am I actually talking to" never requires
@@ -731,7 +808,8 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     padding: 6px 8px;
-    font: 12px/1.4 inherit;
+    font-size: 12px;
+    line-height: 1.4;
   }
   .modelComboList {
     position: absolute;
@@ -766,7 +844,8 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     padding: 8px;
-    font: 13px/1.4 inherit;
+    font-size: 13px;
+    line-height: 1.4;
     resize: vertical;
   }
   #voiceSelect, #avatarSelect, #personaSelect, #wakeModelSelect, #camSelect {
@@ -777,7 +856,8 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     padding: 8px;
-    font: 13px/1.4 inherit;
+    font-size: 13px;
+    line-height: 1.4;
   }
   #voiceCloneAdvanced, #wsUrlAdvanced, #appearanceGroup, #inputGroup, #personaGroup { margin-top: 10px; }
   #voiceCloneAdvanced summary, #wsUrlAdvanced summary, #appearanceGroup summary, #inputGroup summary, #personaGroup summary {
@@ -850,7 +930,8 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     padding: 8px;
-    font: 13px/1.4 inherit;
+    font-size: 13px;
+    line-height: 1.4;
     margin-top: 4px;
   }
   .voiceCloneLane { display: flex; align-items: center; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
@@ -876,7 +957,8 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     padding: 8px;
-    font: 13px/1.4 inherit;
+    font-size: 13px;
+    line-height: 1.4;
   }
   .panelBtn {
     width: 100%;
@@ -1057,6 +1139,155 @@
       0 30px 60px rgba(0,0,0,0.55),
       0 10px 20px rgba(0,0,0,0.5);
   }
+
+  /* ── V4: chassis widens with the viewport, avatar owns a right column ──
+     The chassis no longer holds at a fixed 1180px -- it's a range, floor
+     matching the old constant so nothing narrower than today ships, ceiling
+     ~1760 so it never sprawls on very wide displays. `body > .device` (not
+     plain `.device`, same scoping the S10 rule below already uses) keeps
+     this off the nested `#firstrunOverlay .device` dialog, which keeps its
+     own 440px cap regardless (higher-specificity ID selector). Centring
+     falls out of `body`'s own `display:flex; align-items:center` above --
+     no margin:auto needed.
+
+     Scoped to 1024px+ (matching the grid below, not left unconditional) --
+     an early cut left this unscoped and `clamp(1180px, 92vw, 1760px)`
+     evaluates to a flat 1180px floor at ANY narrower width too, including
+     phones (92vw < 1180 there), forcing `.device` to a fixed 1180px on a
+     390px viewport and reintroducing exactly the horizontal-overflow bug
+     `test_mobile_long_status_does_not_cause_horizontal_overflow` exists to
+     catch. Below 1024px the pre-V4 rules (`.device{max-width:1180px}`,
+     line ~1111) are untouched, same as the 881-1023px range's layout. */
+  @media (min-width: 1024px) {
+    body > .device {
+      width: clamp(1180px, 92vw, 1760px);
+      max-width: clamp(1180px, 92vw, 1760px);
+    }
+  }
+
+  /* Below 1024px `.device` stays plain block flow, same as before this
+     slice -- the avatar-right-column composition only makes sense once
+     there's a real second column of width to give it, and the mobile
+     reflow (`@media (max-width: 880px)` below) already reorders
+     #contentGrid's own content for a single stacked column instead.
+
+     At 1024px+, `.device` becomes the OUTER grid: an interaction-stack
+     column and an avatar column. Turning `.device` into a grid
+     auto-places EVERY direct child into it -- header/seams/baseplate
+     silently took grid cells in the first pass and collapsed column 1 to
+     89px (the avatar was never the bug; column 1 had vanished), so each
+     one is placed explicitly here. `#lowerBay { display: contents }`
+     promotes its own children (avatar/tape/deck/quest/links/controls/log)
+     into this same outer grid so each can be placed independently --
+     same idiom `#sessionRail` already uses for the mobile reflow below.
+
+     The floor case (1280px viewport keeps the chassis at exactly 1180px,
+     unchanged from today) leaves NO slack: at that width today's
+     224/1fr/300 #contentGrid columns already consume the full 1180.
+     Rebalanced narrower here (see #contentGrid below for the current
+     three-way split and its own history -- it has moved more than once
+     since this paragraph was first written) so the avatar gets a real
+     column at every width -- see #contentGrid's own comment for how the
+     meter and avatar floors are actually traded off against each other
+     now (they are no longer independent: the meter is no longer an
+     unconditional floor, #avatarMount >= 300px at 1440 is). */
+  @media (min-width: 1024px) {
+    body > .device {
+      display: grid;
+      /* `console` (below) now SPANS columns 1+2, not column 1 alone (owner
+         ruling: shrink the tape/links split from ~75/25 toward 60/40 by
+         narrowing column 1 itself, without reopening the 989px console
+         floor this comment has always protected). A spanning grid item's
+         available width includes the gap BETWEEN the tracks it spans, so
+         the coupled invariant is now: column 1's floor + 12px (column-gap)
+         + column 2's floor MUST equal #contentGrid's own three column
+         floors summed (170 + 579 + 240 = 989, see #contentGrid below) --
+         777 + 12 + 200 = 989. Letting these drift apart reproduces the
+         clamp()-overflow bug this stylesheet already fixed once, one level
+         further out: #contentGrid gets handed LESS width than its own
+         columns need, and it overflows sideways with no symptom in any
+         single element's OWN width check (verified live: avatarMount/
+         meterFace both still measured "correct" while "TOOLS" painted
+         under the avatar pane). If you change any of #contentGrid's three
+         floors, update columns 1+2's floors to match (keeping their own
+         777:200 ~= 4:1 ratio, or whatever split the tape/links row is
+         currently tuned to).
+
+         Pure `minmax(0, 4fr) minmax(0, 1fr)` (no explicit px floors) was
+         tried first and REJECTED -- measured empirically, not assumed: a
+         grid item spanning two `fr` tracks does not reliably force its
+         own min-content across them the way a single non-flexible track
+         does, and #contentGrid resolved to 938px (below its 989px floor)
+         with `getComputedStyle(device).gridTemplateColumns` reading
+         `741px 185px 374px` at 1440x1271 -- explicit per-track px floors
+         (this rule) are what actually guarantee the 989px sum. */
+      grid-template-columns: minmax(777px, 4fr) minmax(200px, 1fr) minmax(0, clamp(180px, 26vw, 440px));
+      /* All-`auto` here on purpose -- this is the base (uncapped/released)
+         template. `fr` tracks only resolve sanely against a DEFINITE grid
+         container height; `.device` has none here (no `height`, and
+         `max-height` alone doesn't count as definite for track sizing
+         unless content actually exceeds it AND stays that way through the
+         same layout pass). Verified empirically: an `fr` row here, with
+         `.device` sized by its own indefinite (auto/content) height,
+         resolved to a nonsense multiple of the OTHER 1fr row's size
+         (30fr came out as exactly 30x -- Chromium using the other track's
+         resolved size as its "1fr" unit under indefinite sizing). The real
+         `minmax(0, Nfr)` shrink-priority template only exists under
+         `html[data-s10="cap"]` below, alongside the `height` that makes it
+         definite -- the two must only ever change together.
+
+         NAMED areas, not bare line numbers -- this is a public seam now
+         (see themes/THEME-SPEC.md's "Chassis regions" section). A rig
+         reclaims a region by redefining `grid-template-areas` alone under
+         its own `[data-theme="…"]`; that is only possible if nothing else
+         in this file places a child by `grid-column`/`grid-row` instead of
+         `grid-area`. `monitor` / `tape` / `controls` / `task` / `links` /
+         `log` are NOT new names -- they're #lowerBay's own pre-existing
+         internal area names (index.html, the `#lowerBay { grid-template-
+         areas: … }` block below), reused deliberately rather than invented
+         fresh: #avatarPane/#historyRail/#questCard/#linksCard/#log/
+         .lowerBayControls already carry `grid-area: monitor` etc. from
+         that block, so reusing the names here makes those pre-existing
+         declarations apply directly to THIS grid once #lowerBay itself
+         promotes them into it (`display: contents`, below) -- no
+         duplicate override rule needed, and no separate name to keep in
+         sync with THEME-SPEC.md's contract. Checked for collision, not
+         assumed: #lowerBay's own `display: grid` only ever activated
+         inside `#lowerBay`'s own box, and #lowerBay is display:contents
+         at this width (its `grid-template-areas` there goes inert, not
+         wrong), so the SAME six area names naming two different grids at
+         two different times never actually overlap in effect. */
+      grid-template-areas:
+        "nameplate nameplate nameplate"
+        "console   console   monitor"
+        "tape      links     links"
+        "legend    legend    controls"
+        "task      task      task"
+        "log       log       log"
+        "baseplate baseplate baseplate";
+      column-gap: 12px;
+      row-gap: 14px;
+      align-items: stretch;
+    }
+    body > .device > .nameplate,
+    body > .device > .seam { grid-area: nameplate; }
+    body > .device > .seam { align-self: start; }
+    body > .device > .baseplate { grid-area: baseplate; }
+
+    #contentGrid { grid-area: console; }
+    /* #lowerBay's OWN `display: contents` (promoting avatar/tape/deck/
+       quest/links/controls/log into this grid) and their individual
+       placements are further down, right after the pre-existing
+       `#lowerBay { display: flex/grid; ... }` rules (index.html:1791 and
+       the `grid-template-areas` block below it) -- those share this exact
+       `#lowerBay`/child selectors' specificity, so declaring this here
+       would lose the cascade to whichever comes later in the file (it
+       did, on the first pass: #lowerBay stayed `display: flex` and every
+       child rendered at its own natural flex-column size instead of the
+       grid placement below). Placing it after instead makes this slice's
+       version win by source order, no !important. */
+  }
+
   .chassis-screw {
     position: absolute;
     width: 9px; height: 9px; border-radius: 50%;
@@ -1076,6 +1307,299 @@
   .chassis-screw.bl::after { transform: translate(-50%, -50%) rotate(52deg); }
   .chassis-screw.br { bottom: 9px; right: 9px; }
   .chassis-screw.br::after { transform: translate(-50%, -50%) rotate(-12deg); }
+
+  /* ── S10: the chassis fits the viewport; its readout scrolls, not the
+     page. A real instrument doesn't grow with the material fed into it.
+     `.device` becomes the height-capped flex column and #contentGrid /
+     #lowerBay become the scroll containers, NOT `.device` itself -- the
+     four .chassis-screw spans above are position:absolute on `.device`,
+     so if `.device` scrolled the corners would scroll into the panel's
+     middle. Both bands get min-height:0 (flex items default to
+     min-height:auto, which floors them at their content size and defeats
+     shrinking -- the classic flexbox overflow trap) so flexbox CAN shrink
+     either one; nameplate/seams/baseplate have no such override and stay
+     pinned at their natural size. `body > .device` (not
+     `#firstrunOverlay .device`, a nested dialog that already scrolls
+     itself and keeps its own max-width:440px at :1194) scopes this to the
+     one full-size chassis. dvh (not vh) tracks the real visual viewport
+     under mobile browser chrome; the 48px comes from body's own
+     `padding: 24px 16px` above.
+
+     Shrink PRIORITY (correction after the first cut let flexbox split the
+     shortfall proportionally -- on the shipped skins that clipped the PTT
+     key itself, the one control a voice cockpit cannot hide):
+     #contentGrid holds the interaction band (transcript, reply, persona/
+     voice controls, the PTT key) and #lowerBay holds ancillary material
+     (history, avatar monitor, diagnostics) -- the shortfall must come out
+     of #lowerBay first. `flex-shrink: 20` on #lowerBay vs the (implicit,
+     default) `flex-shrink: 1` on #contentGrid doesn't just weight the
+     split, it sequences it: once #lowerBay's own `min-height: 48px` floor
+     freezes it, flexbox's shrink-resolution algorithm (CSS Flexible Box
+     §9.7 -- shrink, freeze items that hit their floor, redistribute
+     what's left among the rest) hands 100% of any remaining deficit to
+     #contentGrid, exactly the "spill into the interaction band only once
+     the ancillary one has given up what it can" rule this is
+     implementing.
+
+     R9 SUPERSEDED -- a fixed min-height constant can't serve every skin:
+     measured against the shipped Chrome (not estimated), instrument and
+     chainsawman's real PTT-fit floors sit ~90px apart, and chainsawman had
+     only ~9px of headroom left under the 1000px constant, headroom S7
+     already spends. No single number threads both. The gate is now a
+     runtime MEASUREMENT instead: `html[data-s10="cap"]`, set by JS
+     (s10UpdateFit(), near the end of the script) only after it applies the
+     cap, forces layout, and hit-tests #ptt against #contentGrid's own
+     visible band -- if #ptt doesn't fully fit, the attribute comes back off
+     and `.device` falls back to its pre-S10 rules (no flex, no max-height,
+     page scrolls), same as before this slice. Opt-IN by attribute rather
+     than opt-out: with no JS, or if it throws, the page fails toward
+     scrolling with a visible PTT key, not toward a clipped, unclickable
+     one. The decision is always taken from the CAPPED measurement, never
+     the released one -- releasing the cap changes the layout the decision
+     was based on, so deciding from it would oscillate. */
+  /* V4 note: `.device` becomes a CSS grid at 1024px+ (see the rule above)
+     and must STAY one whether the cap is engaged or released -- this block
+     used to dictate `display: flex; flex-direction: column` unconditionally,
+     which would have fought the grid at every width this cap applies to.
+     The height cap itself (this rule) is width-independent and still
+     applies everywhere S10 always has; the flex-specific mechanism below
+     is now scoped OUT of the grid's own range instead of fighting it. */
+  @media (min-width: 881px) {
+    html[data-s10="cap"] body > .device {
+      max-height: calc(100dvh - 48px);
+    }
+  }
+
+  /* 1024px+: `fr` row tracks (the tape row, see `body > .device` above)
+     only receive a real share of leftover space when their grid
+     container's height is DEFINITE -- an auto-height container (the
+     normal case: content shorter than the cap) resolves a `minmax(0,1fr)`
+     row toward its 0 floor instead of its content's natural size, which
+     is the opposite of "full-height, eye level" and left the tape/avatar
+     row collapsed even with hundreds of px of unused headroom below the
+     cap. Making the height itself definite (not just capped) fixes both
+     at once: rows size correctly against real leftover space when there's
+     slack (avatar/tape stretch to fill it, which IS the eye-level column
+     this slice asks for), and the same `1fr` track genuinely shrinks
+     rather than overflowing once real content exceeds the cap. */
+  @media (min-width: 1024px) {
+    html[data-s10="cap"] body > .device {
+      height: calc(100dvh - 48px);
+      /* The real shrink-priority template -- see the all-`auto` base rule
+         above for why this only exists here, paired with the `height`
+         that makes it definite. Rows 2 (#contentGrid) and 3 (tape) share
+         the same "shortfall comes out of the ancillary material first"
+         priority the old flex-based S10 cap used (see its own comment,
+         still true below), ported to grid track sizing as a straight fr
+         ratio rather than `flex-shrink`: when the two tracks' combined
+         natural height exceeds what's available, `minmax(0, Nfr)` splits
+         whatever space genuinely IS available in proportion to N (not
+         "shrink from natural size by a factor", which is how flex-shrink
+         reads at a glance but isn't how grid resolves this) -- so
+         #contentGrid (holding PTT, which must stay reachable) gets the
+         LARGE share (30) and tape the small one (1), the opposite of
+         #contentGrid's own flex-shrink weight under the old mechanism.
+         Verified against the actual failure this produces if inverted:
+         swapping these two numbers squeezed #contentGrid to ~19px and
+         handed tape ~565px at 1280x990. A themed skin's own outsized
+         centrepiece (chainsawman's "tach" graphic, ~975px natural) can
+         still exceed even a 30fr share, which is what #contentGrid's own
+         `overflow-y: auto` (below) is for.
+
+         Row 4 (deck | controls) needs its own `fr` share too, not
+         `minmax(0, auto)` and not plain `auto` -- CSS Grid's "Maximize
+         Tracks" step grows every NON-flexible track (including a
+         `minmax(0, X)` one, `auto` max included) to its full preferred
+         size FIRST, using whatever space is nominally available, and only
+         hands whatever's left (positive or negative) to the actual `fr`
+         tracks after that. A `min-height: 0` on the row's own children
+         doesn't change this -- that only lowers a CHILD's floor, not the
+         TRACK's sizing function. Measured stepping through both wrong
+         attempts: plain `auto` and `minmax(0, auto)` both pinned row 4 to
+         its ~120px natural size (three diagnostics buttons wrapping at
+         the avatar column's cap-time width) regardless of how far
+         #contentGrid's own share was pushed -- only making row 4 an `fr`
+         track itself (here, matching tape's own 1fr) actually let it give
+         up room under real pressure.
+
+         Rows 5-6 (quest, log) stay plain `auto` -- hidden by default, so
+         normally 0 either way, and not worth the same complexity for
+         content that's rarely on screen at all. `links` no longer has its
+         own row (moved beside `tape`, see the area map above) -- see that
+         change's own note there.
+
+         Row 4's own MIN changed from a fixed `150px` to `minmax(min-content,
+         1fr)`: the 150px floor was measured for the plate's original 2-line
+         content plus three diagnostics buttons, and the legend plate's full
+         armed-tool list (see its own CSS/JS) made that height
+         content-dependent -- a drop-in tool changes row count, and the
+         floor can't predict it. Measured failure at 1440x1271 with
+         `#linksCard` visible (3 links) and 15 armed tools: the plate's
+         content exceeded the 150px floor, and a grid item that overflows
+         its track doesn't push neighbors, it paints over them -- 23px of
+         the plate landed on top of the links row. `min-content` as the MIN
+         (not `auto`, see above) keeps the max still an `fr` share that
+         yields under real pressure, and only refuses to shrink below the
+         tallest cell's actual content -- below that, "shrinking" was never
+         shrinking, it was overpainting. The deficit case this could
+         otherwise reopen is still absorbed by #contentGrid's own
+         `min-height: 0; overflow-y: auto` below.
+
+         `min-content` alone dropped row 4's floor at the plate's IDLE
+         (2-line, no tools) size below the old 150px, since 150px was never
+         actually the plate's own natural content height -- it was chosen
+         to also cover `.lowerBayControls`'s three diagnostics buttons
+         wrapping. That regressed `#contentGrid`'s resting height and, with
+         it, `#vaDeck`'s (measured: +94px, caught by
+         `test_instrument_deck_placement_unchanged_by_themed_deck_fix`).
+         `minmax(max(150px, min-content), 1fr)` looks like the fix but
+         ISN'T: `<inflexible-breadth>` doesn't accept a `max()` of a length
+         and an intrinsic-size keyword (checked empirically -- the whole
+         `grid-template-rows` value goes invalid and every row silently
+         falls back to `auto`, which is a worse regression, not a smaller
+         one). The actual fix is on `.lowerBayControls` itself (see its own
+         comment): `min-height: 150px` there raises ITS min-content
+         contribution to at least 150px (grid track min-content sizing
+         consults each item's specified min size, independent of
+         `align-self`) -- placed there rather than on `.legendPlate`
+         because the 150px floor was always about the diagnostics buttons,
+         never the plate's own content, and an idle/unconfigured instance
+         (no armed tools) would otherwise carry a mostly-empty 150px slab
+         on the plate's own opaque backing for no reason. So row 4's
+         `min-content` step is correctly >=150px at idle and grows past it
+         once the tool list genuinely needs more, while the plate itself
+         stays at its true content height.
+
+         KNOWN TRADEOFF: this same 30:1:1 ratio also governs the SURPLUS
+         direction (plenty of vertical room, nothing genuinely squeezed) --
+         `fr` doesn't distinguish shrink from grow, so #contentGrid also
+         claims most of any leftover height there, leaving tape/deck
+         visually thin even though nothing needed them to be. A gentler
+         ratio (tried 3:1:1, 10:1:1) gives tape/deck a much better resting
+         size but starts failing chainsawman's genuine deficit case again
+         at 1280x900-1010 (measured floor: needs >=25:1:1 for 1010, >=30:1:1
+         for 900). Kept the number that keeps the fit gate correct in the
+         genuinely tight case, since that's the hard, existing invariant;
+         the resting-size cost is cosmetic. */
+      grid-template-rows: auto minmax(0, 30fr) minmax(190px, 1fr) minmax(min-content, 1fr) auto auto auto;
+      /* The normal-case 14px row-gap (`body > .device` above) times 7 gaps
+         is 98px of pure spacing -- versus the pre-V4 flex column's three
+         3px `.seam` elements (9px total, no separate gap property). That
+         ~89px difference is real budget on the shortest tested viewports:
+         measured, chainsawman needed #contentGrid at ~776px at 1280x990
+         and this template's 30:1 share alone was still ~180px short until
+         the gap came down too. A tighter gap only under the cap keeps the
+         spacious look everywhere there's room to have one. */
+      row-gap: 6px;
+    }
+    /* The R9 addendum (below, in the 881-1023px block) recurs here too --
+       measured, not assumed: giving `.device` a real DEFINITE height above
+       (needed for the tape row's `1fr` to size correctly) makes
+       #contentGrid's own height definite as a side effect, which lets the
+       skins that promote #sessionRail's children into #contentGrid's grid
+       via `display: contents` (hacker, chainsawman) compress those
+       promoted rows below their natural content height -- same failure,
+       different trigger (grid `auto` row sizing propagating a definite
+       height inward, instead of flexbox's min-height:0). Same fix, same
+       enumerated set. */
+    html[data-s10="cap"] body > .device #transcript,
+    html[data-s10="cap"] body > .device #assistantText,
+    html[data-s10="cap"] body > .device .selector,
+    html[data-s10="cap"] body > .device .stat-strip,
+    html[data-s10="cap"] body > .device #sessionPersonaWindow {
+      min-height: min-content;
+    }
+    /* #contentGrid's row (a 1fr share, see `body > .device` above) still
+       won't shrink below its OWN natural content unless it's told it can --
+       same automatic-minimum-size default every shrinkable grid item here
+       has. Needed for skins whose own centrepiece is taller than a modest
+       viewport can ever afford (chainsawman's ~975px "tach" at 1280x900)
+       -- once its 1fr share is genuinely exhausted, the remainder scrolls
+       internally instead of overflowing `.device`'s own capped box. */
+    html[data-s10="cap"] body > .device #contentGrid {
+      min-height: 0;
+      overflow-y: auto;
+    }
+  }
+
+  /* 881-1023px: `.device` is still plain block flow here (the V4 grid only
+     activates at 1024px+, see above), so the pre-V4 flex-column shrink
+     mechanism is unchanged and still needed in this narrower band. */
+  @media (min-width: 881px) and (max-width: 1023px) {
+    html[data-s10="cap"] body > .device {
+      display: flex;
+      flex-direction: column;
+    }
+    html[data-s10="cap"] body > .device #contentGrid,
+    html[data-s10="cap"] body > .device #lowerBay {
+      min-height: 0;
+      overflow-y: auto;
+    }
+    /* flex-basis:auto (not the default 0%) -- #contentGrid's pre-instrument-
+       port base rule (`#contentGrid { flex: 1; ... }`, line ~159) sets
+       flex-basis:0% via that shorthand, and nothing else in the file
+       overrides it. A 0 hypothetical main size means the shrink priority
+       below never actually engages: with #contentGrid's hypothetical size
+       at 0, the two bands' combined hypothetical size undercounts the real
+       content by hundreds of pixels, so flexbox stays in its GROW branch
+       (free space still reads positive) instead of its shrink branch --
+       it grows #contentGrid to fill whatever's left and never touches
+       #lowerBay at all, regardless of flex-shrink. Restoring a real,
+       content-driven basis is what lets the shrink algorithm see an
+       actual deficit and apply the priority below to it. */
+    html[data-s10="cap"] body > .device #contentGrid { flex: 1 1 auto; }
+    /* 48px is unchanged by the move to a measured gate -- the cap only
+       ever engages once s10UpdateFit() has already confirmed #ptt fits at
+       this floor (see the CSS comment above), so there's no fixed
+       viewport case left to re-derive it against. Its own justification
+       was never the 1280x900 case's specific numbers anyway, just "close
+       to #lowerBay's own CSS padding (22px + 26px)" -- that reasoning
+       still holds. */
+    html[data-s10="cap"] body > .device #lowerBay { flex-shrink: 20; min-height: 48px; }
+
+    /* R9 addendum -- a second, independent clipping class the PTT hit-test
+       gate can't see: a skin that promotes #sessionRail's children into
+       #contentGrid's own grid via `display: contents` (hacker, chainsawman
+       -- see either theme's own #sessionRail rule) turns each promoted
+       card/strip/window into a #contentGrid GRID ITEM sized by an implicit
+       `auto` row. Once #contentGrid is ALSO a flex item with `min-height: 0`
+       (needed above so flexbox can shrink it at all), its computed height
+       becomes definite rather than purely intrinsic, and CSS Grid's `auto`
+       row-sizing algorithm can then compress a row below its own content's
+       natural height -- exactly the flexbox "automatic minimum size"
+       problem this file already fixed once for #contentGrid/#lowerBay
+       THEMSELVES, recurring one level deeper for grid ITEMS that happen to
+       be promoted into #contentGrid's row tracks. Caught on Terminal
+       (hacker) @1920x1080/@3440x1440, where `.stat-strip` and
+       `#sessionPersonaWindow` were silently missing their MOOD/CONN
+       readouts with no scrollbar and no #ptt-adjacent symptom at all --
+       verified against HEAD (git stash) that this is genuinely new, not a
+       pre-existing quirk the broader clip-scan also turned up (chainsawman's
+       toggle-track/pttWrap/pttDeco/meterFace and the base .meter-glass
+       entries appear identically with or without this whole slice, so
+       those are left alone -- likely decorative overflow, not a base-layout
+       bug, and none of those files are mine to touch regardless). Fixed by
+       giving these specific promoted content elements an explicit
+       `min-height: min-content`, restoring exactly the floor protection
+       #contentGrid's own `overflow-y: auto` took away from them -- scoped
+       to this enumerated, base-defined set (documented under "Session
+       output" in THEME-SPEC.md) rather than a wildcard, so it can't fight
+       #lowerBay's own deliberately-clamped elements (#historyRail's
+       max-height: 240px, in particular, DEPENDS on losing this exact
+       protection to actually clip and scroll). Only needed in this
+       narrower band -- at 1024px+ #contentGrid is a GRID ITEM, not a flex
+       item, and never gets `min-height: 0` (its row is `auto`, deliberately
+       never the one that shrinks -- see the V4 grid comment above), so the
+       automatic-minimum-size problem this works around doesn't recur
+       there. */
+    html[data-s10="cap"] body > .device #transcript,
+    html[data-s10="cap"] body > .device #assistantText,
+    html[data-s10="cap"] body > .device .selector,
+    html[data-s10="cap"] body > .device .stat-strip,
+    html[data-s10="cap"] body > .device #sessionPersonaWindow {
+      min-height: min-content;
+    }
+  }
 
   /* ── nameplate (was <header>) ── */
   header {
@@ -1245,10 +1769,101 @@
     #firstrunOverlay .status-bulb, #firstrunOverlay .test-btn, #firstrunOverlay .power-key { transition: none !important; animation: none !important; }
   }
 
-  /* ── panel-grid: INPUT / LEVEL / OUTPUT ── */
+  /* ── panel-grid: INPUT / LEVEL / OUTPUT ──
+     INPUT/OUTPUT are now responsive (`minmax`, was a flat 224px/300px) so
+     #contentGrid's OWN intrinsic minimum can shrink as the outer `body >
+     .device` column negotiation (below) needs -- they still render at
+     their old 224/300 widths whenever #contentGrid itself is wide enough
+     (>=1024px raw), just no longer force that width when it isn't.
+
+     `minmax(floor, ceiling)`, NOT `clamp(floor, Nvw, ceiling)` -- a real
+     fix, not a rename: `clamp()` used as a track's sizing function
+     resolves to ONE fixed number from the viewport alone, with zero
+     awareness of what's actually available in the grid, so it isn't a
+     negotiable range at all -- it behaves like writing that number
+     directly. With INPUT/OUTPUT both `clamp()`-fixed and the middle
+     column needing its own 656px floor, their independently-computed
+     widths could sum to MORE than #contentGrid's own assigned width,
+     overflowing #contentGrid's own box sideways -- verified live: at
+     1440px viewport this painted the OUTPUT column's cards (stat-strip,
+     persona snippet) UNDER the avatar pane, cut off mid-word, while
+     #meterFace itself still measured correct because its own floor is
+     unconditional. `minmax()` fixes this at the source: base sizes
+     (130+656+190=976, matching #contentGrid's own outer floor below
+     exactly) always sum to no more than what's available, and INPUT/
+     OUTPUT only grow into real leftover space, never past it.
+
+     The middle (meter) column's floor stays explicit rather than a bare
+     `1fr` -- `1fr` alone has NO minimum of its own, so a narrow
+     #contentGrid would have silently sacrificed the meter to protect
+     INPUT/OUTPUT, exactly backwards from the one explicit "must not
+     shrink" criterion this slice has. 656px raw is the measured baseline
+     #meterFace's own real minimum contribution (575px rendered plus the
+     zone/housing padding around it) -- verified via #meterFace's
+     rendered width tracking this floor 1:1 in the acceptance matrix.
+
+     INPUT floor is 170 (was 130) after the owner flagged the hint text
+     collapsing to a 6-9 line ribbon and OPEN MIC crowding TALK at
+     1440x1271 -- 130 was #contentGrid's own floor at that width landing
+     entirely on INPUT, zero slack, so INPUT sat at its bare minimum every
+     time. Chosen by measurement, not estimation -- screenshotted every
+     10px step from 150 to 224 at 1440x1271: the hint's line-wrap is NOT
+     monotonic in INPUT's width (180 wrapped to 4 lines, worse than both
+     170's 3 and 160's 5 -- word-wrap boundaries, not a smooth function of
+     column width), so this was found by looking, not computed.
+
+     OUTPUT floor is 240 (was 190, briefly 150 -- see below for why that
+     didn't stick) -- the first cut of this fix took OUTPUT's width from
+     INPUT's gain without checking whether the session rail's own LIVE
+     VALUE text (not just its fixed labels) still fit, and it didn't:
+     measured, not assumed, that "connecting…" and "neutral" both already
+     truncated to fragments ("con…", the fixed labels BRAIN/VOICE/TOOLS
+     survived, the live values next to MOOD/CONN did not) even at OUTPUT's
+     ORIGINAL 190, before this slice ever touched it -- a static
+     instruction the user reads once was being funded by session state
+     they glance at continuously, backwards regardless of the exact pixel
+     trade. Re-measured via `#el.clientWidth` vs `#el.scrollWidth` (a
+     number, not a screenshot impression): "neutral" needs 46px,
+     "connected" (the steady CONN state, not the few-seconds-only
+     "connecting…") needs 59px -- OUTPUT 240 clears both. "connecting…"
+     itself needs ~73px, unreachable without pushing METER far enough
+     under this to break other constraints below; left truncated
+     ("connecti…", not "con…") as the one deliberately accepted loss, on
+     the reasoning that it is the shortest-lived state string in this
+     readout, not the one anyone actually watches.
+
+     METER's own floor moved to 579 (was 656) to fund OUTPUT's fix --
+     freeing this from METER, not OUTPUT a second time, since OUTPUT was
+     never the one with slack. NOT simply "656 minus what OUTPUT needed",
+     though: raising METER's floor without ALSO raising the outer `body >
+     .device` grid's own column-1 floor (below, was 976 to match this
+     column set's OLD sum) reproduces the exact clamp-overflow bug two
+     paragraphs up, one level further out -- verified live a second time:
+     #contentGrid's own three columns summing to more than the box the
+     OUTER grid actually gave it painted "TOOLS" under the avatar pane
+     again, at a size (1031px asked vs 976px given) generous enough that
+     every *individual* measurement (avatarMount, #meterFace) still read
+     "fine" in isolation while the page was visibly broken. The two column
+     sets are coupled: `body > .device`'s own column-1 floor must always
+     equal 170 + METER's floor + 240 (whatever OUTPUT/INPUT are at the
+     time), or #contentGrid can be handed less than its own columns need
+     without a symptom showing up in any single element's width check.
+
+     What actually bounds METER's floor at 1440 is #avatarMount, not
+     #avatarPane -- avatarPane's own padding costs ~24px, so avatarPane
+     sitting exactly at its "300px" reading does NOT mean avatarMount (the
+     dimension actually gated) has reached 300. Solved for the maximum
+     METER that still leaves #avatarMount >= 300 at the chassis's 1440
+     width (1325px, minus the 12px column gap = 1313px available for both
+     tracks): #avatarPane needs >=324 for #avatarMount to clear 300, which
+     caps `body > .device`'s column-1 at 1313-324=989, which caps METER's
+     raw floor at 989-170-240=579 -- rendered #meterFace 498x212, not the
+     540x230 an avatarPane-only check would have suggested. See
+     BASELINE_METER_W/H in test_webclient.py for the regression guard this
+     moved with it, and its own comment for why 498, not 540. */
   #contentGrid {
     display: grid;
-    grid-template-columns: 224px 1fr 300px;
+    grid-template-columns: minmax(170px, 224px) minmax(579px, 1fr) minmax(240px, 300px);
     max-width: none;
     column-gap: 0;
     align-items: stretch;
@@ -1315,7 +1930,7 @@
   .control-caption { font-size: 8.5px; opacity: 0.68; font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.16em; color: var(--ink); }
 
   #ptt {
-    width: 78px; height: 78px; border-radius: var(--r);
+    width: var(--ptt-size); height: var(--ptt-size); border-radius: var(--ptt-radius);
     border: 1px solid rgba(0,0,0,0.55);
     background: linear-gradient(180deg, var(--metal-hi), var(--metal-mid) 55%, var(--metal-low));
     box-shadow: var(--ptt-shadow-idle);
@@ -1376,6 +1991,31 @@
     padding: 14px 16px 10px;
     background: linear-gradient(180deg, var(--metal-mid), var(--metal-low));
     box-shadow: inset 0 1px 0 rgba(255,255,255,0.15), inset 0 -2px 4px rgba(0,0,0,0.4), 0 3px 8px rgba(0,0,0,0.32);
+    /* Continued below (V4, 1024px+): pins the gauge to the top of its
+       column instead of centred, since #contentGrid's own row can now be
+       much taller than the gauge itself (it grows to fill leftover
+       vertical space alongside the avatar/tape columns) -- centred there
+       reads as the gauge floating in dead space rather than owning the
+       top of the instrument, same complaint the reference mockup already
+       solved for. */
+  }
+  @media (min-width: 1024px) {
+    .zone-meter { justify-content: flex-start; }
+    .meter-housing { margin-top: 0; margin-bottom: 0; }
+    /* `.zone-meter` is a grid item in `#contentGrid`'s 3-column grid
+       (align-items: stretch), which sizes it to #contentGrid's own row
+       height -- but ONLY once it's told it's allowed to shrink below its
+       content. Grid items default to `min-height: auto`, the same
+       automatic-minimum-size trap already fixed for #contentGrid itself
+       against `.device`'s row (see that rule's own comment, above): with
+       #vaDeck's tile count now taller than the meter void, `.zone-meter`
+       floors at that content height and bursts past #contentGrid's bottom
+       instead of clipping to it, dragging #historyRail's paint order under
+       it. `min-height: 0` here is what lets `#vaDeck`'s own `flex: 1 1
+       auto; min-height: 0` (below) and `#deckTiles`' `overflow-y: auto`
+       actually engage -- without it they have a definite budget to shrink
+       into but never receive it. */
+    .zone-meter { min-height: 0; }
   }
   .meter-face {
     position: relative; flex: 0 0 auto; width: 100%; aspect-ratio: 2.35 / 1;
@@ -1496,6 +2136,13 @@
     padding: 22px 24px 26px;
   }
   #lowerBay #historyRail { display: flex; max-height: 240px; background: var(--surface-2); border: none; border-radius: var(--r); box-shadow: var(--shadow-card); }
+  /* V4 (1024px+): tape moved into its own grid row under the interaction
+     band (see `body > .device` above) -- it fills that row instead of the
+     old fixed 240px, same `#lowerBay #historyRail` specificity so this
+     wins by source order alone, no !important. */
+  @media (min-width: 1024px) {
+    #lowerBay #historyRail { max-height: none; min-height: 0; overflow-y: auto; }
+  }
   #lowerBay .historyEntry { border-bottom-color: rgba(0,0,0,0.5); }
   #lowerBay #avatarPane { background: var(--surface-2); border: none; box-shadow: var(--shadow-card); }
   .lowerBayControls { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
@@ -1658,10 +2305,195 @@
     background: linear-gradient(160deg, #1c1712, #100d0a); box-shadow: var(--shadow-card);
   }
   #lowerBay #questCard .questUnreachable { color: var(--amber-deep); }
+  /* V4/deck-relocation: reuses `.card` for its look (no new visual
+     vocabulary), desktop-only (same threshold the outer grid itself
+     activates at) so a small phone screen never carries an empty box.
+     Nests inside `.zone-meter`, below `.meter-housing` -- `#contentGrid`
+     stretch-aligns its three zones to the tallest, which at real
+     viewports leaves several hundred px of dead space below the fixed-
+     size gauge (measured 412px at 1440x1271); #vaDeck fills whatever that
+     leftover is (`flex: 1 1 auto`), not a hardcoded height, so it tracks
+     the void instead of assuming a number that only held at one geometry.
+     See THEME-SPEC.md's "Chassis regions" for the contract change this
+     was (`deck` is no longer a chassis-level named area). */
+  #vaDeck { display: none; }
+  @media (min-width: 1024px) {
+    #vaDeck { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+  }
+  /* Service Panel "Show control deck" switch. `[hidden]`'s default UA rule
+     (an attribute selector) loses to the ID-selector `display: flex` above
+     at 1024px+, so this needs its own `!important` override to actually win. */
+  #vaDeck[hidden] { display: none !important; }
+  /* Same reason, one level down, and this one was missed: `.deckTile` sets
+     `display: flex` in an AUTHOR rule, and `[hidden]`'s `display: none` lives
+     in the UA stylesheet -- author always wins, so setting `el.hidden = true`
+     on a tile set the flag and changed nothing on screen. The owner found it
+     by switching points off in the panel and watching them stay put.
+     Its test passed throughout because it asserted `el.hidden === true` -- the
+     property, not the pixels. Any gate for "is it gone" must read computed
+     style or hit-test, never the attribute that is supposed to cause it. */
+  .deckTile[hidden] { display: none !important; }
+
+  /* B2/patchbay: HA control-deck tiles. `#deckTiles` is the base
+     renderer's own mount point -- a rig hides this selector and builds its
+     own inside `#vaDeck`, same seam as `#meterChrome`. Tiles never grow the
+     card past its available height: the list scrolls internally instead (a
+     real instrument's readout scrolls, it doesn't grow -- same ruling as
+     `#historyRail`). */
+  /* Grid, not a single-column stack -- at the real deck's ~989px width a
+     stack showed only 3 of 29 tiles in the 150px floor. `minmax()`, never
+     `clamp()`, in this track slot: `clamp()` here would resolve against
+     the viewport with no awareness of `#deckTiles`' own container width
+     and overflow sideways, the same trap already documented above at the
+     panel-grid INPUT/OUTPUT columns. 76px floor targets ~6 columns at the
+     deck's real ~500px inner width (29 points ~= 5 rows), not the old
+     220px single-column-in-disguise floor. */
+  /* `scroll-snap-type` + each `.deckTile`'s own `scroll-snap-align: start`
+     (below) mean a user-driven scroll always comes to rest on a row
+     boundary -- the AT-REST (unscrolled) case is handled separately by
+     deckClipToWholeRows() in the script (index.html), which clamps this
+     element's own visible height down to a whole-row multiple, since snap
+     only governs where scrolling SETTLES, not what's visible at the
+     initial scroll position. Together: a jack point and its legend can
+     never be visibly split by the scroll boundary, at rest or after a
+     scroll gesture. */
+  #deckTiles {
+    flex: 1; min-height: 0; overflow-y: auto; margin-top: 2px;
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 10px 6px;
+    align-content: start;
+    scroll-snap-type: y mandatory;
+  }
+  /* Patchbay ruling (owner, settled): a jack point, not a web-list row --
+     every other control on this faceplate is a physical object, and 29
+     addressable entities ARE a dense rack of jack points each with an
+     engraved legend strip. `.deckTileDot` (unchanged DOM element/name) IS
+     the socket now; `.deckTileName` is the legend strip beneath it. No new
+     DOM nodes -- purely a restyle of the base renderer's existing elements,
+     so a rig's own `#deckTiles` seam is untouched. */
+  .deckTile {
+    display: flex; flex-direction: column; align-items: center; gap: 4px;
+    padding: 6px 2px 5px; min-width: 0; text-align: center;
+    border-radius: var(--r); border: 1px solid transparent; background: transparent;
+    cursor: default; font-family: var(--grotesk); font-size: 12px; color: var(--cream);
+    transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
+    scroll-snap-align: start;
+  }
+  .deckTile[data-clickable="true"] { cursor: pointer; }
+  .deckTile[data-clickable="true"]:hover, .deckTile[data-clickable="true"]:focus-visible {
+    border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+    background: color-mix(in srgb, var(--surface-2) 65%, transparent);
+  }
+  /* The socket ring: `.chassis-screw`'s own machined-bezel gradient
+     (index.html's chassis-screw rule) at jack-point scale. `::after` is
+     the bore/lamp at its centre -- `.lamp .bulb`'s treatment, just sized
+     for a 28px socket instead of a 7px panel lamp -- so state colour lives
+     on the lamp, not the ring, and the ring itself reads as "socket" at
+     every state. */
+  .deckTileDot {
+    flex: 0 0 auto; width: 28px; height: 28px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; position: relative;
+    background: radial-gradient(circle at 35% 30%, var(--metal-hi), var(--metal-low) 72%);
+    box-shadow: 0 1px 2px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(0,0,0,0.4);
+  }
+  .deckTileDot::after {
+    content: ""; width: 9px; height: 9px; border-radius: 50%;
+    background: var(--lamp-off); box-shadow: inset 0 1px 1px rgba(0,0,0,0.6);
+    transition: background 0.15s var(--ease), box-shadow 0.15s var(--ease);
+  }
+  /* The engraved legend: `.lamp .nom`'s own mono/uppercase/tracked
+     treatment (index.html), not `.lamp .nom`'s literal `--ink` colour --
+     that token is tuned for dark text on the LIGHT metal chassis face,
+     invisible against the deck's dark `.card` surface these tiles sit on. */
+  .deckTileName {
+    width: 100%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-family: var(--mono); font-size: 7px; text-transform: uppercase; letter-spacing: 0.1em;
+    color: var(--text-muted);
+  }
+  .deckTileWrite { font-family: var(--mono); font-size: 7px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); }
+  /* Raw HA state, shown only when the classifier's default arm ("unknown")
+     would otherwise discard it -- e.g. a thermostat's "cool" (rule 4). */
+  .deckTileRaw { font-family: var(--mono); font-size: 7px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--warn); }
+  /* Empty caption spans (the common case -- most tiles have no write
+     status or raw-state footnote) collapse instead of leaving a blank
+     line under every legend in this column layout. */
+  .deckTileWrite:empty, .deckTileRaw:empty { display: none; }
+  /* Four visually distinct socket presentations -- hue AND shape both
+     change, so the difference survives a greyscale screenshot (rule 4).
+     on/off are both a solid-filled bore (differ only by the lit glow
+     halo); unavailable is a dashed, hatched ring around a lit-red bore
+     (a covered/dead jack); unknown is fully hollow -- dotted ring, dashed
+     bore, no fill at all -- the classifier's default arm, which must never
+     read as a dimmer "off". */
+  .deckTile[data-state="on"] .deckTileDot::after {
+    background: var(--ok); box-shadow: 0 0 6px color-mix(in srgb, var(--ok) 70%, transparent), inset 0 0 2px rgba(255,255,255,0.5);
+  }
+  .deckTile[data-state="off"] .deckTileDot::after { background: var(--lamp-off); }
+  .deckTile[data-state="unavailable"] .deckTileDot {
+    border: 2px dashed color-mix(in srgb, var(--bad) 60%, var(--metal-low));
+    background: repeating-linear-gradient(135deg, color-mix(in srgb, var(--bad) 22%, var(--metal-low)) 0 4px, var(--metal-low) 4px 8px);
+  }
+  .deckTile[data-state="unavailable"] .deckTileDot::after {
+    background: var(--bad); box-shadow: 0 0 5px color-mix(in srgb, var(--bad) 70%, transparent), inset 0 0 2px rgba(255,255,255,0.35);
+  }
+  .deckTile[data-state="unknown"] .deckTileDot { background: transparent; border: 2px dotted var(--warn); box-shadow: none; }
+  .deckTile[data-state="unknown"] .deckTileDot::after { background: transparent; border: 2px dashed var(--warn); box-shadow: none; }
+  /* Write carrier lives on the socket ring itself (a second outline, on
+     top of the base ring shadow) as well as the existing `.deckTileWrite`
+     text caption below the legend -- a plug mid-seat, not just a word. */
+  .deckTile[data-write="pending"] .deckTileDot {
+    box-shadow: 0 1px 2px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(0,0,0,0.4), 0 0 0 2px var(--accent);
+  }
+  .deckTile[data-write="failed"] .deckTileDot {
+    box-shadow: 0 1px 2px rgba(0,0,0,0.6), inset 0 0 0 1px rgba(0,0,0,0.4), 0 0 0 2px var(--bad);
+  }
+  .deckTile[data-write="pending"] .deckTileWrite { color: var(--accent); }
+  .deckTile[data-write="failed"] .deckTileWrite { color: var(--bad); }
+  /* min-height reserves room for the sim badge's own box (font-size 9px +
+     2px vertical padding is taller than the label's plain 8px text) so
+     the row's height -- and therefore #deckTiles' top edge -- stays
+     identical whether or not the badge is currently showing. */
+  #vaDeck .label { position: relative; justify-content: flex-start; min-height: 18px; }
+  /* Part 3: hidden-by-filter count, next to the "Deck" label text itself
+     (not the badge/link row on the right) -- ?deckfilter= is opt-in and
+     defaults to unfiltered, so this stays hidden unless a filter is
+     actually active (never a silent cap). */
+  .deckFilterStatus { font-family: var(--mono); font-size: 9px; letter-spacing: 0.06em; color: var(--text-muted); }
+  /* Shared announcer for deck write-status/link transitions (WCAG 4.1.3) --
+     visually hidden (standard clip-path technique, not `display:none`/
+     `visibility:hidden`, which would pull it out of the accessibility tree
+     too) so it's audible to AT without adding a visible fourth badge next
+     to the sim/filter/link ones already in this row. */
+  .deckLiveStatus {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap;
+  }
+  /* Badge + link indicator share the label row (never a tile row) so the
+     always-unmissable sim badge doesn't cost one of the ~5 visible tile
+     rows in the 150px deck floor -- `margin-left: auto` hugs both against
+     the row's right edge, ahead of the `.label::after` status dot. */
+  .deckLabelStatus { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+  .deckLinkIndicator {
+    font-family: var(--mono); font-size: 8px; letter-spacing: 0.1em; color: var(--bad);
+    border: 1px dashed var(--bad); border-radius: var(--r); padding: 1px 4px;
+  }
+  .deckSimBadge {
+    font-family: var(--mono); font-size: 9px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: #05161a; background: var(--warn); border-radius: var(--r);
+    padding: 2px 6px;
+  }
   #log { font-size: 11px; padding: 10px 12px; max-width: none; }
   #log:not([hidden]) { color: rgba(236,228,210,0.7); }
 
-  .lowerBayControls { position: relative; }
+  /* Row 4's own `minmax(min-content, 1fr)` track floor (see that comment,
+     above) lives here, not on `.legendPlate`: the historical 150px floor
+     was always about THESE three diagnostics buttons wrapping, never the
+     plate's own content, and `.lowerBayControls` has no backing plate to
+     visually pad -- an idle/unconfigured instance (no `tools`, e.g. the
+     public README screenshot) keeps `.legendPlate` at its true 2-line
+     content height instead of a mostly-empty 150px slab, while the track
+     itself still floors correctly (a grid track's min-content step
+     consults every item's own specified min size, not just one cell's). */
+  .lowerBayControls { position: relative; min-height: 150px; }
   .diagToggle { position: relative; border-radius: var(--r); box-shadow: 0 3px 0 rgba(20,17,12,0.55);
     transition: transform 0.1s var(--ease), box-shadow 0.1s var(--ease);
   }
@@ -1672,7 +2504,13 @@
   }
   .diagToggle:active { transform: translateY(2px); box-shadow: inset 0 2px 4px rgba(0,0,0,0.5); }
 
-  #contentGrid .hint { font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.1em; font-size: 8px; opacity: 0.68; text-align: center; }
+  /* Was `opacity: 0.68` on top of ink -- same trap as `#pttCaption` above:
+     it dims the composited pixel but not the `color` a contrast check
+     reads. The secondary-hierarchy cue (this is quieter than the labels
+     around it) already lives in the type treatment -- small, tracked,
+     uppercase, mono -- so dropping the opacity doesn't make it "loud",
+     it just stops it from failing WCAG while looking identical otherwise. */
+  #contentGrid .hint { font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.1em; font-size: 8px; text-align: center; }
 
   @media (min-width: 1024px) {
     #lowerBay {
@@ -1681,7 +2519,7 @@
       grid-template-areas:
         "monitor tape"
         "monitor task"
-        "monitor links"
+        ".       links"
         "controls controls"
         "log log";
       align-items: start;
@@ -1692,6 +2530,93 @@
     #linksCard { grid-area: links; }
     .lowerBayControls { grid-area: controls; }
     #log { grid-area: log; }
+    #legendPlate { grid-area: legend; }
+  }
+
+  /* ── Command legend plate: silkscreened operating instructions, not a
+     help box -- same idiom as `.baseplate .nom` (footer nomenclature) and
+     `#armSwitch .nom`. Lives in the `legend` chassis region (body > .device's
+     own grid-template-areas, reclaiming row 4's left cell -- previously
+     "controls controls" full width, now "legend controls" split, the same
+     shape the row-4 sizing comment already measured under the historical
+     "deck | controls" name before that split was undone). Was assumed to sit
+     directly on bare `.device` metal (no card surface), same as `.baseplate
+     .nom` -- but unlike the footer, this plate's row lands on the DARK half
+     of `.device`'s gradient, so the ink read as ink-on-dark (2.71:1,
+     CONTRAST_PAIRS caught it). Fixed the same way `.baseplate` already was:
+     an opaque backing plate under the ink, not a lighter ink -- see
+     `.baseplate`'s own comment for why alpha/opacity backgrounds are the
+     trap here. */
+  .legendPlate {
+    display: flex; flex-direction: column; gap: 6px;
+    align-self: start; justify-self: start;
+    padding: 10px 14px;
+    background: color-mix(in srgb, var(--metal-mid) 42%, var(--metal-hi));
+  }
+  .legendPlate .nom {
+    display: block; font-family: var(--mono); text-transform: uppercase;
+    letter-spacing: 0.1em; font-size: 9px; line-height: 1.5; color: var(--ink);
+    text-shadow: 0 -1px 0 rgba(0,0,0,0.55), 0 1px 0 rgba(255,255,255,0.28);
+  }
+  .legendPlate .nom[hidden] { display: none; }
+  /* Full armed-tool list, rendered from the config_state/config_ack snapshot
+     (see renderLegendTools) -- a dense two-column silkscreen block, same ink
+     idiom as the two lines above it but no gap padding of its own, so it
+     reads as a sub-block of the same plate rather than a separate one. */
+  .legendTools {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 12px; row-gap: 2px; margin-top: 4px;
+  }
+  .legendTools[hidden] { display: none; }
+  .legendTools .nom { font-size: 9px; }
+
+  /* V4: `#lowerBay` itself is `display: contents` at this width now (see
+     `body > .device` near the top of this stylesheet), so its own
+     `grid-template-areas` (the block just above) has no container to
+     apply to -- it goes inert, not wrong, and every child promoted out of
+     it becomes a direct participant in `.device`'s OWN named grid instead.
+     Their `grid-area: monitor/tape/task/links/controls/log` declarations
+     in the block above are UNCHANGED and keep working as-is: `.device`
+     reuses those exact area names deliberately (see its own comment) so
+     nothing here needs to re-declare placement, only what the block above
+     can't reach (`#lowerBay`'s own display and avatarPane/avatarMount's
+     sizing). Same `#lowerBay` selector, later in the cascade, so
+     `display: contents` wins over both its unconditional `display: flex`
+     base rule (index.html:1791) and its own `display: grid` at this same
+     width (the block just above) on source order alone.
+
+     `#vaDeck` is NOT placed here: it moved out of `#lowerBay` entirely
+     (deck density follow-up) and nests inside `.zone-meter` instead, next
+     to `.meter-housing` -- see `#vaDeck`'s own CSS comment and
+     THEME-SPEC.md's "Chassis regions" for why. `deck` was briefly a named
+     chassis area (`grid-template-areas` above) but no base element claims
+     it anymore, so it was dropped from the map rather than left as a name
+     nothing uses. */
+  @media (min-width: 1024px) {
+    #lowerBay { display: contents; }
+
+    /* Avatar owns the interaction band's own row only now -- it used to
+       also span the tape row below it, but that row's right cell now
+       belongs to `links` (owner ruling: #linksCard moved beside #historyRail
+       instead of its own full-width row, so the legend plate's row-4 floor
+       could shrink safely -- see the `grid-template-rows` comment above).
+       Sizing only; placement is `grid-area: monitor` from the block above. */
+    #avatarPane {
+      height: auto; min-width: 0; min-height: 0; max-height: 620px;
+    }
+    #avatarMount { min-width: 0; }
+
+    /* `#linksCard` moved from a free-growing full-width row (below-1024px
+       `#lowerBay` flex column, unchanged, see the media query above) into
+       the tape row's height-capped cell here -- nothing gave it
+       #historyRail's own internal-scroll behaviour that a capped cell
+       demands, and the real producer isn't hypothetical: `patches/
+       hermes_cockpit.py:493` sends up to 5 links (`links[:5]`), which
+       genuinely overflows the cell with realistic titles. Same idiom as
+       `#lowerBay #historyRail` above -- `overflow-y: auto` on the grid
+       item itself (not a wrapper), so the "Links" label scrolls with its
+       content exactly like tape's own "Tape" label does. */
+    #linksCard { min-height: 0; overflow-y: auto; }
   }
 
   /* ── mobile fallback: stack the three zones, keep the lower bay ── */
@@ -1900,6 +2825,51 @@
   }
   #settingsPanel .switch-h-input:checked ~ .switch-track-h .switch-knob-h { left: 22px; }
   #settingsPanel .switch-h-input:focus-visible ~ .switch-track-h { outline: 2px solid var(--amber); outline-offset: 2px; }
+
+  /* ── Deck point list: one row per jack on the patchbay ──
+     A LAMP, not a tick-box. Every other control on this faceplate is a
+     physical part, and 29 native checkboxes read as a web form dropped into
+     an instrument -- the same defect the deck itself had before it became a
+     patchbay. A point switched off here reads like a lamp that is out, which
+     is also what its jack looks like on the deck.
+     Compact (~24px rows) rather than 29 full 44px toggles: at this count the
+     DECK section would otherwise dwarf every other section in the drawer.
+     Bounded and internally scrolling for the same reason the chassis's own
+     readouts scroll instead of growing. */
+  #settingsPanel #deckPointList {
+    max-height: 260px; overflow-y: auto; margin-top: 8px;
+    border: 1px solid rgba(0,0,0,0.5); border-radius: var(--r);
+    background: rgba(0,0,0,0.22);
+    box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
+  }
+  #settingsPanel #deckPointList .switch-h-row { padding: 3px 10px; }
+  #settingsPanel #deckPointList .switch-h-row + .switch-h-row { border-top: 1px solid rgba(0,0,0,0.32); }
+  /* Engraved legend type, same vocabulary as the jack legends on the deck
+     itself. Uppercasing is CSS, never textContent -- the accessible name
+     stays the real mixed-case name. */
+  #settingsPanel .deckPointLabel {
+    font-family: var(--mono); font-size: 9px; text-transform: uppercase;
+    letter-spacing: 0.1em; color: var(--cream);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+  }
+  /* Dim a hidden point's legend. `:has()` on the row, not a sibling combinator
+     off the input -- the input lives inside `.switch-h-visual`, so the label is
+     its uncle, not its sibling, and `~` never reaches it.
+     A fixed muted colour token, not `opacity` -- opacity on `--cream` text
+     measured 2.1-2.7:1 against this row's near-black background (well under
+     the 4.5:1 AA floor for 9px type), and it's the worst label on the
+     faceplate to lose: it's the one you just switched off, which you need
+     to read to confirm you hit the right jack. The switch's own lamp/knob
+     already carries the on/off state unambiguously, so the label doesn't
+     need to fight for that job too -- it only needs to read as "present but
+     secondary", which a solid, less-bright colour does without crushing
+     contrast the way opacity does. `--metal-hi` is the existing "dim brushed
+     metal" token this faceplate already uses for machined highlights;
+     reused here rather than inventing a new colour. Measured (2x DPI pixel
+     sample, real render): ~6.9:1 -- beats the deck's own always-on legend
+     (4.73:1, `.deckTileName`/`--text-muted`) while still reading visibly
+     dimmer than the lit-point `--cream` label next to it. */
+  #settingsPanel #deckPointList .switch-h-row:has(.switch-h-input:not(:checked)) .deckPointLabel { color: var(--metal-hi); }
 
   /* ── Jack: LCD-lit single-line text field, lamp lights on focus ── */
   #settingsPanel .jack {
@@ -2213,9 +3183,50 @@
     <div class="hint">10–30 seconds of clean speech — background noise becomes part of the voice. Recording auto-stops at 30s (the server truncates to 30s too).</div>
     <div id="voiceCloneStatus" role="status" aria-live="polite"></div>
   </details>
+  <details id="deckGroup" hidden>
+    <summary><span class="disc-lamp" aria-hidden="true"></span><span class="nom">Deck</span><span class="chev" aria-hidden="true">▸</span></summary>
+    <div class="brainOption switch-h-row">
+      <span class="switch-h-visual">
+        <input type="checkbox" id="deckOnToggle" class="switch-h-input">
+        <span class="switch-track-h" aria-hidden="true">
+          <span class="switch-knob-h"></span>
+          <span class="switch-lamp-h"></span>
+        </span>
+      </span>
+      <label for="deckOnToggle">Show control deck</label>
+    </div>
+    <div class="brainOption switch-h-row">
+      <span class="switch-h-visual">
+        <input type="checkbox" id="deckHideUnavailableToggle" class="switch-h-input">
+        <span class="switch-track-h" aria-hidden="true">
+          <span class="switch-knob-h"></span>
+          <span class="switch-lamp-h"></span>
+        </span>
+      </span>
+      <label for="deckHideUnavailableToggle">Hide unavailable points</label>
+    </div>
+    <div class="hint">Applied now, and again each time you flip this switch — a point that goes unavailable later stays exactly where it is so nothing shifts under your finger.</div>
+    <div class="label">Visible points</div>
+    <div id="deckPointList"></div>
+    <div class="label">Forced state (review only)</div>
+    <select id="deckSimSelect">
+      <option value="">Off</option>
+      <option value="on">on</option>
+      <option value="off">off</option>
+      <option value="unavailable">unavailable</option>
+      <option value="unknown">unknown</option>
+      <option value="pending">write: pending</option>
+      <option value="confirmed">write: confirmed</option>
+      <option value="failed">write: failed</option>
+    </select>
+    <div class="hint">Forces every tile to one state for review. Never saved — resets on reload. A <code>?decksim=</code> URL parameter overrides this picker and always wins.</div>
+  </details>
   <button class="panelBtn primary" id="applyPersonaBtn">Apply</button>
   <button class="panelBtn" id="resetChatBtn">Reset chat</button>
   <button class="panelBtn" id="reloadToolsBtn">Reload tools</button>
+  <div class="label" id="pwaLabel" hidden>App</div>
+  <button type="button" class="panelBtn" id="pwaUpdateBtn" hidden>Update ready — tap to reload</button>
+  <button type="button" class="panelBtn" id="pwaInstallBtn" hidden>Install app</button>
   <div class="panelFrame" aria-hidden="true"></div>
 </aside>
 
@@ -2306,7 +3317,16 @@
           <div class="meter-glass" aria-hidden="true"></div>
           <svg viewBox="0 0 280 120" aria-hidden="true">
             <path class="gaugeArc" d="M 46 104 A 94 94 0 0 1 234 104" />
-            <path class="gaugeRedZone" d="M 211.3 45.6 A 94 94 0 0 0 234 104" />
+            <!-- Red zone rides ON the arc above, so it must share its sweep
+                 direction: sweep-flag 1, same as .gaugeArc. It was 0, which
+                 draws the same endpoints the other way round -- bowing inward
+                 across the dial face instead of following the rim.
+                 Start point is the exact 40deg point on the r=94 circle
+                 centred (140,104): 140+94cos40 = 212.0, 104-94sin40 = 43.6.
+                 The old 211.3,45.6 sat at r=92.2, off the rim, which would
+                 have left the zone floating just inside the arc even once the
+                 sweep was right (SVG scales r to reach both endpoints). -->
+            <path class="gaugeRedZone" d="M 212 43.6 A 94 94 0 0 1 234 104" />
             <g>
               <line class="gaugeTick major" x1="46" y1="104" x2="60" y2="104" transform="rotate(0 140 104)" />
               <line class="gaugeTick" x1="46" y1="104" x2="58" y2="104" transform="rotate(11.25 140 104)" />
@@ -2330,6 +3350,28 @@
           <span id="stateTag" class="state-tag" aria-live="polite"></span>
           <span>RMS <b id="gaugeRms">0.00</b></span>
         </div>
+      </div>
+
+      <!-- V4/B2: control deck fed by a state provider -- desktop only (see
+           #vaDeck's own CSS comment). Home Assistant is the current/only
+           provider, not what this region fundamentally is; absent unless
+           HA_URL+HA_TOKEN are configured server-side (see ha_deck.py);
+           `#deckTiles` is the base
+           renderer, hidden and replaced wholesale by a rig exactly like
+           `#meterChrome`. See THEME-SPEC.md "Deck" for the published
+           data-state/data-write/data-link contract, and "Chassis regions"
+           for why this now nests inside `console`'s meter zone instead of
+           sitting at the chassis level. -->
+      <div class="card" id="vaDeck" aria-label="Deck">
+        <div class="label">
+          <span>Deck <span id="deckFilterStatus" class="deckFilterStatus" hidden></span></span>
+          <span class="deckLabelStatus">
+            <span id="deckSimBadge" class="deckSimBadge" hidden></span>
+            <span id="deckLinkIndicator" class="deckLinkIndicator" hidden>LINK LOST</span>
+          </span>
+          <span id="deckLiveStatus" class="deckLiveStatus" role="status" aria-live="polite"></span>
+        </div>
+        <div id="deckTiles" role="toolbar" aria-label="Deck jacks"></div>
       </div>
     </section>
 
@@ -2420,6 +3462,12 @@
       <div class="label">Links</div>
       <div id="linksList"></div>
       <div class="panelFrame" aria-hidden="true"></div>
+    </div>
+
+    <div class="legendPlate" id="legendPlate">
+      <span class="nom">Hold talk, or press and hold space — release to send</span>
+      <span class="nom" id="legendArmLine">Arm opens the mic, say &ldquo;<b id="legendWakePhrase">the wake word</b>&rdquo; to wake</span>
+      <div class="legendTools" id="legendTools" hidden></div>
     </div>
 
     <div class="lowerBayControls">
@@ -2551,6 +3599,11 @@ const els = {
   phoneContextToggle: document.getElementById("phoneContextToggle"),
   phoneContextStatus: document.getElementById("phoneContextStatus"),
   voiceCloneAdvanced: document.getElementById("voiceCloneAdvanced"),
+  deckGroup: document.getElementById("deckGroup"),
+  deckOnToggle: document.getElementById("deckOnToggle"),
+  deckHideUnavailableToggle: document.getElementById("deckHideUnavailableToggle"),
+  deckPointList: document.getElementById("deckPointList"),
+  deckSimSelect: document.getElementById("deckSimSelect"),
   voiceCloneList: document.getElementById("voiceCloneList"),
   voiceCloneName: document.getElementById("voiceCloneName"),
   voiceCloneFile: document.getElementById("voiceCloneFile"),
@@ -2563,6 +3616,9 @@ const els = {
   applyPersonaBtn: document.getElementById("applyPersonaBtn"),
   resetChatBtn: document.getElementById("resetChatBtn"),
   reloadToolsBtn: document.getElementById("reloadToolsBtn"),
+  pwaLabel: document.getElementById("pwaLabel"),
+  pwaUpdateBtn: document.getElementById("pwaUpdateBtn"),
+  pwaInstallBtn: document.getElementById("pwaInstallBtn"),
   camBtn: document.getElementById("camBtn"),
   camSelectBlock: document.getElementById("camSelectBlock"),
   camSelect: document.getElementById("camSelect"),
@@ -2572,6 +3628,7 @@ const els = {
   sessionBrain: document.getElementById("sessionBrain"),
   sessionVoice: document.getElementById("sessionVoice"),
   sessionTools: document.getElementById("sessionTools"),
+  legendTools: document.getElementById("legendTools"),
   sessionMood: document.getElementById("sessionMood"),
   sessionConn: document.getElementById("sessionConn"),
   sessionPersonaSnippet: document.getElementById("sessionPersonaSnippet"),
@@ -2591,6 +3648,12 @@ const els = {
   firstrunWsUrl: document.getElementById("firstrunWsUrl"),
   firstrunEnter: document.getElementById("firstrunEnter"),
   firstrunSkip: document.getElementById("firstrunSkip"),
+  vaDeck: document.getElementById("vaDeck"),
+  deckTiles: document.getElementById("deckTiles"),
+  deckLinkIndicator: document.getElementById("deckLinkIndicator"),
+  deckSimBadge: document.getElementById("deckSimBadge"),
+  deckFilterStatus: document.getElementById("deckFilterStatus"),
+  deckLiveStatus: document.getElementById("deckLiveStatus"),
 };
 
 // PERSONA rotary + VOICE rail faceplate displays: read-only mirrors of the
@@ -2692,10 +3755,273 @@ const THEME_ID_RE = /^[a-z0-9-]+$/;
 let customThemes = [];
 const loadedThemeLinks = new Set();
 
+// Contract version for the rig `host` object (below). Bumped only when the
+// host object's shape changes in a way an existing rig couldn't cope with —
+// a manifest entry that declares a hostApi higher than this build's is kept
+// in the picker but refused (see setTheme), never silently hidden, so a
+// clone that hasn't updated yet gets a legible reason instead of a dead
+// swatch or a rig running against a host shape it wasn't written for.
+const HOST_API_VERSION = 1;
+
+function getThemeEntry(id) {
+  return BUILTIN_THEMES.find((x) => x.id === id) || customThemes.find((x) => x.id === id);
+}
+
 function getThemeAvatarConfig(id) {
-  const t = BUILTIN_THEMES.find((x) => x.id === id) || customThemes.find((x) => x.id === id);
+  const t = getThemeEntry(id);
   return t && t.avatar;
 }
+
+// ── Rigs (theme-owned three.js/canvas visuals, "module": true in a
+// manifest entry) — lifecycle mirrors avatar.mjs's controller (destroy()
+// discipline, generation-counter supersede guard) but scoped to a theme's
+// own mount points instead of the avatar pane. See mountRigForTheme,
+// teardownRig, and the `host` object built in mountRigForTheme for the full
+// contract a themes/<id>.mjs module is written against.
+let rigController = null;
+let rigGen = 0; // bumped by teardownRig(); a stale mountRigForTheme() checks this after every await and bails
+const rigCanvases = new Set(); // {canvas, mount, rigGen, ctx} — swept by teardownRig(); the interval reaper below catches a canvas orphaned some other way (detached from the DOM without going through destroy() at all)
+let rigsReapedCount = 0; // window.__rigDebug.reaped — proves the interval path fired, not just the teardown sweep
+let reaperTimer = null; // non-null only while rigCanvases is non-empty — see startReaperIfNeeded/stopReaperIfIdle
+
+// Themes will be authored by strangers' agents; the rig contract WILL be
+// violated in the field — not maliciously, just incompetently, the way any
+// third-party plugin ecosystem accumulates code that forgets to clean up
+// after itself. The symptom is invisible until it isn't: WebGL contexts are
+// capped browser-wide, so a leaked one shows up as "the cockpit got slow"
+// with zero attribution, possibly several theme switches after the actual
+// leak. This reaper exists to defend the host against that class of bug,
+// not against a hostile rig (a rig running in this page already has the
+// whole DOM; the reaper is not a security boundary).
+//
+// setInterval, not requestAnimationFrame: rAF stops firing on a hidden tab,
+// which is exactly when a user leaves an orphaned canvas sitting around the
+// longest before switching back. 100ms is the "bug recovery," not "hot
+// loop" tier — an orphan should be caught within a couple of ticks of a
+// human noticing something's wrong, not resource-audited every frame.
+function loseRigContext(ctx) {
+  if (!ctx) return;
+  try { ctx.getExtension("WEBGL_lose_context")?.loseContext(); }
+  catch (e) { console.warn("rig: failed to lose a WebGL context", e); }
+}
+
+function reapOrphanedCanvases() {
+  let reaped = 0;
+  rigCanvases.forEach((entry) => {
+    if (entry.canvas.isConnected) return; // still in the DOM — not this reaper's job (see teardownRig's own registry release)
+    loseRigContext(entry.ctx);
+    rigCanvases.delete(entry);
+    rigsReapedCount += 1;
+    reaped += 1;
+  });
+  // One line per sweep that actually found something, not per canvas and
+  // never per idle tick — this timer fires every 100ms and almost every
+  // firing reaps nothing.
+  if (reaped > 0) {
+    const themeId = document.documentElement.getAttribute("data-theme");
+    console.warn(`rig "${themeId}": reaped ${reaped} orphaned WebGL context${reaped === 1 ? "" : "s"} detached from the DOM mid-life`);
+  }
+  stopReaperIfIdle();
+}
+
+// Lazily started on the first createRigCanvas() call and stopped the moment
+// the registry empties, rather than running for the page's whole lifetime —
+// a page where no theme ever ships a rig must carry zero extra timers (the
+// same "byte-identical with no rig active" rule S1 enforced for teardown
+// applies here too).
+function startReaperIfNeeded() {
+  if (reaperTimer) return;
+  reaperTimer = setInterval(reapOrphanedCanvases, 100);
+}
+function stopReaperIfIdle() {
+  if (reaperTimer && rigCanvases.size === 0) {
+    clearInterval(reaperTimer);
+    reaperTimer = null;
+  }
+}
+
+// Mounts a rig may touch, all `display:none` by default until the theme's
+// own CSS un-hides them (index.html:574) — a rig with no matching CSS is
+// invisible, not broken. `.panelFrame` is deliberately absent: the seam
+// audit that produced this list reported its insertion points unverified,
+// and an unverified mount is worse than no mount.
+function rigMounts() {
+  return {
+    meterChrome: document.getElementById("meterChrome"),
+    fxBack: document.getElementById("fxBack"),
+    pttDeco: document.getElementById("pttDeco"),
+    bannerMount: document.getElementById("bannerMount"),
+    statColL: document.getElementById("statColL"),
+    statColR: document.getElementById("statColR"),
+  };
+}
+
+// Several of these mounts ship real baked-in markup of their own
+// (#meterChrome's .meterFace/.meterNeedle/.meterTicks that the level bus
+// animates, #pttDeco's 8 <i> sigil-face elements a CSS-only skin can style)
+// — they are not blank rig-only real estate. Captured once, before any rig
+// has ever run, so teardownRig() can restore each mount to what was there
+// at boot instead of blanket-wiping it: a rig sharing a mount with static
+// base markup gets cleaned up without erasing what was already there.
+const rigMountBaseline = new Map();
+(function captureRigMountBaseline() {
+  Object.values(rigMounts()).forEach((el) => {
+    if (el) rigMountBaseline.set(el, Array.from(el.childNodes));
+  });
+})();
+
+// The host, not the rig, owns canvas creation — so the registry it feeds
+// (rigCanvases) is guaranteed complete even if a rig's own cleanup is buggy.
+// `opts` is accepted and ignored for now; it exists so a future slice can
+// add e.g. alpha/antialias hints without another host-contract bump.
+//
+// The reaper needs a WebGL context to lose, but the host must NEVER call
+// canvas.getContext() itself to go find one — that call CREATES a context
+// if none exists yet, which would make the reaper manufacture the very
+// leak it exists to clean up. Instead this wraps getContext on THIS ONE
+// canvas instance (never HTMLCanvasElement.prototype — that would reach
+// every canvas on the page, including the avatar's) so that whenever the
+// rig itself obtains a context, the registry entry records it passively.
+function createRigCanvas(mounts, mountKey, opts) {
+  const mount = mounts[mountKey];
+  if (!mount) {
+    console.warn(`rig: createCanvas requested unknown/absent mount "${mountKey}"`);
+    return null;
+  }
+  const canvas = document.createElement("canvas");
+  const entry = { canvas, mount, rigGen, ctx: null };
+  const origGetContext = canvas.getContext.bind(canvas);
+  canvas.getContext = function (type, ...args) {
+    const ctx = origGetContext(type, ...args);
+    if (ctx && /^(webgl2?|experimental-webgl)$/.test(type)) entry.ctx = ctx;
+    return ctx;
+  };
+  mount.appendChild(canvas);
+  rigCanvases.add(entry);
+  startReaperIfNeeded();
+  return canvas;
+}
+
+// Synchronous, called at the TOP of setTheme() before data-theme changes —
+// a rig's canvas must never render one more frame under the incoming
+// theme's CSS (a stale rig repainting into a new theme's mount reads as a
+// flash of the wrong instrument). try/catch around destroy() so one rig's
+// buggy teardown can't abort the theme switch itself; restoring each
+// mount's captured baseline (rather than a blanket replaceChildren()) is
+// belt-and-braces the same way switchAvatar() clears avatarMount
+// (index.html:5640) — a rig that forgot to clean up must not leave DOM
+// behind — WITHOUT also erasing the mount's own baked-in base markup, which
+// a blanket clear did on every single theme switch (caught by the meter
+// needle / pttDeco sigil-face regressions this went through before landing).
+// Walks every rig mount for a <canvas> that was never in that mount's
+// captured boot baseline (S1's rigMountBaseline) and loses its context —
+// the case destroy() itself can't be trusted to cover: a rig that skipped
+// or threw partway through its own cleanup can leave its canvas still
+// attached. The baseline check is load-bearing, not incidental — it is the
+// only thing standing between this sweep and the base instrument's own
+// markup. No base mount currently contains a <canvas>, which makes the
+// check look unnecessary today; that is exactly the assumption a future
+// theme could break, so it stays.
+//
+// Scoped strictly to rig mounts (rigMounts()) and rig-registered canvases
+// (rigCanvases) — the avatar's canvas lives in #avatarMount, which is
+// neither, so nothing here (or in the interval reaper below) can ever
+// reach it.
+// Every entry left in rigCanvases at this point is dead by definition — the
+// rig that made them is being destroyed — so releasing the WHOLE registry,
+// unconditionally, is both simpler and more correct than walking the DOM
+// for it. A DOM walk over direct mount children (the first version of this)
+// missed a canvas a rig had wrapped in its own positioning <div>: a totally
+// ordinary thing to do that made the canvas a grandchild of its mount, not
+// a direct child, so the walk never found it and its context outlived the
+// rig silently. The registry has no such blind spot — it only ever holds
+// canvases host.createCanvas() made, so it needs no baseline/ownership
+// check either (contrast the mount-restore below, which DOES need one,
+// because that DOM does hold canvas-adjacent base markup).
+// isContextLost() before releasing (rather than releasing unconditionally
+// and reporting every entry) keeps the console.warn below honest — a rig
+// that already called forceContextLoss() itself in its own destroy() (the
+// disciplined case) must not be reported as if the host had to save it.
+function teardownRig() {
+  rigGen += 1;
+  const outgoingThemeId = document.documentElement.getAttribute("data-theme"); // captured before setTheme changes it — see below
+  try { rigController?.destroy?.(); } catch (e) { console.warn("rig: destroy() threw", e); }
+  rigController = null;
+  let healed = 0;
+  rigCanvases.forEach((entry) => {
+    if (entry.ctx && !entry.ctx.isContextLost()) {
+      loseRigContext(entry.ctx);
+      healed += 1;
+    }
+  });
+  // A rig that leaks silently never gets fixed — the whole point of this
+  // reaper is defense against incompetence, and an author who never learns
+  // they leaked keeps leaking. One line per teardown, not per canvas.
+  if (healed > 0) {
+    console.warn(`rig "${outgoingThemeId}": released ${healed} orphaned WebGL context${healed === 1 ? "" : "s"} the rig did not dispose`);
+  }
+  Object.values(rigMounts()).forEach((el) => {
+    if (el) el.replaceChildren(...(rigMountBaseline.get(el) || []));
+  });
+  rigCanvases.clear();
+  stopReaperIfIdle();
+}
+
+// Async and deliberately fire-and-forget from setTheme (kept synchronous —
+// see setTheme's own comment). `gen` is captured up front and re-checked
+// after every await: a second theme switch before this one resolves bumps
+// rigGen via teardownRig(), so a superseded import()/initRig() can never
+// land its controller on top of a newer theme. No timeout on the import()
+// itself — a hung dynamic import can't be aborted anyway, and the gen guard
+// already makes whichever switch happens last the one that wins.
+async function mountRigForTheme(id) {
+  const entry = getThemeEntry(id);
+  if (!entry || !entry.module) return; // no-rig path stays free — most themes never reach here
+  const gen = rigGen;
+  const path = entry.__local ? `./themes/local/${id}.mjs` : `./themes/${id}.mjs`;
+  let mod;
+  try {
+    mod = await import(path);
+  } catch (e) {
+    console.warn(`rig: failed to load module for theme "${id}":`, e.message);
+    return; // CSS is already applied — theme degrades to a plain skin, never a blank panel
+  }
+  if (gen !== rigGen) return;
+  const mounts = rigMounts();
+  const host = {
+    themeId: id,
+    hostApi: HOST_API_VERSION,
+    capabilities: entry.capabilities || [],
+    mounts,
+    createCanvas: (mountKey, opts) => createRigCanvas(mounts, mountKey, opts),
+  };
+  let controller;
+  try {
+    controller = await mod.initRig(host);
+  } catch (e) {
+    console.warn(`rig: initRig() threw for theme "${id}":`, e.message);
+    return; // same graceful-degrade contract as an import failure
+  }
+  if (gen !== rigGen) {
+    // A newer switch already tore this rig's generation down while initRig
+    // was in flight — the controller exists but was never assigned, so
+    // teardownRig() couldn't have called its destroy(). Do it here instead.
+    try { controller?.destroy?.(); } catch (e) { console.warn("rig: destroy() threw", e); }
+    return;
+  }
+  rigController = controller;
+}
+
+// Test/devtools surface, same purpose as window.__avatarDebug — installed
+// once at module scope (not per-rig) since it only ever reads the current
+// live state.
+window.__rigDebug = {
+  get themeId() { return document.documentElement.getAttribute("data-theme"); },
+  get controller() { return rigController; },
+  get canvasCount() { return rigCanvases.size; },
+  get reaped() { return rigsReapedCount; },
+  get reaperActive() { return reaperTimer !== null; },
+};
 
 function setTheme(id) {
   const custom = customThemes.find((t) => t.id === id);
@@ -2703,10 +4029,35 @@ function setTheme(id) {
     console.warn(`setTheme: refusing unknown/unvalidated theme id "${id}"`);
     return;
   }
+  // A manifest entry can declare a hostApi newer than this build supports
+  // (the clone hasn't updated yet) — refuse rather than hand a rig a host
+  // object shape it wasn't written against. Kept selectable-looking in the
+  // DOM (disabled, not removed — see renderThemeSwatches) so the reason is
+  // legible instead of the swatch just vanishing. Checked against
+  // getThemeEntry (BUILTIN_THEMES + customThemes), not just `custom` — the
+  // refusal applies to any theme, built-in or not, matching
+  // renderThemeSwatches' own guard so a builtin can never render disabled
+  // yet still be settable via a direct setTheme() call.
+  const entry = getThemeEntry(id);
+  if (entry && (entry.hostApi || 1) > HOST_API_VERSION) {
+    console.warn(`setTheme: refusing "${id}" — requires hostApi ${entry.hostApi}, this build supports ${HOST_API_VERSION}`);
+    return;
+  }
+  // Teardown happens BEFORE data-theme changes and stays synchronous even
+  // though mounting (below) is async — setTheme is called from boot, swatch
+  // clicks, and loadCustomThemes(), and making it async would ripple into
+  // all three. The outgoing rig must never render a frame under the
+  // incoming theme's CSS, which a same-tick synchronous teardown guarantees.
+  teardownRig();
   if (custom && !loadedThemeLinks.has(id)) {
     const link = document.createElement("link");
     link.rel = "stylesheet";
     link.href = custom.__local ? `themes/local/${id}.css` : `themes/${id}.css`;
+    // A first-time switch measures s10UpdateFit() below against the
+    // OUTGOING theme's layout -- this stylesheet hasn't fetched/parsed yet
+    // -- so it must re-measure once this actually applies, or a stale
+    // "fits" decision from the wrong theme's geometry never gets corrected.
+    link.addEventListener("load", s10UpdateFit);
     document.head.appendChild(link);
     loadedThemeLinks.add(id);
   }
@@ -2721,6 +4072,10 @@ function setTheme(id) {
   }
   renderThemeSwatches();
   applyAvatarLook(id);
+  s10UpdateFit();
+  // Fired and forgotten — see mountRigForTheme's own comment for why this
+  // stays async while everything above it in this function is synchronous.
+  void mountRigForTheme(id);
 }
 
 function renderThemeSwatches() {
@@ -2731,8 +4086,18 @@ function renderThemeSwatches() {
   all.forEach((t) => {
     const btn = document.createElement("button");
     btn.type = "button";
-    btn.className = "themeSwatch" + (t.id === active ? " active" : "");
-    btn.setAttribute("aria-label", t.name);
+    // hostApi absent means 1 (see fetchThemeManifest) — BUILTIN_THEMES
+    // entries never set it, so they always read as available here.
+    const unavailable = (t.hostApi || 1) > HOST_API_VERSION;
+    btn.className = "themeSwatch" + (t.id === active ? " active" : "") + (unavailable ? " unavailable" : "");
+    if (unavailable) {
+      btn.disabled = true; // a disabled button never dispatches click, so this alone backs setTheme's own refusal
+      const label = `${t.name || t.id} — requires a newer cockpit (hostApi ${t.hostApi})`;
+      btn.setAttribute("aria-label", label);
+      btn.title = label;
+    } else {
+      btn.setAttribute("aria-label", t.name);
+    }
     const dot = document.createElement("span");
     dot.className = "swatchDot";
     const c1 = (t.swatch && t.swatch[0]) || "#888";
@@ -2760,11 +4125,22 @@ async function fetchThemeManifest(url, isLocal) {
     if (!Array.isArray(data)) return [];
     return data
       .filter((t) => {
-        const ok = !!t && typeof t.id === "string" && THEME_ID_RE.test(t.id);
+        // `module` is a boolean, never a path — the CSS href two lines below
+        // (custom.__local ? themes/local/${id}.css : themes/${id}.css) is
+        // the precedent: deriving the .mjs path the same way makes "no CDN,
+        // no free-form import target from a fetched manifest" mechanically
+        // true instead of a documented wish. hostApi/capabilities are
+        // shape-validated only — capabilities has no known vocabulary yet
+        // (that's a later slice), so this just proves it's an array of
+        // strings and passes it through verbatim.
+        const ok = !!t && typeof t.id === "string" && THEME_ID_RE.test(t.id)
+          && (t.module === undefined || t.module === true)
+          && (t.hostApi === undefined || (Number.isInteger(t.hostApi) && t.hostApi > 0))
+          && (t.capabilities === undefined || (Array.isArray(t.capabilities) && t.capabilities.every((c) => typeof c === "string")));
         if (!ok) console.warn("loadCustomThemes: dropping invalid theme manifest entry", t);
         return ok;
       })
-      .map((t) => ({ ...t, __local: isLocal }));
+      .map((t) => ({ ...t, __local: isLocal, hostApi: t.hostApi || 1, capabilities: t.capabilities || [] }));
   } catch {
     return [];
   }
@@ -2846,6 +4222,32 @@ function updateSessionRail(ev, active) {
     const p = (ev.persona || "").trim();
     els.sessionPersonaSnippet.textContent = p ? (p.length > 140 ? p.slice(0, 140) + "…" : p) : "Default persona";
   }
+  renderLegendTools(ev);
+}
+
+// Full armed-tool list on the legend plate -- pure snapshot render, same
+// rule as the cockpit renders just below: rebuilt from `ev.tools` every
+// call, never accumulated, so a live `reload_tools` rearm or a page
+// reconnect always shows exactly what the server just reported. An absent
+// or empty `tools` (older server, or the arm genuinely failed) keeps the
+// block hidden rather than falling back to a hardcoded list -- a static
+// list would lie the moment a tool service is actually down.
+function renderLegendTools(ev) {
+  if (!els.legendTools) return;
+  const tools = Array.isArray(ev.tools) ? ev.tools : [];
+  if (tools.length === 0) {
+    els.legendTools.hidden = true;
+    els.legendTools.innerHTML = "";
+    return;
+  }
+  els.legendTools.innerHTML = "";
+  tools.forEach((name) => {
+    const cell = document.createElement("span");
+    cell.className = "nom";
+    cell.textContent = name.replace(/_/g, " ");
+    els.legendTools.appendChild(cell);
+  });
+  els.legendTools.hidden = false;
 }
 
 // ── Cockpit: quest card + approval gate (pure render of cockpit_state) ──
@@ -3171,7 +4573,7 @@ els.settingsCloseBtn.addEventListener("click", closeSettings);
 // connect regardless of what's stored here; that forced-open then persists
 // too via the same toggle listener, which is the right call -- the user
 // shouldn't have to re-discover the fix after the error already found it.
-const DETAILS_GROUPS = ["personaGroup", "appearanceGroup", "inputGroup", "wsUrlAdvanced", "voiceCloneAdvanced"];
+const DETAILS_GROUPS = ["personaGroup", "appearanceGroup", "inputGroup", "wsUrlAdvanced", "voiceCloneAdvanced", "deckGroup"];
 DETAILS_GROUPS.forEach((id) => {
   const el = document.getElementById(id);
   if (!el) return;
@@ -4021,6 +5423,7 @@ function renderConfigState(ev) {
     const wakeWord = ev.wake_word;
     const hasWakeWord = !!wakeWord;
     els.wakeWordBlock.hidden = !hasWakeWord;
+    if (legendArmLineEl) legendArmLineEl.hidden = !hasWakeWord;
     armSwitchEl?.setAttribute("aria-disabled", String(!hasWakeWord));
     if (hasWakeWord && document.activeElement !== els.wakeToggle && document.activeElement !== els.wakeModelSelect) {
       els.wakeToggle.checked = !!wakeWord.enabled;
@@ -4033,6 +5436,7 @@ function renderConfigState(ev) {
         opt.selected = name === wakeWord.model;
         els.wakeModelSelect.appendChild(opt);
       });
+      syncLegendWakePhrase();
     }
     // Mode flag lives on whatever the server reports — config_state is the source of
     // truth on connect/reconnect; wakeword_state events (below) keep it live in between.
@@ -4253,10 +5657,23 @@ els.wakeToggle.addEventListener("change", () => {
   }
   syncArmSwitch();
 });
+// Command legend plate: the printed ARM line must name whatever wake word
+// is actually selected right now, not a hardcoded guess -- read straight
+// off #wakeModelSelect's own selected option (same "hey_jarvis" -> "hey
+// jarvis" text renderConfigState already writes into it), so a change
+// here always tracks the live selection even before the server acks it.
+const legendWakePhraseEl = document.getElementById("legendWakePhrase");
+const legendArmLineEl = document.getElementById("legendArmLine");
+function syncLegendWakePhrase() {
+  if (!legendWakePhraseEl) return;
+  const opt = els.wakeModelSelect.selectedOptions && els.wakeModelSelect.selectedOptions[0];
+  legendWakePhraseEl.textContent = opt ? opt.textContent : "the wake word";
+}
 els.wakeModelSelect.addEventListener("change", () => {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "config_set", wake_word_model: els.wakeModelSelect.value }));
   }
+  syncLegendWakePhrase();
 });
 
 // ── Server socket URL (device-local, like the theme — never round-tripped) ──
@@ -5160,13 +6577,90 @@ const wbars = Array.from(els.waveform.querySelectorAll(".wbar"));
 const wbarHistory = new Array(wbars.length).fill(0);
 let smoothedLevel = 0; // 0..1, lightly smoothed peak — themes drive meter needles/segments off --level
 let meterReadoutFrame = 0; // instrument faceplate: throttles the PEAK/RMS text updates below
+// Cache of the last string written to --level so a rounded value that
+// hasn't changed doesn't re-invalidate style on every inheriting descendant
+// every frame. Both writes below (element + root) stay in lockstep behind
+// this one cache — see THEME-SPEC.md's "--level visual bus" section: the
+// element-scoped write on #waveform is kept deliberately for back-compat
+// with any theme (including private ones under themes/local/, invisible to
+// this tree) already reading --level off #waveform/.waveform via a
+// descendant or combinator selector — do not remove it as "redundant".
+// A test that pushes one level and expects a write must not rely on
+// pushWaveform() alone landing it: if lastLevelStr already equals that
+// level's rounded string (from a prior frame, live mic worklet, or a
+// previous push in the same test), the write is skipped by design — reset
+// lastLevelStr (and smoothedLevel) immediately before pushing, in the same
+// synchronous call, to force it.
+let lastLevelStr = null;
+// --heat / --level-fast (S4b) cadence state, kept deliberately separate
+// from lastLevelStr/smoothedLevel above so resetting one bus's dedupe
+// never silently perturbs another's. Both are gated by wall-clock time
+// (performance.now()), not a call-count modulus, because pushWaveform's
+// call rate is NOT fixed — it tracks the audio worklet's render-quantum
+// rate, which varies with the mic's AudioContext sample rate (~125Hz at a
+// true 16kHz context, ~330-375Hz at the more common 44.1k/48k contexts
+// that get decimated down; see the worklet's `decim`/`ratio` comment
+// below). A frame-count throttle would silently drift cadence across
+// browsers/devices; a time-based gate does not.
+//
+// Each holds the next DEADLINE, not the last fire time, and advances it by
+// exactly one interval on every write rather than resetting to `now`.
+// Resetting to `now` measured ~38Hz instead of the intended 60Hz for
+// --level-fast (S4b review): ordinary rAF jitter means some calls land a
+// hair before a frame's true deadline, so `now` at write time is itself
+// already slightly late; anchoring the NEXT deadline off that late `now`
+// pushes it later too, and the error only ever compounds in one direction
+// (a deadline can be missed, never beaten) — losing ~40% of frames to
+// jitter that never gets corrected. Advancing by a fixed interval instead
+// keeps each deadline anchored to the sequence of intervals, not to
+// whichever instant the write actually landed on. The
+// `< nowMs ? nowMs + INTERVAL : ...` clamp exists only to stop a long
+// stall (mic idle, tab backgrounded) from queuing a burst of "overdue"
+// catch-up writes when it resumes — it resets to one interval ahead of
+// `now` instead of trying to make up the missed time.
+let heat = 0; // --heat's own (slower) envelope, distinct from smoothedLevel
+let nextHeatWriteMs = 0;
+let nextLevelFastWriteMs = 0;
+const HEAT_INTERVAL_MS = 1000 / 12; // ~12Hz — see --heat's @property comment for why this must stay slow
+const LEVEL_FAST_INTERVAL_MS = 1000 / 60; // caps the mount write at 60Hz even though the worklet calls in faster
+// --level-fast's mount: #meterChrome, the confirmed rig centrepiece (see
+// its @property comment). Cached once — it's static markup, not a rig
+// mount that gets replaced — rather than re-queried every audio frame.
+const meterChromeMount = document.getElementById("meterChrome");
 function pushWaveform(peak) {
   wbarHistory.push(Math.max(0.08, Math.min(1, peak * 3.2)));
   wbarHistory.shift();
   wbars.forEach((bar, i) => { bar.style.transform = `scaleY(${wbarHistory[i]})`; });
   smoothedLevel += (Math.max(0, Math.min(1, peak * 3.2)) - smoothedLevel) * 0.35;
-  els.waveform.style.setProperty("--level", smoothedLevel.toFixed(3));
-  document.documentElement.style.setProperty("--level", smoothedLevel.toFixed(3));
+  const levelStr = smoothedLevel.toFixed(3);
+  if (levelStr !== lastLevelStr) {
+    els.waveform.style.setProperty("--level", levelStr);
+    document.documentElement.style.setProperty("--level", levelStr);
+    lastLevelStr = levelStr;
+  }
+  const nowMs = performance.now();
+  // --heat: a second, slower exponential smoothing pass on top of
+  // smoothedLevel (alpha 0.15 applied at ~12Hz -> ~0.5s to settle on a
+  // step, vs smoothedLevel's 0.35 applied at ~125-375Hz -> tens of ms),
+  // so the room bus reads as a true envelope, not the same value sampled
+  // less often.
+  if (nowMs >= nextHeatWriteMs) {
+    heat += (smoothedLevel - heat) * 0.15;
+    document.documentElement.style.setProperty("--heat", heat.toFixed(3));
+    // Advance the deadline by one interval, don't reset it to `now` — see
+    // the cadence-state comment above for why (this is the fix for the
+    // ~38Hz-instead-of-60Hz drift measured on --level-fast).
+    nextHeatWriteMs = nextHeatWriteMs + HEAT_INTERVAL_MS < nowMs
+      ? nowMs + HEAT_INTERVAL_MS : nextHeatWriteMs + HEAT_INTERVAL_MS;
+  }
+  // --level-fast: derived straight from smoothedLevel (R5 — no second
+  // smoothing pass, this bus is meant to feel immediate) and capped to
+  // the mount alone.
+  if (nowMs >= nextLevelFastWriteMs) {
+    meterChromeMount?.style.setProperty("--level-fast", smoothedLevel.toFixed(3));
+    nextLevelFastWriteMs = nextLevelFastWriteMs + LEVEL_FAST_INTERVAL_MS < nowMs
+      ? nowMs + LEVEL_FAST_INTERVAL_MS : nextLevelFastWriteMs + LEVEL_FAST_INTERVAL_MS;
+  }
   if (meterReadoutFrame++ % 5 === 0) {
     document.getElementById("gaugePeak")?.replaceChildren(document.createTextNode(smoothedLevel.toFixed(2)));
     document.getElementById("gaugeRms")?.replaceChildren(document.createTextNode((smoothedLevel * 0.7).toFixed(2)));
@@ -5178,6 +6672,20 @@ function resetWaveform() {
   smoothedLevel = 0;
   els.waveform.style.setProperty("--level", "0");
   document.documentElement.style.setProperty("--level", "0");
+  // Cache the toFixed(3) form (not the literal "0" just written) so the
+  // NEXT genuinely-zero pushWaveform() frame — which computes "0.000" —
+  // is still correctly recognised as unchanged and skipped.
+  lastLevelStr = smoothedLevel.toFixed(3);
+  // Zero both new buses too, or a disconnect leaves the room/centrepiece
+  // lit at the last live value. Also rewind their next-write deadlines to
+  // 0 so the very next pushWaveform() call (whenever it comes) writes
+  // immediately instead of waiting out a stale interval — mirrors
+  // lastLevelStr's "force it on the next synchronous push" contract above.
+  heat = 0;
+  document.documentElement.style.setProperty("--heat", "0");
+  meterChromeMount?.style.setProperty("--level-fast", "0");
+  nextHeatWriteMs = 0;
+  nextLevelFastWriteMs = 0;
 }
 
 // AudioWorklet processor, delivered via Blob so the page stays fully self-contained
@@ -5479,6 +6987,803 @@ window.addEventListener("keyup", (e) => {
   release(e);
 });
 
+// ── Control deck (V4/B2): base owns data, rig owns pixels ────────────
+// Fed by a state provider -- Home Assistant is the current/only one, not
+// what this region fundamentally is. Absent unless the server has
+// HA_URL+HA_TOKEN configured (ha_deck.py) — #vaDeck stays exactly as it
+// renders today for every downstream user without one configured.
+// `#deckTiles` is the seam a rig hides and
+// replaces wholesale (see THEME-SPEC.md "Deck"). Tile DOM nodes are
+// created once per entity and mutated in place thereafter (never
+// innerHTML-rebuilt like renderHistory() above) so node identity survives
+// SSE updates and a rig can mount stateful content inside a tile.
+const DECK_DOMAINS = new Set(["light", "switch", "fan", "cover", "climate", "lock"]);
+// scene.* is deliberately excluded from this slice: HA reports a scene's
+// `state` as the timestamp it was last activated, not on/off, so a toggle
+// tile would lie about it.
+const DECK_CLICKABLE_DOMAINS = new Set(["light", "switch", "fan", "cover"]);
+// lock/climate are read-only in this slice: rendered, not clickable.
+
+function classifyDeckState(raw) {
+  // "open"/"unlocked" and "closed"/"locked" are HA's own state strings for
+  // cover/lock domains, each with an unambiguous active/inactive reading —
+  // safe synonyms for on/off. Climate values (heat/cool/idle/auto etc.) are
+  // deliberately NOT mapped: a thermostat isn't a two-state device, and
+  // forcing one onto the on/off axis would be the same class of lie the
+  // default arm below exists to prevent.
+  if (raw === "on" || raw === "open" || raw === "unlocked") return "on";
+  if (raw === "off" || raw === "closed" || raw === "locked") return "off";
+  if (raw === "unavailable") return "unavailable";
+  return "unknown"; // explicit default arm — an unhandled state is never "off" (rule 4)
+}
+function classifyDeckWrite(raw) {
+  return raw === "pending" || raw === "confirmed" || raw === "failed" ? raw : "unknown";
+}
+
+function deckSimParam() {
+  try { return new URLSearchParams(window.location.search).get("decksim"); } catch { return null; }
+}
+const DECK_SIM_STATE_VALUES = new Set(["on", "off", "unavailable", "unknown"]);
+const DECK_SIM_WRITE_VALUES = new Set(["pending", "confirmed", "failed", "unknown"]);
+const deckSimValue = deckSimParam();
+// "unknown" is a legal value on both axes — state wins the ambiguity, since
+// forcing every tile's state (including to its own fail-safe default) is
+// the more common review need.
+const deckSimIsState = deckSimValue !== null && DECK_SIM_STATE_VALUES.has(deckSimValue);
+const deckSimIsWrite = deckSimValue !== null && !deckSimIsState && DECK_SIM_WRITE_VALUES.has(deckSimValue);
+const deckSimActive = deckSimIsState || deckSimIsWrite;
+
+// Opt-in entity filter (part 3): `?deckfilter=<comma-separated substrings>`
+// EXCLUDES any entity whose id or friendly name contains one of them —
+// default (param absent) is unfiltered, every allowlisted-domain entity
+// renders (rule: no silent caps). Deliberately NOT a localStorage key —
+// this project has twice had a test-setup convenience flag hide a real
+// defect from a chunk of the suite (va-avatar/va-firstrun-done); a query
+// param is visible in the URL a reviewer is already looking at.
+function deckFilterParam() {
+  try { return new URLSearchParams(window.location.search).get("deckfilter"); } catch { return null; }
+}
+const deckFilterTerms = (deckFilterParam() || "")
+  .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+function deckEntityExcluded(pub) {
+  if (!deckFilterTerms.length) return false;
+  const friendly = (pub.attributes && pub.attributes.friendly_name) || "";
+  const hay = `${pub.entity_id} ${friendly}`.toLowerCase();
+  return deckFilterTerms.some((t) => hay.includes(t));
+}
+
+// A small fixed set of clearly-fake tiles, reachable only via ?decksim=,
+// so the four state presentations can be eyeballed on a clone with no HA
+// configured at all (rule 9) — the sim badge covers the honesty requirement.
+const DECK_DEMO_ENTITIES = [
+  { entity_id: "light.demo_lamp", domain: "light", state: "on", attributes: { friendly_name: "Demo Lamp" }, write: { status: "unknown", reason: null } },
+  { entity_id: "switch.demo_switch", domain: "switch", state: "off", attributes: { friendly_name: "Demo Switch" }, write: { status: "unknown", reason: null } },
+  { entity_id: "fan.demo_fan", domain: "fan", state: "unavailable", attributes: { friendly_name: "Demo Fan" }, write: { status: "unknown", reason: null } },
+  { entity_id: "cover.demo_cover", domain: "cover", state: "closed", attributes: { friendly_name: "Demo Cover" }, write: { status: "unknown", reason: null } },
+  { entity_id: "climate.demo_thermostat", domain: "climate", state: "heat", attributes: { friendly_name: "Demo Thermostat" }, write: { status: "unknown", reason: null } },
+  { entity_id: "lock.demo_lock", domain: "lock", state: "locked", attributes: { friendly_name: "Demo Lock" }, write: { status: "unknown", reason: null } },
+];
+
+const deckTileMap = new Map(); // entity_id -> tile DOM refs, created once, mutated in place
+const deckLastPub = new Map(); // entity_id -> last raw HA payload seen, for re-render on sim-override change (see below)
+let deckSource = null; // EventSource, opened only once /ha/states confirms the deck is live
+
+// Service Panel "Forced state" picker (below) is a SECOND sim source, layered
+// under the `?decksim=` URL param -- the URL always wins (rule: URL params
+// outrank stored/UI settings), so a page opened with `?decksim=` ignores the
+// picker entirely rather than the two fighting over which tile wins.
+let deckSimOverride = null; // in-memory ONLY, deliberately never persisted -- a saved forced state is exactly the lie the SIMULATED badge exists to prevent
+function deckSimEffective() {
+  if (deckSimActive) return { active: true, value: deckSimValue, isState: deckSimIsState, isWrite: deckSimIsWrite };
+  if (deckSimOverride) {
+    const isState = DECK_SIM_STATE_VALUES.has(deckSimOverride);
+    const isWrite = !isState && DECK_SIM_WRITE_VALUES.has(deckSimOverride);
+    return { active: true, value: deckSimOverride, isState, isWrite };
+  }
+  return { active: false, value: null, isState: false, isWrite: false };
+}
+function deckStateFor(pub) { const eff = deckSimEffective(); return eff.isState ? eff.value : classifyDeckState(pub.state); }
+function deckWriteFor(pub) { const eff = deckSimEffective(); return eff.isWrite ? eff.value : classifyDeckWrite(pub.write && pub.write.status); }
+
+function deckWriteWord(status) {
+  return status === "pending" ? "write pending"
+    : status === "confirmed" ? "write confirmed"
+    : status === "failed" ? "write failed"
+    : "write status unknown";
+}
+
+// Shared polite announcer (WCAG 4.1.3) for the deck's write-status/link
+// transitions -- `#deckLinkIndicator`/`#deckSimBadge`/`#deckFilterStatus`
+// are all plain visual badges with no `aria-live` of their own, and an
+// `aria-label` rewrite on an unfocused tile (deckApplyTile, below)
+// announces nothing. This queues human-readable sentences into ONE
+// `role="status"` region instead of live-wiring each badge separately, and
+// coalesces a burst (e.g. every tile going stale at once when the link
+// drops) into a single announcement 400ms later rather than one per
+// element. Callers are expected to already have checked this is a real
+// transition, not a re-affirmation of the same state -- see deckLinkDown
+// and deckApplyTile's write-failure check below; a filtered/simulated tile
+// re-rendering with an unchanged write status must never reach this.
+let deckAnnounceQueue = [];
+let deckAnnounceTimer = null;
+function deckAnnounce(text) {
+  if (!els.deckLiveStatus) return;
+  deckAnnounceQueue.push(text);
+  if (deckAnnounceTimer) return;
+  deckAnnounceTimer = setTimeout(() => {
+    deckAnnounceTimer = null;
+    els.deckLiveStatus.textContent = deckAnnounceQueue.join(". ");
+    deckAnnounceQueue = [];
+  }, 400);
+}
+
+function deckLinkDown(down) {
+  if (!els.vaDeck) return;
+  const wasDown = els.vaDeck.dataset.link === "down";
+  els.vaDeck.dataset.link = down ? "down" : "";
+  if (els.deckLinkIndicator) els.deckLinkIndicator.hidden = !down;
+  if (down && !wasDown) deckAnnounce("Deck link lost");
+  else if (!down && wasDown) deckAnnounce("Deck link restored");
+}
+
+// service for the cover click: based on HA's own raw `state` (open/closed),
+// not the on/off/unavailable/unknown classification above — a cover in an
+// in-between raw state (opening/closing/unknown) still needs a concrete
+// write direction, which the classifier's coarser bucket doesn't carry.
+async function deckSendToggle(entityId, domain) {
+  let service = "toggle";
+  if (domain === "cover") {
+    const rec = deckTileMap.get(entityId);
+    service = rec && rec.lastRawState === "open" ? "close_cover" : "open_cover";
+  }
+  try {
+    await fetch("/ha/intent", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ intents: [{ entity_id: entityId, service }] }),
+    });
+  } catch {} // no optimistic client state — the base server owns write state, SSE drives the tile
+}
+
+function deckTileFor(entityId, domain) {
+  let rec = deckTileMap.get(entityId);
+  if (rec) return rec;
+  const el = document.createElement("div");
+  el.className = "deckTile";
+  el.dataset.entity = entityId;
+  const clickable = DECK_CLICKABLE_DOMAINS.has(domain);
+  el.dataset.clickable = String(clickable);
+  const dot = document.createElement("span");
+  dot.className = "deckTileDot";
+  const name = document.createElement("span");
+  name.className = "deckTileName";
+  const write = document.createElement("span");
+  write.className = "deckTileWrite";
+  const raw = document.createElement("span");
+  raw.className = "deckTileRaw";
+  el.appendChild(dot);
+  el.appendChild(name);
+  el.appendChild(raw);
+  el.appendChild(write);
+  if (clickable) {
+    // Roving tabindex (WCAG 2.4.1): every clickable jack starts as a -1
+    // stop, never a 0 stop -- deckRovingSync (below) below picks exactly
+    // one as the container's single Tab entry point, same as any
+    // roving-tabindex grid/toolbar. Role stays "button" (not "gridcell")
+    // so Enter/Space keep their existing, already-verified activation
+    // path untouched.
+    el.tabIndex = -1;
+    el.setAttribute("role", "button");
+    el.addEventListener("click", () => deckSendToggle(entityId, domain));
+    el.addEventListener("keydown", (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      deckSendToggle(entityId, domain);
+    });
+  }
+  // userHidden = this point unchecked in the Service Panel's per-point list
+  // (localStorage, `va-deck-hidden`); availHidden = the "hide unavailable"
+  // switch's verdict, evaluated only at boot/switch-flip time (see
+  // deckEvalAvailability) — a brand-new tile created later (e.g. an entity
+  // HA hadn't reported at boot) was never covered by that evaluation, so it
+  // defaults to visible on that axis rather than inheriting a stale verdict.
+  rec = { el, dot, name, write, raw, domain, lastRawState: "unknown", friendly: entityId,
+          userHidden: deckHiddenIds.has(entityId), availHidden: false };
+  el.hidden = rec.userHidden;
+  deckTileMap.set(entityId, rec);
+  if (els.deckTiles) els.deckTiles.appendChild(el);
+  if (clickable) deckRovingSync(); // newly-appended tile may need to become the one 0-stop (first clickable tile ever created)
+  return rec;
+}
+
+// ── Roving tabindex for the deck grid (WCAG 2.4.1) ──
+// #deckTiles is one Tab stop; arrow keys move *within* it. Only clickable
+// jacks (light/switch/fan/cover) ever participate -- climate/lock stay
+// exactly as inert as they are today (no role, no tabindex), so a
+// read-only jack is never an arrow-key stop that does nothing.
+function deckClickableTiles() {
+  if (!els.deckTiles) return [];
+  return Array.from(els.deckTiles.querySelectorAll('.deckTile[data-clickable="true"]')).filter((el) => !el.hidden);
+}
+// Full visible order (clickable AND read-only) -- this is what actually
+// occupies grid cells, so it's what the real column count and row
+// membership have to be measured against, not the clickable subset.
+function deckVisibleTiles() {
+  if (!els.deckTiles) return [];
+  return Array.from(els.deckTiles.children).filter((el) => el.classList.contains("deckTile") && !el.hidden);
+}
+// `#deckTiles` is `repeat(auto-fill, minmax(84px, 1fr))` -- the column
+// count is real layout, not a constant, and changes with window width.
+// Measured fresh on every arrow-key press rather than cached/tracked via
+// a resize listener (memory: S10's 1000px height gate was an estimate,
+// not a measurement -- don't repeat that here).
+function deckGridColumnCount(tiles) {
+  if (!tiles.length) return 1;
+  const firstTop = tiles[0].offsetTop;
+  let count = 0;
+  for (const t of tiles) { if (t.offsetTop === firstTop) count++; else break; }
+  return Math.max(count, 1);
+}
+function deckFocusTile(el) {
+  deckClickableTiles().forEach((t) => { t.tabIndex = t === el ? 0 : -1; });
+  el.focus();
+  el.scrollIntoView({ block: "nearest", inline: "nearest" }); // scroll within #deckTiles' own scroller, not the page
+}
+function deckMoveHorizontal(fromEl, dir) {
+  const clickable = deckClickableTiles();
+  const next = clickable.indexOf(fromEl) + dir;
+  if (next < 0 || next >= clickable.length) return; // no wrap past either end
+  deckFocusTile(clickable[next]);
+}
+// Up/Down jump a full row (measured column count) in the FULL tile order,
+// then search that row outward from the starting column for the nearest
+// clickable jack -- a read-only jack sitting in the exact landing column
+// (e.g. a climate/lock point) must never eat the keypress.
+function deckMoveVertical(fromEl, dir) {
+  const all = deckVisibleTiles();
+  const cols = deckGridColumnCount(all);
+  const idx = all.indexOf(fromEl);
+  if (idx === -1) return;
+  const col = idx % cols;
+  const rowCount = Math.ceil(all.length / cols);
+  for (let row = Math.floor(idx / cols) + dir; row >= 0 && row < rowCount; row += dir) {
+    const rowTiles = all.slice(row * cols, Math.min(row * cols + cols, all.length));
+    for (let d = 0; d < cols; d++) {
+      if (col + d < rowTiles.length && rowTiles[col + d].dataset.clickable === "true") {
+        deckFocusTile(rowTiles[col + d]); return;
+      }
+      if (d > 0 && col - d >= 0 && rowTiles[col - d].dataset.clickable === "true") {
+        deckFocusTile(rowTiles[col - d]); return;
+      }
+    }
+  }
+}
+function deckMoveToEdge(dir) {
+  const clickable = deckClickableTiles();
+  if (!clickable.length) return;
+  deckFocusTile(dir < 0 ? clickable[0] : clickable[clickable.length - 1]);
+}
+// Ensures exactly one clickable jack is the container's 0-stop -- the
+// previously-active one if it's still a valid stop, else the first
+// visible clickable jack. Called after every visibility change (tile
+// shown/hidden/created) so a hidden 0-stop never strands Tab outside the
+// deck with nothing focusable inside it.
+function deckRovingSync() {
+  const tiles = deckClickableTiles();
+  if (!tiles.length) return;
+  const current = tiles.find((el) => el.tabIndex === 0);
+  const keep = current || tiles[0];
+  tiles.forEach((el) => { el.tabIndex = el === keep ? 0 : -1; });
+}
+els.deckTiles?.addEventListener("keydown", (e) => {
+  const tile = e.target.closest?.('.deckTile[data-clickable="true"]');
+  if (!tile) return;
+  switch (e.key) {
+    case "ArrowLeft": e.preventDefault(); deckMoveHorizontal(tile, -1); break;
+    case "ArrowRight": e.preventDefault(); deckMoveHorizontal(tile, 1); break;
+    case "ArrowUp": e.preventDefault(); deckMoveVertical(tile, -1); break;
+    case "ArrowDown": e.preventDefault(); deckMoveVertical(tile, 1); break;
+    case "Home": e.preventDefault(); deckMoveToEdge(-1); break;
+    case "End": e.preventDefault(); deckMoveToEdge(1); break;
+  }
+});
+
+function deckApplyTile(pub) {
+  if (!DECK_DOMAINS.has(pub.domain)) return;
+  deckLastPub.set(pub.entity_id, pub); // last raw payload -- lets the sim-override picker (below) re-render existing tiles without waiting on a new SSE frame
+  if (deckEntityExcluded(pub)) return; // filtered out (?deckfilter=) -- never mounts a tile, incl. via SSE
+  const rec = deckTileFor(pub.entity_id, pub.domain);
+  rec.lastRawState = pub.state;
+  const dataState = deckStateFor(pub);
+  const dataWrite = deckWriteFor(pub);
+  const prevWrite = rec.el.dataset.write; // undefined on a brand-new tile -- never equals "failed", so no false transition on first render
+  rec.el.dataset.state = dataState;
+  rec.el.dataset.write = dataWrite;
+  const friendly = (pub.attributes && pub.attributes.friendly_name) || pub.entity_id;
+  // Announce only the transition INTO "failed" -- not every frame that
+  // happens to still read "failed", and not "pending"/"confirmed" (routine
+  // traffic on 29 entities would bury the one thing worth interrupting for).
+  if (dataWrite === "failed" && prevWrite !== "failed") deckAnnounce(`${friendly}: write failed`);
+  // The VISIBLE legend is a short, disambiguated derivative of `friendly`
+  // (see deckRelabelTiles, below) -- computed as a batch over every tile
+  // once per render tick, since disambiguation needs to see every sibling,
+  // not just this one entity. `friendly` itself is stored, not written to
+  // `rec.name` directly here.
+  rec.friendly = friendly;
+  rec.write.textContent = dataWrite === "unknown" ? "" : dataWrite;
+  // The classifier's default arm discards nothing that isn't already
+  // implied by "unknown" — surface the raw HA state so a tile that can't
+  // be placed on the on/off axis (e.g. climate's "cool") still informs.
+  const rawDiffers = dataState === "unknown" && pub.state != null && pub.state !== dataState;
+  rec.raw.textContent = rawDiffers ? pub.state : "";
+  const stateText = rawDiffers ? `${dataState} (${pub.state})` : dataState;
+  const label = `${friendly}: ${stateText}, ${deckWriteWord(dataWrite)}`;
+  const reason = pub.write && pub.write.reason;
+  rec.el.title = reason ? `${label} — ${reason}` : label;
+  rec.el.setAttribute("aria-label", label);
+  deckScheduleRenderTick();
+}
+
+// A possessive owner prefix ("Jordan's ", "The Smiths' ") -- detected
+// generically by pattern (leading token ending in an apostrophe-s), never
+// a hardcoded name; this repo is public and downstream households differ.
+const DECK_POSSESSIVE_PREFIX = /^\S+['’]s?\s+/;
+// Patchbay-style abbreviations: pure shared/class noise, collapsed to a
+// short marker AFTER the distinguishing tail is already known safe (see
+// deckRelabelTiles) -- these never remove the last-differing token, only
+// shrink a long phrase every affected tile already carries in full.
+const DECK_LEGEND_ABBREVIATIONS = [
+  [/\bdo\s+not\s+disturb\b/gi, "DND"],
+  [/\bannouncements?\b/gi, "ANNC"],
+  [/\bcommunications?\b/gi, "COMM"],
+  [/\bliving\s+room\b/gi, "LIVING RM"],
+];
+function deckStripPossessive(name) { return name.replace(DECK_POSSESSIVE_PREFIX, ""); }
+function deckAbbreviate(name) {
+  let out = name;
+  for (const [pattern, abbr] of DECK_LEGEND_ABBREVIATIONS) out = out.replace(pattern, abbr);
+  return out.replace(/\s+/g, " ").trim();
+}
+
+// `.deckTileName`'s own box: 7px mono, 0.1em tracking, in a ~72-88px
+// column. This is a character-count cap, not a real text-metrics
+// measurement (no canvas context is wired to this render path) -- it
+// exists so an over-length legend gets pre-truncated by JS instead of
+// left to CSS `text-overflow: ellipsis`, which clips the TAIL, exactly
+// where every distinguishing token (a room number, "Left"/"Right",
+// "Coming home") lives.
+const DECK_LEGEND_MAX_CHARS = 20;
+
+// Longest run of leading tokens two already-normalized token lists share,
+// case-insensitive -- the measure of how much of `a` is pure overlap with
+// `b` versus how much is actually `a`'s own.
+function deckTokenPrefixLen(a, b) {
+  let n = 0;
+  while (n < a.length && n < b.length && a[n].toLowerCase() === b[n].toLowerCase()) n++;
+  return n;
+}
+
+// Truncates from the FRONT, never the tail -- see DECK_LEGEND_MAX_CHARS.
+function deckTruncateFront(text) {
+  if (text.length <= DECK_LEGEND_MAX_CHARS) return text;
+  return `…${text.slice(text.length - (DECK_LEGEND_MAX_CHARS - 1))}`;
+}
+
+// Recomputes every currently-rendered tile's SHORT legend as one batch.
+// The rule that matters (owner's own framing, corrected once already):
+// uniqueness is not the goal, IDENTIFIABILITY is -- a legend must let you
+// tell which physical thing you're patching, not just tell it apart from
+// its neighbour by an arbitrary tiebreak. A per-entity function can't see
+// its neighbours, so this has to look at the whole set at once:
+//
+//  1. Normalize (collapse whitespace runs, trim) -- HA `friendly_name`
+//     can carry stray double-spaces or even a trailing newline (the
+//     owner's own `switch.front_light` does).
+//  2. Strip the generic possessive-owner prefix.
+//  3. If a recognized class marker (DND/ANNC/COMM/…) fires on the WHOLE
+//     name, the rest of the name IS the device -- never strip any of it,
+//     only collapse the marker phrase. This is what stops "Echo Dot Do
+//     not disturb" and "4th Fire TV Do not disturb" from both losing
+//     their device name down to a bare, indistinguishable "DND": from a
+//     pure token-overlap view a shared marker function looks exactly
+//     like shared administrative filler ("Zuul Automation:", "Hue white
+//     lamp"), but it isn't -- it's shared BECAUSE many different devices
+//     carry the same function, which makes the device name the one part
+//     that's never safe to drop.
+//  4. Otherwise, drop the longest leading-token run this entity shares
+//     with ANY other entity currently on screen -- never past the point
+//     where the remainder would be empty for either side of the match,
+//     and never down to something too short or purely numeric to stand
+//     alone ("1"/"2" backs off to "lamp 1"/"lamp 2").
+//  5. Hard-cap length, truncating from the front if it's still too wide.
+//  6. Verify: no two rendered legends may be equal. Anything still
+//     colliding falls back to keeping MORE of the original name (never a
+//     manufactured `#2` counter, which manufactures uniqueness while
+//     destroying the one thing a legend is for).
+//
+// Deterministic order (Map insertion order == render order) so re-runs
+// after an SSE update don't reshuffle labels that didn't need to change.
+function deckRelabelTiles() {
+  const visible = Array.from(deckTileMap.entries()).filter(([, rec]) => rec.el.isConnected);
+  const tokenLists = visible.map(([, rec]) =>
+    deckStripPossessive(rec.friendly.replace(/\s+/g, " ").trim()).split(/\s+/).filter(Boolean));
+
+  const chosen = new Set();
+  visible.forEach(([, rec], i) => {
+    const tokens = tokenLists[i];
+    const fullName = tokens.join(" ");
+    // A recognized class marker (DND/ANNC/COMM/LIVING RM) firing on the
+    // WHOLE name means the rest of it -- the device -- is exactly what
+    // tells this jack apart from every OTHER device that carries the
+    // same marker (five different devices can each have a "Do not
+    // disturb" toggle). Uniqueness-driven prefix stripping must never
+    // touch that device name: it looks identical to genuine shared
+    // filler ("Zuul Automation:", "Hue white lamp") from a pure
+    // token-overlap view, but a marker match is the signal that the
+    // overlap is a FUNCTION shared across devices, not an administrative
+    // header shared within one family -- so it's excluded up front.
+    const markerFired = deckAbbreviate(fullName).toLowerCase() !== fullName.toLowerCase();
+
+    let shared = 0;
+    if (!markerFired) {
+      for (let j = 0; j < tokenLists.length; j++) {
+        if (i === j) continue;
+        const lcp = deckTokenPrefixLen(tokens, tokenLists[j]);
+        // Only a candidate shared length if BOTH sides keep at least one
+        // token past it -- stripping either member down to nothing is
+        // exactly what step 2 (prefix must be genuinely shared) forbids.
+        if (lcp > shared && lcp < tokens.length && lcp < tokenLists[j].length) shared = lcp;
+      }
+      // A remainder that's too short or purely numeric ("1", "2") can't
+      // stand on its own -- back off one token at a time until enough of
+      // the shared material survives to keep it readable (`Hue white
+      // lamp 1`/`2` -> `lamp 1`/`lamp 2`, not bare digits).
+      while (shared > 0) {
+        const rem = tokens.slice(shared).join(" ");
+        if (rem.length >= 3 && !/^\d+$/.test(rem.replace(/\s+/g, ""))) break;
+        shared--;
+      }
+    }
+
+    let candidate = deckTruncateFront(deckAbbreviate(tokens.slice(shared).join(" ")));
+    // A legend that's still colliding with one already placed gets MORE
+    // of the original name, one token at a time, never a manufactured
+    // counter -- a counter makes two points look distinct while telling
+    // you nothing about which is which.
+    while (chosen.has(candidate.toLowerCase()) && shared > 0) {
+      shared--;
+      candidate = deckTruncateFront(deckAbbreviate(tokens.slice(shared).join(" ")));
+    }
+    chosen.add(candidate.toLowerCase());
+    rec.name.textContent = candidate || rec.friendly;
+  });
+}
+
+// One measurement/relabel pass per animation frame, however many
+// deckApplyTile() calls land in it (an initial boot renders dozens
+// synchronously; SSE updates arrive one at a time) -- both deckRelabelTiles
+// (needs the whole current set to disambiguate) and deckClipToWholeRows
+// (below) need to run AFTER layout has settled from whatever just changed.
+let deckRenderTickScheduled = false;
+function deckScheduleRenderTick() {
+  if (deckRenderTickScheduled) return;
+  deckRenderTickScheduled = true;
+  requestAnimationFrame(() => {
+    deckRenderTickScheduled = false;
+    deckRelabelTiles();
+    deckClipToWholeRows();
+  });
+}
+
+// S10/patchbay follow-up: a jack point and its legend strip are ONE
+// indivisible unit -- `#deckTiles`' own `overflow-y: auto` box is sized by
+// the flex parent (`.zone-meter`'s leftover height, see that rule's own
+// comment), which has no reason to land on an exact multiple of a row's
+// height. Left alone, the LAST partially-visible row shows its sockets
+// but crops their legends clean off at the container's own bottom edge --
+// indistinguishable from a missing label. Clamps the container's own
+// visible height down to the tallest whole-row cutoff that still fits
+// its natural budget, so any partial row is entirely below the fold
+// (reachable by scrolling, same as any other overflow) instead of half
+// painted. Re-measured on every render tick and on resize, since row
+// count/height/column count can all change (filter, SSE updates,
+// viewport width).
+function deckClipToWholeRows() {
+  const container = els.deckTiles;
+  if (!container) return;
+  container.style.maxHeight = ""; // release any earlier clamp before re-measuring the real budget
+  const budget = container.clientHeight;
+  const tiles = Array.from(container.children);
+  if (!tiles.length || budget <= 0) return;
+  // getBoundingClientRect(), not offsetTop/offsetHeight -- offsetTop is
+  // relative to the nearest POSITIONED ancestor, which may be several
+  // levels above `container` (nothing between here and that ancestor
+  // necessarily sets `position`), not to `container` itself. Viewport
+  // rects sidestep that mismatch entirely: subtracting the container's
+  // own rect top puts every tile in the SAME frame `budget` (clientHeight)
+  // is already measured in.
+  const containerTop = container.getBoundingClientRect().top;
+  let cutoff = 0;
+  let rowTop = null;
+  let rowBottom = 0;
+  for (const t of tiles) {
+    const r = t.getBoundingClientRect();
+    const top = r.top - containerTop;
+    const bottom = r.bottom - containerTop;
+    if (rowTop === null || Math.abs(top - rowTop) > 0.5) {
+      if (rowTop !== null) {
+        if (rowBottom <= budget) cutoff = rowBottom; else break;
+      }
+      rowTop = top;
+      rowBottom = bottom;
+    } else {
+      rowBottom = Math.max(rowBottom, bottom);
+    }
+  }
+  if (rowTop !== null && rowBottom <= budget) cutoff = rowBottom; // account for the final row (loop only closes a row once the next one starts)
+  if (cutoff > 0) container.style.maxHeight = `${cutoff}px`;
+}
+window.addEventListener("resize", deckScheduleRenderTick);
+
+function deckSortEntities(entities) {
+  return entities.filter((e) => DECK_DOMAINS.has(e.domain)).sort((a, b) =>
+    a.domain === b.domain
+      ? (a.entity_id < b.entity_id ? -1 : a.entity_id > b.entity_id ? 1 : 0)
+      : (a.domain < b.domain ? -1 : 1)
+  );
+}
+
+// Owner ruling: reachable points first, order FROZEN at load. A stable
+// partition -- `unavailable`-classified entities move after everything
+// else, preserving deckSortEntities' own (domain, entity_id) order within
+// each group -- run ONLY over the very first snapshot, at boot. Nothing
+// hides: every entity from `entities` is still in the returned list, just
+// reordered.
+//
+// This is also the ENTIRE freeze mechanism, deliberately -- deckTileFor
+// (above) only ever appends a tile once, the first time its entity_id is
+// seen, and returns the SAME existing element on every later call without
+// touching the DOM again. So: (a) an entity that goes unavailable later,
+// or recovers, only has deckApplyTile mutate its existing tile's
+// data-state in place -- its DOM position, set here at boot, never moves;
+// (b) an entity HA hadn't reported yet at boot (not in this function's
+// input at all) gets created by its first real deckApplyTile call
+// (typically an SSE update) and appended wherever #deckTiles' children
+// currently end, i.e. after the whole frozen initial order -- "appends at
+// the end" falls out of the existing append-once behavior for free, no
+// separate bookkeeping needed here.
+function deckOrderReachableFirst(entities) {
+  const reachable = [];
+  const unavailable = [];
+  for (const e of entities) (deckStateFor(e) === "unavailable" ? unavailable : reachable).push(e);
+  return reachable.concat(unavailable);
+}
+
+function deckRenderSimBadge() {
+  if (!els.deckSimBadge) return;
+  const eff = deckSimEffective();
+  els.deckSimBadge.hidden = !eff.active;
+  if (eff.active) els.deckSimBadge.textContent = `SIMULATED: ${eff.value}`;
+}
+
+// `entities` is the already domain-matched (DECK_DOMAINS) set, BEFORE the
+// exclusion filter -- so "total" always means "of the addressable deck",
+// not "of whatever HA happened to report" (scenes/persons never count).
+function deckRenderFilterStatus(entities) {
+  if (!els.deckFilterStatus) return;
+  const active = deckFilterTerms.length > 0;
+  els.deckFilterStatus.hidden = !active;
+  if (!active) return;
+  const shown = entities.filter((e) => !deckEntityExcluded(e)).length;
+  els.deckFilterStatus.textContent = `${shown} of ${entities.length}`;
+}
+
+function deckOpenStream() {
+  if (deckSource) return;
+  deckSource = new EventSource("/ha/stream");
+  deckSource.addEventListener("state", (e) => {
+    deckLinkDown(false);
+    try { deckApplyTile(JSON.parse(e.data)); } catch {}
+  });
+  deckSource.onerror = () => deckLinkDown(true);
+}
+
+// ── Deck section, Service Panel (V4 follow-up) ───────────────────────
+// `?deckfilter=`/`?decksim=` shipped as query params only, with nothing in
+// the UI — a control a person would never actually type. This section adds
+// four Service Panel controls layered on top of that same review path; the
+// URL params keep working and OUTRANK these stored settings (see
+// deckSimEffective above for the sim picker's half of that, and
+// deckEntityExcluded/deckFilterTerms, unchanged, for ?deckfilter=).
+//
+// The section itself is built ONLY once /ha/states confirms a real deck
+// (see bootDeck's success branch, below) — absent for every downstream user
+// without HA configured, same principle as #vaDeck itself never rendering
+// tiles for them. `els.deckGroup` starts `hidden` in the markup for exactly
+// that reason.
+//
+// Persistence is a deliberate exception to the no-localStorage-for-deck-
+// review rule that governs ?deckfilter=/?decksim=: these three keys are real
+// user settings (not review affordances), so they persist like every other
+// Service Panel control. This project has twice had a test-setup
+// convenience flag hide a real defect from a chunk of the suite
+// (va-avatar/va-firstrun-done) — so the UNSET default of every key below
+// must equal today's shipped behavior: deck on, nothing hidden, unavailable
+// shown. The sim picker is the one exception with NO storage key at all —
+// see deckSimOverride's own comment above.
+const DECK_VISIBLE_KEY = "va-deck";
+const DECK_HIDDEN_KEY = "va-deck-hidden";
+const DECK_HIDE_UNAVAILABLE_KEY = "va-deck-hide-unavailable";
+
+function deckWanted() {
+  try { return localStorage.getItem(DECK_VISIBLE_KEY) !== "off"; } catch { return true; }
+}
+function setDeckWanted(wanted) {
+  try { localStorage.setItem(DECK_VISIBLE_KEY, wanted ? "on" : "off"); } catch {}
+  if (els.vaDeck) els.vaDeck.hidden = !wanted; // CSS: #vaDeck[hidden] above
+}
+function loadDeckHiddenIds() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(DECK_HIDDEN_KEY) || "[]");
+    return new Set(Array.isArray(raw) ? raw : []);
+  } catch { return new Set(); }
+}
+const deckHiddenIds = loadDeckHiddenIds(); // per-point visibility (part 2) -- default unset = every id absent = every point visible
+function saveDeckHiddenIds() {
+  try { localStorage.setItem(DECK_HIDDEN_KEY, JSON.stringify(Array.from(deckHiddenIds))); } catch {}
+}
+let deckHideUnavailable = false;
+try { deckHideUnavailable = localStorage.getItem(DECK_HIDE_UNAVAILABLE_KEY) === "on"; } catch {}
+
+// A tile's final `hidden` is the OR of two independently-tracked reasons
+// (see deckTileFor's rec literal) so toggling one never disturbs the other's
+// current verdict.
+function deckUpdateTileVisibility(rec) {
+  rec.el.hidden = !!rec.userHidden || !!rec.availHidden;
+  deckRovingSync(); // a hide/show can strand the 0-stop on a now-invisible tile
+}
+function deckSetPointVisible(entityId, visible) {
+  if (visible) deckHiddenIds.delete(entityId); else deckHiddenIds.add(entityId);
+  saveDeckHiddenIds();
+  const rec = deckTileMap.get(entityId);
+  if (!rec) return;
+  rec.userHidden = !visible;
+  deckUpdateTileVisibility(rec);
+}
+// Part 3, "hide unavailable" — CRITICAL: this must NEVER re-evaluate on a
+// live update. The deck's tile ORDER is frozen at first snapshot specifically
+// so a point never moves under the user's finger; a filter that reacts to
+// live `data-state` changes reopens that exact hazard (a light drops off,
+// every following tile visually shifts, the user taps the wrong one). So
+// this reads each tile's CURRENT `data-state` only at the two moments the
+// owner specified — page load and the instant this switch is flipped — and
+// that verdict then STICKS regardless of any SSE update in between. Do not
+// call this from deckApplyTile or any SSE handler.
+function deckEvalAvailability() {
+  deckTileMap.forEach((rec) => {
+    rec.availHidden = deckHideUnavailable && rec.el.dataset.state === "unavailable";
+    deckUpdateTileVisibility(rec);
+  });
+}
+
+// Part 4, forced-state review picker — layered under `?decksim=` via
+// deckSimEffective (above). Re-renders every tile seen so far from its
+// cached last payload (deckLastPub) rather than waiting on a new SSE frame,
+// since forcing a review state is meant to be instant.
+function deckSetSimOverride(value) {
+  deckSimOverride = value || null;
+  deckRenderSimBadge();
+  deckLastPub.forEach((pub) => deckApplyTile(pub));
+}
+
+// Part 2's list: one row per addressable point, in the SAME frozen order as
+// the deck itself, labelled with the same short legend deckRelabelTiles
+// already computed (so "ECHO DOT DND" in the list matches the tile), with
+// the full HA friendly name as `title` for anyone who needs the unabridged
+// version. This list is settings-panel chrome, not the persistent deck
+// stage — rebuilding it with innerHTML is fine; it never touches a
+// `.deckTile` node.
+function deckBuildPointList(orderedEntities) {
+  if (!els.deckPointList) return;
+  els.deckPointList.innerHTML = "";
+  orderedEntities.forEach((pub) => {
+    if (deckEntityExcluded(pub)) return; // ?deckfilter= already hard-excludes this point -- nothing here to toggle
+    const rec = deckTileMap.get(pub.entity_id);
+    const friendly = (pub.attributes && pub.attributes.friendly_name) || pub.entity_id;
+    const row = document.createElement("div");
+    row.className = "brainOption switch-h-row";
+    const id = "deckPoint_" + pub.entity_id.replace(/[^a-zA-Z0-9_-]/g, "_");
+    // Same throw-switch anatomy as #deckOnToggle/#deckHideUnavailableToggle
+    // above, not a bare `<input type=checkbox>` -- a native checkbox reads
+    // as a web form field bolted onto the faceplate; this reads as a jack
+    // that's lit (visible) or dark (hidden), same as every other control in
+    // this drawer.
+    const visual = document.createElement("span");
+    visual.className = "switch-h-visual";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.id = id;
+    input.className = "switch-h-input";
+    input.checked = !deckHiddenIds.has(pub.entity_id);
+    input.addEventListener("change", () => deckSetPointVisible(pub.entity_id, input.checked));
+    const track = document.createElement("span");
+    track.className = "switch-track-h";
+    track.setAttribute("aria-hidden", "true");
+    const knob = document.createElement("span");
+    knob.className = "switch-knob-h";
+    const lamp = document.createElement("span");
+    lamp.className = "switch-lamp-h";
+    track.appendChild(knob);
+    track.appendChild(lamp);
+    visual.appendChild(input);
+    visual.appendChild(track);
+    const label = document.createElement("label");
+    label.htmlFor = id;
+    label.className = "deckPointLabel"; // engraved-legend look (CSS text-transform, not textContent -- keeps the accessible name mixed-case)
+    label.textContent = (rec && rec.name.textContent) || friendly;
+    label.title = friendly;
+    row.appendChild(visual);
+    row.appendChild(label);
+    els.deckPointList.appendChild(row);
+  });
+}
+
+els.deckOnToggle?.addEventListener("change", () => setDeckWanted(els.deckOnToggle.checked));
+els.deckHideUnavailableToggle?.addEventListener("change", () => {
+  deckHideUnavailable = els.deckHideUnavailableToggle.checked;
+  try { localStorage.setItem(DECK_HIDE_UNAVAILABLE_KEY, deckHideUnavailable ? "on" : "off"); } catch {}
+  deckEvalAvailability(); // re-freeze NOW, at the moment of the flip -- never on a later SSE update
+});
+els.deckSimSelect?.addEventListener("change", () => deckSetSimOverride(els.deckSimSelect.value));
+
+async function bootDeck() {
+  if (!els.vaDeck) return; // a rig may drop the `deck` chassis region entirely
+  els.vaDeck.hidden = !deckWanted(); // unset default = on, i.e. today's shipped behavior, unchanged
+  deckRenderSimBadge();
+  let entities = null;
+  try {
+    const resp = await fetch("/ha/states");
+    if (resp.ok) {
+      const body = await resp.json();
+      entities = Array.isArray(body.entities) ? body.entities : [];
+    }
+  } catch {} // absent by default for every downstream user without HA — no console noise (rule 6)
+  if (entities === null) {
+    if (!deckSimActive) return; // leave #vaDeck exactly as it renders today
+    const demoMatched = deckSortEntities(DECK_DEMO_ENTITIES);
+    deckRenderFilterStatus(demoMatched);
+    deckOrderReachableFirst(demoMatched).forEach(deckApplyTile);
+    return; // no real server behind the demo tiles — nothing to stream from; Service Panel section stays hidden too (rule: absent unless /ha/states is 200)
+  }
+  const matched = deckSortEntities(entities);
+  const ordered = deckOrderReachableFirst(matched);
+  deckRenderFilterStatus(matched);
+  ordered.forEach(deckApplyTile);
+  deckOpenStream();
+
+  // Service Panel "Deck" section only exists once a real deck is confirmed.
+  if (els.deckGroup) {
+    els.deckGroup.hidden = false;
+    if (els.deckOnToggle) els.deckOnToggle.checked = deckWanted();
+    if (els.deckHideUnavailableToggle) els.deckHideUnavailableToggle.checked = deckHideUnavailable;
+    if (els.deckSimSelect) {
+      // The URL param always wins (rule) -- when it's active the picker just
+      // mirrors it, disabled, rather than the two fighting over the badge.
+      els.deckSimSelect.disabled = deckSimActive;
+      els.deckSimSelect.value = deckSimActive ? (deckSimValue || "") : "";
+    }
+  }
+  // Legends aren't final until deckRelabelTiles' render tick runs (see
+  // deckScheduleRenderTick, scheduled by the deckApplyTile calls just above)
+  // -- requesting another frame here runs AFTER it, in the same paint, since
+  // rAF callbacks fire in registration order.
+  requestAnimationFrame(() => {
+    deckEvalAvailability(); // load-time freeze of the "hide unavailable" verdict
+    deckBuildPointList(ordered);
+  });
+}
+bootDeck();
+
 // ── Avatar pane: lazy, desktop-only (see avatar/avatar.mjs) ───────────
 // va-avatar in localStorage is "on" (expanded, default) or "off" (collapsed).
 // The heavy module (TalkingHead + HeadAudio + GLB) is only ever dynamically
@@ -5656,6 +7961,7 @@ function setAvatarWanted(wanted) {
   els.avatarToggle.setAttribute("aria-label", wanted ? "Collapse avatar" : "Expand avatar");
   if (wanted) loadAvatarModule().then(syncAvatarRunState);
   else syncAvatarRunState();
+  s10UpdateFit();
 }
 
 // Avatar dropdown lives in settings (always available client-side, unlike
@@ -5697,6 +8003,12 @@ function dismissFirstrun() {
   try { localStorage.setItem("va-firstrun-done", "1"); } catch {}
   els.firstrunOverlay.hidden = true;
   els.ptt?.focus();
+  // Cheap defence in depth -- s10PttFits()'s own hit-test (elementsFromPoint,
+  // plural) already ignores anything merely painted over #ptt, including
+  // this overlay while it was up, so this call is no longer load-bearing
+  // the way it was against the old singular hit-test. Left in: free, and
+  // correct regardless of which hit-test strategy #ptt's fit is decided by.
+  s10UpdateFit();
 }
 els.firstrunEnter?.addEventListener("click", dismissFirstrun);
 els.firstrunSkip?.addEventListener("click", (e) => { e.preventDefault(); dismissFirstrun(); });
@@ -5706,6 +8018,121 @@ try {
     els.firstrunOverlay.hidden = false;
   }
 } catch {}
+
+// ── S10 measured-fit gate (see the CSS comment above the media query this
+// drives) — decides html[data-s10="cap"] by hit-testing #ptt against
+// #contentGrid's own visible band instead of trusting a constant.
+// getBoundingClientRect() containment alone isn't enough (a 1px-clipped
+// #ptt still reads "contained"), so this also requires a hit-test at
+// #ptt's centre. elementsFromPoint() (plural), not elementFromPoint() --
+// any full-viewport element that goes pointer-events:auto over the
+// chassis (#settingsOverlay while the service panel is open,
+// #firstrunOverlay before it's dismissed) sits on top of #ptt in the
+// singular hit-test and reads as "#ptt isn't there", which is wrong: it's
+// there, just covered by something unrelated to the cap's own fit. The
+// full stack lets #ptt count as present regardless of what's painted over
+// it, while #ptt's own absence from the stack (pushed out from under an
+// ancestor's overflow: hidden/auto/scroll -- the bottom-vs-grid check
+// above already screens for the cheap way, kept for genuinely clipped
+// cases like chainsawman @1280x900) still fails it correctly.
+// Always measures from the CAPPED state -- setting the attribute before
+// measuring, never after -- so the decision can't oscillate against its
+// own side effect.
+function s10PttFits() {
+  const grid = document.getElementById("contentGrid");
+  if (!grid || !els.ptt) return false;
+  const gridRect = grid.getBoundingClientRect();
+  const pttRect = els.ptt.getBoundingClientRect();
+  if (pttRect.bottom > gridRect.bottom) return false;
+  const stack = document.elementsFromPoint(
+    pttRect.left + pttRect.width / 2,
+    pttRect.top + pttRect.height / 2
+  );
+  return stack.some((el) => el === els.ptt || els.ptt.contains(el));
+}
+function s10UpdateFit() {
+  const root = document.documentElement;
+  if (!window.matchMedia("(min-width: 881px)").matches) { root.removeAttribute("data-s10"); return; }
+  root.setAttribute("data-s10", "cap");
+  void document.body.offsetHeight; // force layout so the measurement below sees the capped state
+  if (!s10PttFits()) root.removeAttribute("data-s10");
+}
+let s10ResizeTimer = null;
+window.addEventListener("resize", () => {
+  clearTimeout(s10ResizeTimer);
+  s10ResizeTimer = setTimeout(s10UpdateFit, 100);
+});
+document.fonts?.ready.then(s10UpdateFit);
+
+// ── PWA install / update (see webclient/sw.js + README "Install as an
+// app") ─────────────────────────────────────────────────────────────────
+// `pwaLabel` is shown whenever either control below is, and hidden again
+// once neither applies -- e.g. after the user installs, or dismisses the
+// install prompt.
+function pwaSyncLabel() {
+  els.pwaLabel.hidden = els.pwaUpdateBtn.hidden && els.pwaInstallBtn.hidden;
+}
+
+// `serviceWorker` is only present in a secure context (https, or
+// localhost/127.0.0.1 in dev) -- on a plain-HTTP LAN origin this whole
+// block is a silent no-op, same as the rest of the app already assumes for
+// getUserMedia. Deferred behind "load" so registration (and the network
+// fetch of sw.js itself) doesn't compete with startup.
+window.addEventListener("load", () => {
+  if (!("serviceWorker" in navigator)) return;
+  navigator.serviceWorker.register("./sw.js").then((reg) => {
+    reg.addEventListener("updatefound", () => {
+      const installing = reg.installing;
+      if (!installing) return;
+      installing.addEventListener("statechange", () => {
+        // A worker reaching "installed" while a controller already exists
+        // means an update is waiting, not a first install -- the first
+        // install has no controller yet.
+        if (installing.state === "installed" && navigator.serviceWorker.controller) {
+          els.pwaUpdateBtn.hidden = false;
+          pwaSyncLabel();
+        }
+      });
+    });
+  }).catch((e) => console.warn("service worker registration failed", e));
+
+  // Guard against a reload loop: controllerchange can fire more than once.
+  // With no self.skipWaiting() in sw.js's install handler (see its own
+  // comment), this now only fires from the user-initiated path -- clicking
+  // "Update ready" in the service panel -- never from a deploy landing
+  // while the cockpit is mid-conversation.
+  let pwaReloading = false;
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (pwaReloading) return;
+    pwaReloading = true;
+    location.reload();
+  });
+});
+els.pwaUpdateBtn.addEventListener("click", () => {
+  navigator.serviceWorker.getRegistration().then((reg) => reg?.waiting?.postMessage("skipWaiting"));
+});
+
+let pwaInstallPrompt = null;
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault(); // hold it; we show our own control in the service panel instead
+  pwaInstallPrompt = e;
+  els.pwaInstallBtn.hidden = false;
+  pwaSyncLabel();
+});
+els.pwaInstallBtn.addEventListener("click", async () => {
+  if (!pwaInstallPrompt) return;
+  const prompt = pwaInstallPrompt;
+  pwaInstallPrompt = null;
+  els.pwaInstallBtn.hidden = true; // a captured prompt fires once, whichever way the user answers
+  pwaSyncLabel();
+  await prompt.prompt();
+  await prompt.userChoice;
+});
+window.addEventListener("appinstalled", () => {
+  pwaInstallPrompt = null;
+  els.pwaInstallBtn.hidden = true;
+  pwaSyncLabel();
+});
 
 // ── Go ───────────────────────────────────────────────────────────────
 connect();

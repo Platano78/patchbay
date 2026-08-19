@@ -19,6 +19,15 @@ import ssl
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
+# The static file server must never fail to boot over the HA feature -- every
+# downstream user runs this, whether or not they have Home Assistant. A
+# missing dependency or a future bug in ha_deck.py degrades to "HA routes
+# absent", not "the whole server won't start".
+try:
+    import ha_deck
+except Exception:
+    ha_deck = None
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 VOICE_AGENT_PORT = 8765
 TCP_LISTEN_STATE = "0A"
@@ -31,8 +40,19 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=HERE, **kwargs)
 
     def do_GET(self):
-        if urlsplit(self.path).path in MODEL_PATHS:
+        path = urlsplit(self.path).path
+        if path in MODEL_PATHS:
             self._serve_models()
+            return
+        # Absent unless configured (or unavailable): when HA isn't set up,
+        # or ha_deck itself failed to import, these two paths are simply
+        # never routed here and fall through to the normal static-file 404
+        # below, same as any other nonexistent path.
+        if ha_deck is not None and ha_deck.enabled() and path == "/ha/stream":
+            ha_deck.handle_stream(self)
+            return
+        if ha_deck is not None and ha_deck.enabled() and path == "/ha/states":
+            ha_deck.handle_states(self)
             return
         super().do_GET()
 
@@ -41,6 +61,13 @@ class Handler(SimpleHTTPRequestHandler):
             self._serve_models(head=True)
             return
         super().do_HEAD()
+
+    def do_POST(self):
+        path = urlsplit(self.path).path
+        if ha_deck is not None and ha_deck.enabled() and path == "/ha/intent":
+            ha_deck.handle_intent(self)
+            return
+        self.send_error(404)
 
     def _serve_models(self, head=False):
         if self._voice_agent_listening():
@@ -111,6 +138,8 @@ def main():
     ap.add_argument("--keyfile", help="TLS private key (PEM)")
     args = ap.parse_args()
 
+    if ha_deck is not None:
+        ha_deck.start()  # no-op unless HA_URL/HA_TOKEN are set
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     scheme = "http"
     if args.certfile and args.keyfile:
