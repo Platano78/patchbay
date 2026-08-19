@@ -216,6 +216,17 @@ that's the normal case, not a missing feature: without `HERMES_SHIM_URL` /
 of the voice agent works exactly the same. If you do run something that
 speaks Hermes' shim/MCP surface, point the env vars above at it.
 
+**Bring your own agent.** Hermes is the maintainer's own background agent —
+it's one implementation of a plain, documented contract, not a requirement.
+The `HERMES_*` env var names stay as shipped API, but they name a *contract*:
+an OpenAI-compatible chat-completions endpoint plus four MCP tools
+(`events_poll`, `permissions_list_open`, `permissions_respond`,
+`messages_send`). Wire up your own agent to the same shapes and it plugs
+into the same delegate/status/approve lane. See
+[`docs/agent-lane.md`](docs/agent-lane.md) for the full spec and
+[`examples/agent-lane/`](examples/agent-lane/) for a runnable reference
+server to develop and test against.
+
 ### Behaviour & safety knobs
 
 These are not integrations — they bound or tune what the pipeline already
