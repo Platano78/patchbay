@@ -16,6 +16,15 @@ from openai import OpenAI
 from speech_to_speech.LLM.base_openai_compatible_language_model import BaseOpenAICompatibleHandler
 from speech_to_speech import voice_clone
 from speech_to_speech import voice_tools
+# brain_discovery is dependency-light by design (stdlib + httpx only, no
+# speech_to_speech.* imports of its own -- see its docstring) so it can run
+# standalone as a CLI before a pipeline exists to configure. That means the
+# import direction is one-way: brain_discovery must never import FROM this
+# module. `_extract_model_ids`/`MAX_PROBED_MODEL_IDS` used to live here and
+# moved there so both this module's `/models` probe and discovery's own
+# probing share one parser instead of two that could drift.
+from speech_to_speech import brain_discovery
+from speech_to_speech.brain_discovery import _extract_model_ids, MAX_PROBED_MODEL_IDS  # noqa: F401 -- re-exported for existing brain_control._extract_model_ids call sites/tests
 
 logger = logging.getLogger(__name__)
 
@@ -38,11 +47,6 @@ _ALLOWED_CONTROL_CHARS = "\n\r\t"
 # A model id is a single line of free text, unlike the multi-line persona, so
 # no control character is allowed through (not even newline/tab).
 MODEL_OVERRIDE_MAX_CHARS = 200
-
-# Cap on how many served model ids a `/models` probe records per brain
-# (ruling 4) -- an endpoint serving hundreds (NVIDIA NIM) must not bloat
-# `config_state` without bound.
-MAX_PROBED_MODEL_IDS = 500
 
 _MODEL_OVERRIDES_FILENAME = "model_overrides.json"
 
@@ -436,22 +440,6 @@ def save_voice_choice(name: str) -> None:
         empty=not name,
         label="voice choice",
     )
-
-
-def _extract_model_ids(data: Any) -> list[str]:
-    """Defensively parse served model ids out of a `/models` GET's `data`
-    list -- llama.cpp router entries carry `{"id", "status": {...}}`, plain
-    OpenAI-style lists just `{"id"}`. Non-dict entries and non-string/empty
-    ids are skipped rather than raising; capped at `MAX_PROBED_MODEL_IDS`."""
-    ids: list[str] = []
-    if not isinstance(data, list):
-        return ids
-    for entry in data:
-        if isinstance(entry, dict) and isinstance(entry.get("id"), str) and entry["id"]:
-            ids.append(entry["id"])
-        if len(ids) >= MAX_PROBED_MODEL_IDS:
-            break
-    return ids
 
 
 def _curated_models(entry: dict[str, Any]) -> list[str]:
@@ -944,6 +932,15 @@ class BrainControl:
                 if not ok:
                     return {"type": "config_ack", "ok": False, "error": error}
                 self.streamer.broadcast_wakeword_state()
+            discovered_brains: Optional[list[dict[str, Any]]] = None
+            if msg.get("discover_brains"):
+                try:
+                    discovered_brains = brain_discovery.discover()
+                except Exception as e:
+                    # discover() itself never raises, but guard the call site
+                    # too -- a scan must never fail the whole config_set.
+                    logger.warning("BrainControl: brain discovery failed: %s", e)
+                    discovered_brains = []
             if msg.get("reset_chat"):
                 chat_reset = True
             if chat_reset:
@@ -963,12 +960,15 @@ class BrainControl:
             # whole panel from this ack alone, so it no longer chases every
             # successful config_set with a `config_get`. `chat_reset` is the
             # one field that is about the operation rather than the state.
-            return {
+            ack: dict[str, Any] = {
                 "type": "config_ack",
                 "ok": True,
                 "chat_reset": chat_reset,
                 **self._state_payload(),
             }
+            if discovered_brains is not None:
+                ack["discovered_brains"] = discovered_brains
+            return ack
 
     def _set_persona(self, msg: dict[str, Any]) -> tuple[bool, str]:
         """Write one tier of the persona store.

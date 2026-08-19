@@ -1,23 +1,16 @@
 {
-  "coder": {
-    "label": "Coder — local GPU LLM",
-    "base_url": "http://localhost:8084/v1",
-    "model": "<YOUR_MODEL_NAME>",
+  "local": {
+    "label": "Local — Ollama",
+    "base_url": "http://localhost:11434/v1",
+    "model": "auto",
     "available": true
   },
-  "local": {
-    "label": "Local — desktop router (loaded model)",
-    "base_url": "http://<HOST>:8081/v1",
+  "local-alt": {
+    "label": "Local — llama.cpp / LM Studio",
+    "base_url": "http://localhost:8080/v1",
     "model": "auto",
-    "available": false
-  },
-  "hermes": {
-    "label": "Hermes",
-    "base_url": "http://localhost:8087/v1",
-    "model": "auto",
-    "api_key_file": "<PATH>/.hermes/shim.env",
-    "api_key_var": "HERMES_SHIM_TOKEN",
-    "available": false
+    "available": false,
+    "note": "llama.cpp's llama-server defaults to :8080; LM Studio's local server defaults to :1234; a llama.cpp router setup is often :8081. Point base_url at whichever one you run."
   },
   "frontier": {
     "label": "Frontier — hosted model (any OpenAI-compatible endpoint)",

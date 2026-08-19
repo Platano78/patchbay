@@ -6437,11 +6437,31 @@ def test_deck_link_and_write_failure_are_announced_once_each(deck_client):
 # over from a previous one.
 
 _SW_READY_JS = """async () => {
-  const reg = await Promise.race([
-    navigator.serviceWorker.ready,
-    new Promise((_, rej) => setTimeout(() => rej(new Error('sw ready timeout')), 8000)),
+  const withTimeout = (p, ms, label) => Promise.race([
+    p,
+    new Promise((_, rej) => setTimeout(() => rej(new Error(label)), ms)),
   ]);
-  return reg.active ? reg.active.state : null;
+  const reg = await withTimeout(navigator.serviceWorker.ready, 8000, 'sw ready timeout');
+  const worker = reg.active;
+  if (!worker) return null;
+  if (worker.state === 'activated') return worker.state;
+  // `navigator.serviceWorker.ready` resolves as soon as the registration HAS
+  // an active worker -- per spec that happens when the worker enters
+  // `activating`, NOT when activation finishes. sw.js's activate handler does
+  // real async work (enumerating and evicting old caches), so reading
+  // `.state` straight after `ready` legitimately returns 'activating' whenever
+  // the box is busy -- which is why this showed up only in a full-suite run
+  // and never in isolation. Wait for the transition instead of asserting the
+  // race; a genuine failure to activate still fails, on the timeout.
+  await withTimeout(new Promise((resolve) => {
+    worker.addEventListener('statechange', function onChange() {
+      if (worker.state === 'activated') {
+        worker.removeEventListener('statechange', onChange);
+        resolve();
+      }
+    });
+  }), 8000, 'sw activation timeout');
+  return worker.state;
 }"""
 
 

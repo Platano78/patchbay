@@ -29,6 +29,18 @@ kept as an instant rollback (see below).
 
 ## Files
 
+- `brain_discovery.py` — `speech_to_speech/brain_discovery.py`. Probes the
+  usual local model-server ports (Ollama, LM Studio, llama.cpp, vLLM/LocalAI,
+  KoboldCpp, Jan; loopback-only, `BRAIN_DISCOVERY_URLS` overrides) and reports
+  what answered. Dependency-light on purpose — stdlib + httpx only, no
+  `speech_to_speech.*` imports of its own — so `python3 patches/brain_discovery.py`
+  runs standalone before any pipeline exists (see `setup.sh` and README's
+  "Finding your local model server"). `brain_control.py` imports FROM this
+  module (`_extract_model_ids`, `MAX_PROBED_MODEL_IDS`), never the reverse —
+  that's what keeps the CLI standalone. Also reachable live via
+  `{"discover_brains": true}` over `config_set` (`brain_control.py`'s
+  `_config_set`), surfaced in the settings panel as "Scan for local models".
+
 - `brain_control.py` — `speech_to_speech/brain_control.py`. Defines
   `BrainControl`, which handles `config_get`/`config_set` control messages:
   swapping the LLM backend (`client`/`model_name`/`_extra_body` — now on

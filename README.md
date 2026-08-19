@@ -64,6 +64,28 @@ you at install time.
   below) that beats the configured default until you clear it — it never edits
   `brains.json` itself.
 
+### Finding your local model server
+
+Not sure what to put in `brains.json`? `patches/brain_discovery.py` checks
+whether something is already listening on the usual local model-server ports
+(Ollama, LM Studio, llama.cpp `llama-server`, vLLM/LocalAI, KoboldCpp, Jan)
+and prints what it finds, including a ready-to-paste `brains.json` entry.
+`setup.sh` runs it automatically right after copying `brains.json.example`;
+run it again any time with:
+
+```bash
+~/speech-to-speech-main/.venv/bin/python3 patches/brain_discovery.py
+```
+
+It's **loopback-only by default** — probing your LAN unprompted isn't this
+tool's job. Set `BRAIN_DISCOVERY_URLS` (comma-separated base URLs) to check
+somewhere else instead; it replaces the default port list, not adds to it.
+It only finds servers that are already running — it starts nothing, and it
+never writes `brains.json` for you (the printed snippet is yours to paste
+in). Also reachable live, once the pipeline is up: the settings panel's
+"Scan for local models" button under **Brain**, for adding a second brain
+without a restart.
+
 ### One conversation, many screens
 
 Every connected browser is a window onto the **same** session: one chat
@@ -169,7 +191,7 @@ them.
 | Env var | Default | Purpose |
 |---|---|---|
 | `BRAINS_JSON` | `~/speech-to-speech/brains.json` | path to your brain registry |
-| `HERMES_SHIM_URL` | `http://localhost:8087/v1/chat/completions` | optional Hermes "shim" brain endpoint |
+| `HERMES_SHIM_URL` | `http://localhost:8087/v1/chat/completions` | optional Hermes "shim" brain endpoint — see *Hermes (optional)* below |
 | `HERMES_SHIM_TOKEN_FILE` | `~/.hermes/shim.env` | optional Hermes shim token file |
 | `HERMES_MCP_URL` | `http://localhost:8088/mcp` | optional Hermes MCP endpoint (cockpit brain) |
 | `HERMES_TARGET` | *(unset — required for `send_to_hermes`)* | Hermes message target, `platform:chat_id` per Hermes `channels_list` |
@@ -183,6 +205,16 @@ them.
 | `VOICE_PHONE_CONTEXT` | *(unset)* | set to `off` to disable phone context server-side, even if a client has it toggled on |
 | `GENESIS_API_URL` | `http://localhost:8080` | optional Agent-Genesis endpoint; adds a conversation-history lane to `knowledge_lookup`. Probed at startup — if nothing answers, the lane is silently dropped |
 | `FAULKNER_API_URL` | `http://localhost:8086` | optional Faulkner-DB endpoint backing `decision_lookup`. Same probe-or-drop behaviour |
+
+### Hermes (optional)
+
+Hermes is **a separate, self-hosted agent service** — not part of Patchbay,
+not bundled, and not required. It's the backing service for the three
+`*_hermes` voice tools below. Most self-hosters will never set this up, and
+that's the normal case, not a missing feature: without `HERMES_SHIM_URL` /
+`HERMES_MCP_URL` answering, the Hermes tools simply stay unarmed and the rest
+of the voice agent works exactly the same. If you do run something that
+speaks Hermes' shim/MCP surface, point the env vars above at it.
 
 ### Behaviour & safety knobs
 
@@ -229,9 +261,13 @@ The voice agent's LLM can call a small set of server-side tools (defined in
 | `web_search` | Search the public web; results also appear as clickable links on screen | DuckDuckGo (`ddgs`) |
 | `knowledge_lookup` | Search your own notes, projects, and research | QMD MCP (`QMD_MCP_URL`) |
 | `set_mood` | Set the interface/avatar mood | none — client-side visual only |
-| `delegate_to_hermes` | Hand off a long-running / multi-step task to Hermes | Hermes shim (`HERMES_SHIM_URL`) |
-| `hermes_status` | Report Hermes' status (summary, last result, recent steps, or pending approvals) | Hermes MCP (`HERMES_MCP_URL`) |
-| `send_to_hermes` | Send a quick free-form message / follow-up to Hermes | Hermes MCP (`messages_send` → `HERMES_TARGET`) |
+| `delegate_to_hermes` *(optional)* | Hand off a long-running / multi-step task to Hermes | Hermes shim (`HERMES_SHIM_URL`) |
+| `hermes_status` *(optional)* | Report Hermes' status (summary, last result, recent steps, or pending approvals) | Hermes MCP (`HERMES_MCP_URL`) |
+| `send_to_hermes` *(optional)* | Send a quick free-form message / follow-up to Hermes | Hermes MCP (`messages_send` → `HERMES_TARGET`) |
+
+Hermes is a separate, self-hosted service (see *Hermes (optional)* above) —
+most installs never run it, and these three tools simply stay unarmed until
+you do.
 
 **Approving a Hermes request is deliberately not a voice tool.** Hermes asks
 for approval precisely because an action needs a human, so the approval lives
@@ -244,7 +280,7 @@ request".
 
 Arming is **availability-probed once at pipeline start**: the weather, search,
 and mood tools are always armed; `knowledge_lookup` is armed only if the QMD MCP
-endpoint answers a probe; the four Hermes tools are armed only if the Hermes MCP
+endpoint answers a probe; the three Hermes tools are armed only if the Hermes MCP
 endpoint answers a probe. This keeps a self-hoster without those services from
 arming dead tools the LLM would call and then narrate as failures. Set
 `VOICE_TOOLS=<comma-list>` to pin the set explicitly (no probing — only listed

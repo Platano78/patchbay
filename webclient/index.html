@@ -2766,6 +2766,11 @@
     font-family: var(--mono); text-transform: uppercase; letter-spacing: 0.08em; font-size: 12px; color: var(--cream);
   }
   #settingsPanel .brainMeta { font-family: var(--mono); font-size: 10px; color: rgba(236,228,210,0.4); }
+  #settingsPanel .brainScanSnippet {
+    font-family: var(--mono); font-size: 10px; color: var(--cream); white-space: pre-wrap;
+    word-break: break-all; margin: 6px 0 2px; padding: 6px 8px; border-radius: var(--r);
+    background: rgba(0,0,0,0.35); box-shadow: inset 0 1px 3px rgba(0,0,0,0.5); user-select: all;
+  }
 
   /* ── Disclosure groups: metal summary row + recessed service-body when open ── */
   #settingsPanel details { margin-top: 10px; border-radius: var(--r); }
@@ -3086,6 +3091,8 @@
   <div id="brainStatus">—</div>
   <div class="label">Brain</div>
   <div id="brainList"></div>
+  <button type="button" class="panelBtn" id="scanBrainsBtn">Scan for local models</button>
+  <div id="brainScanResults" role="status" aria-live="polite"></div>
   <details id="personaGroup">
     <summary><span class="disc-lamp" aria-hidden="true"></span><span class="nom">Persona Workshop</span><span class="chev" aria-hidden="true">▸</span></summary>
     <div class="voiceCloneLane" id="personaScopeRow" role="group" aria-label="Persona applies to">
@@ -3575,6 +3582,8 @@ const els = {
   settingsCloseBtn: document.getElementById("settingsCloseBtn"),
   brainStatus: document.getElementById("brainStatus"),
   brainList: document.getElementById("brainList"),
+  scanBrainsBtn: document.getElementById("scanBrainsBtn"),
+  brainScanResults: document.getElementById("brainScanResults"),
   personaInput: document.getElementById("personaInput"),
   personaSelect: document.getElementById("personaSelect"),
   personaNameInput: document.getElementById("personaNameInput"),
@@ -5634,6 +5643,47 @@ els.reloadToolsBtn.addEventListener("click", () => {
     ws.send(JSON.stringify({ type: "config_set", reload_tools: true }));
   }
 });
+els.scanBrainsBtn.addEventListener("click", () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    els.brainScanResults.textContent = "Scanning…";
+    ws.send(JSON.stringify({ type: "config_set", discover_brains: true }));
+  }
+});
+// Renders the `discovered_brains` list a `discover_brains` config_ack carries
+// (only present on that ack — see BrainControl._config_set). Loopback-only,
+// server-side; see brain_discovery.py and README's "Finding your local model
+// server". Never writes brains.json itself — this offers a snippet the user
+// pastes in by hand, so a scan can't clobber a carefully hand-edited config.
+function renderBrainScanResults(results) {
+  els.brainScanResults.innerHTML = "";
+  if (!results.length) {
+    els.brainScanResults.textContent =
+      "No local model server answered on the usual ports (Ollama, LM Studio, llama.cpp, vLLM/LocalAI, KoboldCpp, Jan). Set BRAIN_DISCOVERY_URLS if yours runs somewhere else, or make sure it's running.";
+    return;
+  }
+  results.forEach((r) => {
+    const row = document.createElement("div");
+    row.className = "brainOption";
+    const head = document.createElement("div");
+    head.className = "brainName";
+    head.textContent = `${r.hint} — ${r.base_url}`;
+    row.appendChild(head);
+    const meta = document.createElement("div");
+    meta.className = "brainMeta";
+    meta.textContent = r.models.length ? `models: ${r.models.join(", ")}` : "no models reported";
+    row.appendChild(meta);
+    const key = (r.hint || "local").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "local";
+    const snippet = document.createElement("pre");
+    snippet.className = "brainScanSnippet";
+    snippet.textContent = `"${key}": ${JSON.stringify(
+      { label: r.hint, base_url: r.base_url, model: r.models[0] || "auto", available: true },
+      null,
+      2
+    )}`;
+    row.appendChild(snippet);
+    els.brainScanResults.appendChild(row);
+  });
+}
 els.voiceSelect.addEventListener("change", () => {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: "config_set", voice: els.voiceSelect.value }));
@@ -6319,6 +6369,7 @@ function handleEvent(text) {
         // hand-updating the handful of fields it used to carry.
         renderConfigState(ev);
         log(`brain=${ev.active_brain} model=${ev.model}`);
+        if (Array.isArray(ev.discovered_brains)) renderBrainScanResults(ev.discovered_brains);
         if (ev.chat_reset) {
           // The server cleared its chat history (brain switch, persona change, or our
           // own Reset button). Mirror it, and SAY so: for the button the user asked and

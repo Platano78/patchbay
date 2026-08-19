@@ -115,6 +115,15 @@ import patches.remote_speech_tts_handler as _real_remote_speech_tts_handler  # n
 
 sys.modules["speech_to_speech.TTS.remote_speech_tts_handler"] = _real_remote_speech_tts_handler
 
+# brain_control.py imports `speech_to_speech.brain_discovery` at module level
+# (brain_discovery is dependency-light by design -- stdlib + httpx only -- so
+# this alias needs no further stubbing, unlike voice_clone above). Must be in
+# place BEFORE `brain_control` is imported below, same reasoning as the
+# remote_speech_tts_handler alias above it.
+from patches import brain_discovery  # noqa: E402
+
+sys.modules["speech_to_speech.brain_discovery"] = brain_discovery
+
 from patches import brain_control  # noqa: E402
 
 PREDEFINED_UNAVAILABLE_NOTE = "pocket_tts not installed -- _predefined_voices() returns [] safely"
@@ -1960,3 +1969,43 @@ def test_reload_tools_config_set_updates_armed_tool_names(tmp_path, monkeypatch)
     assert ack["ok"] is True
     assert ack["tools"] == ["home_assistant"]
     assert ack["tools_armed"] == 1
+
+
+# ── discover_brains (brain_discovery wiring) ────────────────────────────
+
+
+def test_discover_brains_config_set_returns_results(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        brain_discovery,
+        "discover",
+        lambda timeout_s=1.0: [{"base_url": "http://localhost:11434/v1", "models": ["llama3"], "hint": "Ollama"}],
+    )
+    bc = _make_brain_control(tmp_path)
+
+    ack = bc._config_set({"discover_brains": True})
+
+    assert ack["ok"] is True
+    assert ack["discovered_brains"] == [
+        {"base_url": "http://localhost:11434/v1", "models": ["llama3"], "hint": "Ollama"}
+    ]
+
+
+def test_discover_brains_absent_when_not_requested(tmp_path):
+    bc = _make_brain_control(tmp_path)
+
+    ack = bc._config_set({"reset_chat": True})
+
+    assert "discovered_brains" not in ack
+
+
+def test_discover_brains_failure_returns_empty_list_not_error(tmp_path, monkeypatch):
+    def _raise(timeout_s=1.0):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(brain_discovery, "discover", _raise)
+    bc = _make_brain_control(tmp_path)
+
+    ack = bc._config_set({"discover_brains": True})
+
+    assert ack["ok"] is True
+    assert ack["discovered_brains"] == []

@@ -89,13 +89,27 @@ cp brains.json.example brains.json
 exist yet, so this command is a no-op unless you deleted it — either way,
 edit `brains.json` (setup.sh created it from the example) next.
 
+**Not sure what to put in it?** `setup.sh` also runs a loopback-only scan for
+a local model server already running on your box and prints what it finds,
+right after it copies the example. Missed it, or want to check again later:
+
+```bash
+~/speech-to-speech-main/.venv/bin/python3 patches/brain_discovery.py
+```
+
+It checks the usual local ports (Ollama, LM Studio, llama.cpp, vLLM/LocalAI,
+KoboldCpp, Jan) and prints a ready-to-paste `brains.json` entry for anything
+that answers — it never writes `brains.json` for you. See README's "Finding
+your local model server" for what it probes and how to point it somewhere
+else.
+
 Edit `brains.json`: for at least one entry, set `base_url` to your LLM
 endpoint's `/v1` base, `model` to the model id it serves, and `available` to
-`true`. Only `coder` ships `available: true` by default; `local`, `hermes`,
-and `frontier` ship `available: false` — leave them that way unless you're
-using them. `local` needs a real `<HOST>` in place of the placeholder;
-`hermes` and `frontier` also need an `api_key_file` you likely don't have
-yet — safe to ignore all three for a first run.
+`true`. Only `local` ships `available: true` by default (Ollama's default
+address); `local-alt` and `frontier` ship `available: false` — leave them
+that way unless you're using them. `local-alt` needs a real port for whatever
+you run there (see its `note`); `frontier` needs an `api_key_file` you likely
+don't have yet — safe to ignore both for a first run.
 
 Verify the endpoint answers before starting the pipeline:
 

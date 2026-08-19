@@ -115,6 +115,16 @@ if [ ! -f "$SCRIPT_DIR/brains.json" ]; then
   cp "$SCRIPT_DIR/brains.json.example" "$SCRIPT_DIR/brains.json"
 fi
 
+# Advisory only, never fatal: brain_discovery.py is standalone (stdlib +
+# httpx, no speech_to_speech import of its own — see its module docstring),
+# so it can run even though the pipeline hasn't started yet. Tells a
+# first-time installer what's actually on their box instead of leaving them
+# to guess from the generic example. Loopback-only probe, see README's
+# "Finding your local model server".
+echo
+echo "Checking for a local model server already running (loopback only)..."
+"$INSTALL_DIR/.venv/bin/python3" "$SCRIPT_DIR/patches/brain_discovery.py" || true
+
 cat <<EOF
 
 Setup complete.

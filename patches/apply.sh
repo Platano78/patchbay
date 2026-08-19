@@ -38,6 +38,7 @@ done
 # src (relative to SCRIPT_DIR) | dst (relative to PKG)
 FILES=(
   "brain_control.py|brain_control.py"
+  "brain_discovery.py|brain_discovery.py"
   "voice_clone.py|voice_clone.py"
   "websocket_streamer.py|connections/websocket_streamer.py"
   "s2s_pipeline.py|s2s_pipeline.py"
