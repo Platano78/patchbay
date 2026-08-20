@@ -99,9 +99,22 @@ right after it copies the example. Missed it, or want to check again later:
 
 It checks the usual local ports (Ollama, LM Studio, llama.cpp, vLLM/LocalAI,
 KoboldCpp, Jan) and prints a ready-to-paste `brains.json` entry for anything
-that answers — it never writes `brains.json` for you. See README's "Finding
-your local model server" for what it probes and how to point it somewhere
-else.
+that answers — it never writes `brains.json` for you. Every run names the
+target set it scanned on its first line.
+
+Model server on a different box? The scan won't see it by default — say so
+explicitly:
+
+```bash
+~/speech-to-speech-main/.venv/bin/python3 patches/brain_discovery.py \
+  --host 192.168.1.20
+# or sweep a private block (a /24 at most):
+~/speech-to-speech-main/.venv/bin/python3 patches/brain_discovery.py \
+  --cidr 192.168.1.0/24
+```
+
+See README's "Finding your local model server" for what it probes, the
+guards on `--cidr`, and `BRAIN_DISCOVERY_URLS` for a port it doesn't know.
 
 Edit `brains.json`: for at least one entry, set `base_url` to your LLM
 endpoint's `/v1` base, `model` to the model id it serves, and `available` to

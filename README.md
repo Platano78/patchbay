@@ -78,13 +78,37 @@ run it again any time with:
 ```
 
 It's **loopback-only by default** — probing your LAN unprompted isn't this
-tool's job. Set `BRAIN_DISCOVERY_URLS` (comma-separated base URLs) to check
-somewhere else instead; it replaces the default port list, not adds to it.
+tool's job. Every run says which target set it scanned on its first line, so
+a result can't be mistaken for more coverage than it had.
+
+If your model server runs on another box, ask for it explicitly:
+
+```bash
+# one or more named hosts (repeat --host)
+python3 patches/brain_discovery.py --host 192.168.1.20 --host 192.168.1.30
+
+# or a whole private block, same known port list
+python3 patches/brain_discovery.py --cidr 192.168.1.0/24
+```
+
+`--cidr` takes **private address space only** and at most a `/24` (256
+addresses); anything wider or public is refused outright rather than
+half-scanned. `--host` is unrestricted — you named it. Both are bounded: at
+most 64 probes in flight, `--timeout` seconds each (default 1s), so a full
+`/24` is a few tens of seconds, and the tool prints its own worst-case
+estimate before it starts.
+
+For a port this tool doesn't know about, `BRAIN_DISCOVERY_URLS`
+(comma-separated full base URLs) still names endpoints directly; it replaces
+the default port list rather than adding to it, and `--host`/`--cidr` win
+over it when both are set.
+
 It only finds servers that are already running — it starts nothing, and it
 never writes `brains.json` for you (the printed snippet is yours to paste
 in). Also reachable live, once the pipeline is up: the settings panel's
 "Scan for local models" button under **Brain**, for adding a second brain
-without a restart.
+without a restart — that button is loopback-only, the LAN modes are the
+CLI's.
 
 ### One conversation, many screens
 
