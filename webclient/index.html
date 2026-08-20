@@ -5651,14 +5651,18 @@ els.scanBrainsBtn.addEventListener("click", () => {
 });
 // Renders the `discovered_brains` list a `discover_brains` config_ack carries
 // (only present on that ack — see BrainControl._config_set). Loopback-only,
-// server-side; see brain_discovery.py and README's "Finding your local model
-// server". Never writes brains.json itself — this offers a snippet the user
-// pastes in by hand, so a scan can't clobber a carefully hand-edited config.
+// server-side, and this button has no LAN mode: brain_discovery.discover()
+// called with no arguments never leaves loopback, and --host/--cidr are the
+// CLI's alone (see brain_discovery.py's ruling and README's "Finding your
+// local model server"). Say so in the empty state rather than letting a
+// reader conclude the network was searched and came up empty.
+// Never writes brains.json itself — this offers a snippet the user pastes in
+// by hand, so a scan can't clobber a carefully hand-edited config.
 function renderBrainScanResults(results) {
   els.brainScanResults.innerHTML = "";
   if (!results.length) {
     els.brainScanResults.textContent =
-      "No local model server answered on the usual ports (Ollama, LM Studio, llama.cpp, vLLM/LocalAI, KoboldCpp, Jan). Set BRAIN_DISCOVERY_URLS if yours runs somewhere else, or make sure it's running.";
+      "No model server answered on the usual ports on this box (Ollama, LM Studio, llama.cpp, vLLM/LocalAI, KoboldCpp, Jan). This scan is localhost-only. If yours runs on another machine, scan it from a terminal: python3 patches/brain_discovery.py --host <ip>. For an unusual port, set BRAIN_DISCOVERY_URLS.";
     return;
   }
   results.forEach((r) => {

@@ -31,8 +31,12 @@ kept as an instant rollback (see below).
 
 - `brain_discovery.py` — `speech_to_speech/brain_discovery.py`. Probes the
   usual local model-server ports (Ollama, LM Studio, llama.cpp, vLLM/LocalAI,
-  KoboldCpp, Jan; loopback-only, `BRAIN_DISCOVERY_URLS` overrides) and reports
-  what answered. Dependency-light on purpose — stdlib + httpx only, no
+  KoboldCpp, Jan) and reports what answered. Loopback-only unless the CLI is
+  given `--host HOST` (repeatable) or `--cidr BLOCK` (private space only, a
+  `/24` at most, refused rather than truncated); `BRAIN_DISCOVERY_URLS` still
+  names full base URLs and `--host`/`--cidr` beat it. `discover()` called with
+  no arguments never leaves loopback — that's the contract `brain_control.py`
+  and the cockpit's scan button depend on. Dependency-light on purpose — stdlib + httpx only, no
   `speech_to_speech.*` imports of its own — so `python3 patches/brain_discovery.py`
   runs standalone before any pipeline exists (see `setup.sh` and README's
   "Finding your local model server"). `brain_control.py` imports FROM this
