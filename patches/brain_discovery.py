@@ -13,8 +13,8 @@ is stuck at "the pipeline won't start because no brain is reachable", and
 can't get to a running panel to ask it what's running. Run it directly:
 
     python3 patches/brain_discovery.py                     # loopback only
-    python3 patches/brain_discovery.py --host 192.168.1.20 # one LAN host
-    python3 patches/brain_discovery.py --cidr 192.168.1.0/24
+    python3 patches/brain_discovery.py --host 10.0.0.20 # one LAN host
+    python3 patches/brain_discovery.py --cidr 10.0.0.0/24
 
 `_extract_model_ids`/`MAX_PROBED_MODEL_IDS` live here (not in brain_control.py)
 for that reason: brain_control.py imports FROM this module, never the other
@@ -316,8 +316,8 @@ def brains_json_snippet(hit: dict[str, Any]) -> str:
 _EPILOG = """\
 examples:
   brain_discovery.py                              loopback only (the default)
-  brain_discovery.py --host 192.168.1.20 --host 192.168.1.30
-  brain_discovery.py --cidr 192.168.1.0/24        private blocks only, /24 max
+  brain_discovery.py --host 10.0.0.20 --host 10.0.0.30
+  brain_discovery.py --cidr 10.0.0.0/24        private blocks only, /24 max
   BRAIN_DISCOVERY_URLS=http://box:9000/v1 brain_discovery.py
 
 BRAIN_DISCOVERY_URLS names full base URLs (comma-separated) and is the way to
@@ -453,7 +453,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("needs OLLAMA_HOST=0.0.0.0, llama-server needs --host 0.0.0.0),")
             print("and that no firewall is in the way. If it listens on a port this")
             print("tool doesn't know, name the full URL instead:")
-            print("  BRAIN_DISCOVERY_URLS=http://192.168.1.20:9000/v1 python3 patches/brain_discovery.py")
+            print("  BRAIN_DISCOVERY_URLS=http://10.0.0.20:9000/v1 python3 patches/brain_discovery.py")
             return 0
         print("No local model server answered on the usual ports:")
         _print_candidates(urls)
@@ -463,8 +463,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("  BRAIN_DISCOVERY_URLS=http://localhost:9000/v1 python3 patches/brain_discovery.py")
         print()
         print("If it runs on another box, scan that instead, e.g.:")
-        print("  python3 patches/brain_discovery.py --host 192.168.1.20")
-        print("  python3 patches/brain_discovery.py --cidr 192.168.1.0/24")
+        print("  python3 patches/brain_discovery.py --host 10.0.0.20")
+        print("  python3 patches/brain_discovery.py --cidr 10.0.0.0/24")
         return 0
 
     where = "model server(s)" if lan_mode else "local model server(s)"

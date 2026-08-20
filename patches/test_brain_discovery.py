@@ -256,11 +256,11 @@ def test_discover_empty_url_list_is_a_no_op():
 
 
 def test_candidates_for_hosts_covers_every_known_port_per_host():
-    urls = brain_discovery.candidates_for_hosts(["192.168.1.20", "192.168.1.30"])
+    urls = brain_discovery.candidates_for_hosts(["10.0.0.20", "10.0.0.30"])
     assert len(urls) == 2 * len(brain_discovery._PORT_HINTS)
     for port in brain_discovery._PORT_HINTS:
-        assert f"http://192.168.1.20:{port}/v1" in urls
-        assert f"http://192.168.1.30:{port}/v1" in urls
+        assert f"http://10.0.0.20:{port}/v1" in urls
+        assert f"http://10.0.0.30:{port}/v1" in urls
 
 
 def test_candidates_for_hosts_dedupes_repeated_hosts():
@@ -275,22 +275,22 @@ def test_candidates_for_hosts_brackets_ipv6_and_still_hints_the_port():
 
 
 def test_expand_cidr_returns_usable_hosts():
-    hosts = brain_discovery.expand_cidr("192.168.1.0/30")
-    assert hosts == ["192.168.1.1", "192.168.1.2"]
+    hosts = brain_discovery.expand_cidr("10.0.0.0/30")
+    assert hosts == ["10.0.0.1", "10.0.0.2"]
 
 
 def test_expand_cidr_accepts_a_single_address_block():
-    assert brain_discovery.expand_cidr("192.168.1.20/32") == ["192.168.1.20"]
+    assert brain_discovery.expand_cidr("10.0.0.20/32") == ["10.0.0.20"]
 
 
 def test_expand_cidr_allows_a_full_slash_24():
-    hosts = brain_discovery.expand_cidr("192.168.1.0/24")
+    hosts = brain_discovery.expand_cidr("10.0.0.0/24")
     assert len(hosts) <= brain_discovery.MAX_CIDR_HOSTS
-    assert hosts[0] == "192.168.1.1"
+    assert hosts[0] == "10.0.0.1"
 
 
 def test_expand_cidr_rejects_garbage():
-    for bad in ["not-a-cidr", "192.168.1.0/33", "999.1.1.1/24", ""]:
+    for bad in ["not-a-cidr", "10.0.0.0/33", "999.1.1.1/24", ""]:
         try:
             brain_discovery.expand_cidr(bad)
         except ValueError:
@@ -343,7 +343,7 @@ def test_resolve_targets_names_the_env_override_as_its_scope(monkeypatch):
 
 def test_resolve_targets_host_flags_are_repeatable(monkeypatch):
     monkeypatch.delenv("BRAIN_DISCOVERY_URLS", raising=False)
-    urls, scope = _targets(["--host", "192.168.1.20", "--host", "192.168.1.30"])
+    urls, scope = _targets(["--host", "10.0.0.20", "--host", "10.0.0.30"])
     assert len(urls) == 2 * len(brain_discovery._PORT_HINTS)
     assert "LAN target set" in scope
     assert "2 host(s)" in scope
@@ -353,22 +353,22 @@ def test_resolve_targets_host_flags_beat_the_env_override(monkeypatch):
     """--host is a more explicit act than an inherited env var; it must not be
     silently merged with, or lose to, BRAIN_DISCOVERY_URLS."""
     monkeypatch.setenv("BRAIN_DISCOVERY_URLS", "http://box:9000/v1")
-    urls, _ = _targets(["--host", "192.168.1.20"])
+    urls, _ = _targets(["--host", "10.0.0.20"])
     assert "http://box:9000/v1" not in urls
-    assert "http://192.168.1.20:11434/v1" in urls
+    assert "http://10.0.0.20:11434/v1" in urls
 
 
 def test_resolve_targets_cidr_expands_to_every_host_and_port(monkeypatch):
     monkeypatch.delenv("BRAIN_DISCOVERY_URLS", raising=False)
-    urls, scope = _targets(["--cidr", "192.168.1.0/30"])
+    urls, scope = _targets(["--cidr", "10.0.0.0/30"])
     assert len(urls) == 2 * len(brain_discovery._PORT_HINTS)
     assert "LAN target set" in scope
 
 
 def test_resolve_targets_merges_host_and_cidr_without_duplicates(monkeypatch):
     monkeypatch.delenv("BRAIN_DISCOVERY_URLS", raising=False)
-    urls, _ = _targets(["--host", "192.168.1.1", "--cidr", "192.168.1.0/30"])
-    # 192.168.1.1 is in the block too -- two distinct hosts, not three.
+    urls, _ = _targets(["--host", "10.0.0.1", "--cidr", "10.0.0.0/30"])
+    # 10.0.0.1 is in the block too -- two distinct hosts, not three.
     assert len(urls) == 2 * len(brain_discovery._PORT_HINTS)
 
 
@@ -401,25 +401,25 @@ def test_main_lan_run_states_lan_scope_and_probes_the_hosts(monkeypatch, capsys)
 
     def _fake_discover(timeout_s=1.0, urls=None):
         seen["urls"] = list(urls or [])
-        return [{"base_url": "http://192.168.1.20:11434/v1", "models": ["llama3"], "hint": "Ollama"}]
+        return [{"base_url": "http://10.0.0.20:11434/v1", "models": ["llama3"], "hint": "Ollama"}]
 
     monkeypatch.setattr(brain_discovery, "discover", _fake_discover)
-    assert brain_discovery.main(["--host", "192.168.1.20"]) == 0
+    assert brain_discovery.main(["--host", "10.0.0.20"]) == 0
     out = capsys.readouterr().out
     assert "LAN target set" in out
     assert "localhost only" not in out
-    assert "http://192.168.1.20:11434/v1" in seen["urls"]
+    assert "http://10.0.0.20:11434/v1" in seen["urls"]
     # a hit still prints a ready-to-paste brains.json entry
-    assert '"base_url": "http://192.168.1.20:11434/v1"' in out
+    assert '"base_url": "http://10.0.0.20:11434/v1"' in out
 
 
 def test_main_lan_run_with_no_hits_says_lan_not_localhost(monkeypatch, capsys):
     monkeypatch.delenv("BRAIN_DISCOVERY_URLS", raising=False)
     monkeypatch.setattr(brain_discovery, "discover", lambda timeout_s=1.0, urls=None: [])
-    assert brain_discovery.main(["--host", "192.168.1.20"]) == 0
+    assert brain_discovery.main(["--host", "10.0.0.20"]) == 0
     out = capsys.readouterr().out
     assert "No model server answered on the scanned LAN targets" in out
-    assert "http://192.168.1.20:11434/v1" in out
+    assert "http://10.0.0.20:11434/v1" in out
 
 
 def test_main_bad_cidr_exits_nonzero_without_scanning(monkeypatch, capsys):

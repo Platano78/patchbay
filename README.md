@@ -85,10 +85,10 @@ If your model server runs on another box, ask for it explicitly:
 
 ```bash
 # one or more named hosts (repeat --host)
-python3 patches/brain_discovery.py --host 192.168.1.20 --host 192.168.1.30
+python3 patches/brain_discovery.py --host 10.0.0.20 --host 10.0.0.30
 
 # or a whole private block, same known port list
-python3 patches/brain_discovery.py --cidr 192.168.1.0/24
+python3 patches/brain_discovery.py --cidr 10.0.0.0/24
 ```
 
 `--cidr` takes **private address space only** and at most a `/24` (256

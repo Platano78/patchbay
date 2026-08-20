@@ -107,10 +107,10 @@ explicitly:
 
 ```bash
 ~/speech-to-speech-main/.venv/bin/python3 patches/brain_discovery.py \
-  --host 192.168.1.20
+  --host 10.0.0.20
 # or sweep a private block (a /24 at most):
 ~/speech-to-speech-main/.venv/bin/python3 patches/brain_discovery.py \
-  --cidr 192.168.1.0/24
+  --cidr 10.0.0.0/24
 ```
 
 See README's "Finding your local model server" for what it probes, the
