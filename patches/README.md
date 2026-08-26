@@ -1,21 +1,19 @@
 # Persona / brain-selector patch pack
 
-Task #12: in-UI persona + brain-selector panel for the voice agent.
+In-UI persona + brain-selector panel for the voice agent.
 
-Task #8 (2026-07-03): reinstalled from `github.com/huggingface/speech-to-speech`
-main into a fresh venv, pinned at commit `1e63f7e9343e491809d0d60e64f7ea551dbe845a`
-(2026-07-01), and ported this pack onto it. The live service now runs the
-`chat-completions` LLM backend (`speech_to_speech/LLM/chat_completions_language_model.py::ChatCompletionsApiModelHandler`,
-subclass of the new `LLM/base_openai_compatible_language_model.py::BaseOpenAICompatibleHandler`
-shared by both OpenAI-style handlers) instead of `responses-api`. The old
-0.2.10 install at `$HOME/speech-to-speech/.venv` is untouched and
-kept as an instant rollback (see below).
+Built against `github.com/huggingface/speech-to-speech` main, pinned at
+commit `1e63f7e9343e491809d0d60e64f7ea551dbe845a` (2026-07-01). The pipeline
+runs the `chat-completions` LLM backend
+(`speech_to_speech/LLM/chat_completions_language_model.py::ChatCompletionsApiModelHandler`,
+subclass of `LLM/base_openai_compatible_language_model.py::BaseOpenAICompatibleHandler`
+shared by both OpenAI-style handlers) instead of `responses-api`.
 
 ## Install
 
 - Repo: `$INSTALL_DIR` (default `$HOME/speech-to-speech-main`) — editable install,
   `.venv` there, python3.10, CPU-only torch/torchaudio 2.11.0 — no CUDA on this
-  box outside the external :8084 model.
+  box; the LLM runs on an external model server instead.
 - `faster-qwen3-tts[ggml]` is a base (non-Darwin) dependency and its
   `qwentts-cpp-python` PyPI wheel is CUDA-only; the CPU wheel had to be
   fetched by hand from
@@ -45,19 +43,47 @@ kept as an instant rollback (see below).
   `{"discover_brains": true}` over `config_set` (`brain_control.py`'s
   `_config_set`), surfaced in the settings panel as "Scan for local models".
 
+- `brain_lanes.py` — named lane TYPES for `brains.json` entries: a
+  `brains.json` entry is a config blob (`base_url`, `model`, `api_key_file`,
+  `api_key_var`, `available`) that assumes the reader already knows where
+  their model lives and which model id to use. An entry's optional `type`
+  field (e.g. `"openrouter"`) inherits that lane's documented `base_url` and
+  key-variable convention via `resolve_entry` — purely additive: an entry
+  with no `type`, or an unrecognized one, behaves exactly as it did before
+  this module existed. CLI:
+  `python3 patches/brain_lanes.py` (list the lane types),
+  `python3 patches/brain_lanes.py show <type>` (fields, key console URL, and
+  a paste-ready entry — plus live model ids for a lane whose `/models` needs
+  no key, e.g. OpenRouter/NIM), and
+  `python3 patches/brain_lanes.py check` (validate and probe every entry in a
+  real `brains.json`, resolving each key the same way the running pipeline
+  does). Dependency-light on purpose, same contract as `brain_discovery.py`:
+  stdlib + httpx only, no `speech_to_speech.*` imports, so it runs standalone
+  before a pipeline exists — but unlike `brain_discovery.py`, `httpx` is
+  imported *lazily* here, because `SETUP.md` points a stranger at this module
+  at step 0, before `./setup.sh` has built a venv; listing lane types and
+  `show`'s fields/entry work with nothing installed, only the live `/models`
+  calls need the network. The import direction is one-way — `brain_control.py`
+  imports FROM `brain_lanes.py` (`get_lane`, `resolve_entry`, `resolve_api_key`,
+  `missing_key_error`), never the reverse — that's what keeps this CLI
+  standalone. It prints; it never writes `brains.json`, same ruling as
+  `brain_discovery.py`: the file is the user's, and a tool that edits it
+  behind their back is a tool they cannot trust with their API keys.
+
 - `brain_control.py` — `speech_to_speech/brain_control.py`. Defines
   `BrainControl`, which handles `config_get`/`config_set` control messages:
   swapping the LLM backend (`client`/`model_name`/`_extra_body` — now on
   `BaseOpenAICompatibleHandler`, shared by both OpenAI-style handlers) live,
   updating the persona (`runtime_config.session.instructions`), and resetting
   chat history. Loads brain definitions from
-  `$HOME/speech-to-speech/brains.json`. Ported for #8: `_extra_body`
-  is now recomputed via `BaseOpenAICompatibleHandler._build_extra_body(base_url,
+  `$HOME/speech-to-speech/brains.json`. `_extra_body` is recomputed via
+  `BaseOpenAICompatibleHandler._build_extra_body(base_url,
   True, None)` (mirrors the base class's own `setup()` rule instead of
   reimplementing it) and a brain's API key can come from a literal `api_key`
   or be read lazily from `api_key_file` (env-style `VAR=value` lines) +
-  `api_key_var` — used for the Hermes shim's bearer token
-  (`~/.hermes/shim.env`, `HERMES_SHIM_TOKEN`). The token is never
+  `api_key_var` — used, for example, by a self-hosted shim's bearer token
+  (`HERMES_SHIM_TOKEN` is one such lane, shipped as an example; any brain can
+  use the same `api_key_file`/`api_key_var` pair). The token is never
   logged; `_resolve_model`'s `GET {base_url}/models` sends it as
   `Authorization: Bearer <key>` when present.
 
@@ -91,8 +117,8 @@ kept as an instant rollback (see below).
 
   ```json
   {"version": 2, "global": "…",
-   "brains": {"hermes": {"mode": "preset"},
-              "coder": {"mode": "custom", "text": "…"}}}
+   "brains": {"coder": {"mode": "custom", "text": "…"},
+              "frontier": {"mode": "preset"}}}
   ```
 
   Clearing is defined at every level: clearing a per-brain override removes
@@ -177,12 +203,12 @@ kept as an instant rollback (see below).
   guards `_lm_vars` selection the same way), the handler instance is located
   by `isinstance(h, BaseOpenAICompatibleHandler)` (was
   `isinstance(h, ResponsesApiModelHandler)`) and a `BrainControl` is wired
-  onto `websocket_streamer.control_callback`. #15: `LMOutputProcessor`'s
+  onto `websocket_streamer.control_callback`. `LMOutputProcessor`'s
   `setup_kwargs` now also passes `text_prompt_queue` (the queue feeding the
   LLM handler) so it can push a follow-up generation request after a tool
   call resolves.
 
-- `voice_tools.py` (#15, new) — `speech_to_speech/voice_tools.py`. Defines
+- `voice_tools.py` (new) — `speech_to_speech/voice_tools.py`. Defines
   `TOOL_DEFS` (weather / web search / QMD knowledge-base lookup, as
   Realtime-style function tool dicts) and `execute(name, kwargs) -> str`,
   which dispatches to the matching implementation under a hard per-tool
@@ -198,7 +224,7 @@ kept as an instant rollback (see below).
   merges/ranks/dedupes both sub-queries into one result list server-side, so
   no client-side merge step is needed.
 
-- `lm_output_processor.py` (#15) — `speech_to_speech/LLM/lm_output_processor.py`.
+- `lm_output_processor.py` — `speech_to_speech/LLM/lm_output_processor.py`.
   `process()` gained a `_run_tool_calls` step: when an `LLMResponseChunk`
   carries `tools`, each call is executed via `voice_tools.execute`, its
   output is recorded with `chat.append_tool_output`, and (if at least one
@@ -430,7 +456,7 @@ TLS try-block).
 
 Consolidating the HTTP clients was considered and rejected on the same
 grounds: the `httpx` call sites are one-liners whose timeouts are chosen per
-site — 5.0 s for a Hermes MCP call (`hermes_cockpit.py`), 2.0 s for a QMD
+site — 5.0 s for an optional agent-delegate MCP call (`hermes_cockpit.py`), 2.0 s for a QMD
 query and 1.5 s for a health probe (`voice_tools.py`), 3.0 s for a brain
 reachability probe (`brain_control.py`), and a streamed completion that
 enforces its own total-duration watchdog instead (`VOICE_STREAM_MAX_S` in
@@ -440,8 +466,9 @@ them, so a common client would add a fourth deploy path to save nothing.
 ## Files OUTSIDE the package (survive reinstall — not part of this pack)
 
 - `$HOME/speech-to-speech/brains.json` — brain registry (label,
-  base_url, model, availability, notes, optional `api_key`/`api_key_file`+
-  `api_key_var`). `hermes` flipped to `available: true` for #8.
+  base_url, model, availability, notes, optional `type` (a `brain_lanes.py`
+  lane key that fills in `base_url`/`api_key_var`/`model` defaults for that
+  provider), optional `api_key`/`api_key_file`+`api_key_var`).
 
   `available` is configured intent — the user turned this lane on in the
   registry — and `_config_set`/the panel never mutate it. `reachable` (`true`
@@ -456,7 +483,7 @@ them, so a common client would add a fourth deploy path to save nothing.
   panel never blocks a click on it.
 - `<patchbay-repo>/webclient/index.html` — settings panel UI
   (gear button, brain radio list, persona textarea, reset-chat button). No
-  protocol change was needed for #8 — the ws control-message shape is
+  protocol change was needed when switching LLM backends — the ws control-message shape is
   identical on both backends.
 
 ## Remote access / HTTPS (mic requires a secure context)

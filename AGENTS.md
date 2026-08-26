@@ -23,10 +23,10 @@ the browser UI it talks to over a WebSocket. Runs as systemd services on a LAN b
 | If the task is about… | Read (Inputs) | Skip |
 |---|---|---|
 | Audio path — streaming, barge-in, echo, turn-taking | `patches/s2s_pipeline.py`, `patches/echo_gate.py`, `patches/websocket_streamer.py` | `webclient/`, `docs/`, `bench-wavs/` |
-| Voice tools / brain + persona control | `patches/brain_control.py`, `patches/voice_tools.py`, `examples/tools/` | `webclient/`, audio-path files |
+| Voice tools / brain + persona control | `patches/brain_control.py`, `patches/brain_lanes.py`, `patches/voice_tools.py`, `examples/tools/` | `webclient/`, audio-path files |
 | Cockpit UI, avatar, themes | `webclient/index.html`, `webclient/serve.py`, `webclient/avatar/`, `webclient/themes/` | all of `patches/` |
 | Deploy, services, rollback | `patches/apply.sh`, `systemd/*.service.template`, **`CONTEXT.md`** (local-only; holds hosts + deploy discipline) | source files — deploy is copy+restart, not a code change |
-| Tests / verification | `patches/test_*.py` (10 files), `webclient/test_webclient.py` | everything else |
+| Tests / verification | `patches/test_*.py` (22 files), `webclient/test_webclient.py` | everything else |
 | Specs, contracts, prior research | `docs/plans/`, `docs/contracts/`, `docs/research/` | source; `docs/borrows/` unless the task names a borrow |
 
 ## Verbs
@@ -35,6 +35,10 @@ the browser UI it talks to over a WebSocket. Runs as systemd services on a LAN b
 
 ## Naming conventions (locate files, don't grep blindly)
 - `patches/*.py` = the patch pack (the real source). Nothing here is live until `apply.sh` runs.
+  Editing an existing module needs nothing further; **adding** a new one also needs an entry in
+  `apply.sh`'s `FILES` array, or it deploys nowhere and the first import of it crashes the live
+  service — `patches/test_apply_pack.py` enforces this (that asymmetry is what shipped v2.6.0
+  unbootable).
 - `patches/test_<module>.py` = tests, paired 1:1 with the module they cover.
 - `docs/plans/*_spec.md` = ratified specs · `docs/plans/backlog.md` = the queue.
 - `*.service.template` = systemd units; the rendered copies live on the box, not in the repo.

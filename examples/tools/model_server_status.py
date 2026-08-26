@@ -9,7 +9,7 @@ import httpx
 
 # EDIT ME: label -> /v1/models URL for each server you want probed.
 SERVERS = [
-    ("the model server", "http://localhost:8084/v1/models"),
+    ("the model server", "http://localhost:11434/v1/models"),
 ]
 
 TOOL_DEF = {

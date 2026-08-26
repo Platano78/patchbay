@@ -1,10 +1,10 @@
 """Drop-in voice tool: describe (or scan -> list) what the user's camera sees, via
-the local Gemma-12B vision endpoint (:8084, multimodal). Server-side, off the audio
-thread, TTS-safe plain-text result - same contract as the other voice tools.
+a vision-capable (multimodal) OpenAI-compatible endpoint. Server-side, off the audio
+thread, TTS-safe plain-text result - same contract as the other voice tools. Most
+local text-only model servers do NOT support images - you need one that does.
 
-Two modes, chosen DETERMINISTICALLY from the request wording (pattern borrowed from the
-phonelinux/Embodiment IntentTriage.isCameraScan route - small models won't reliably
-pick a mode, so a regex decides, not the model):
+Two modes, chosen DETERMINISTICALLY from the request wording (small models won't
+reliably pick a mode on their own, so a regex decides, not the model):
   - describe (default): free-text 1-2 sentence answer - "for a human to hear".
   - scan/list: a json-schema-constrained {"items":[...]} -> spoken list - "for tools to
     consume" (the describe->do upgrade; NOT prompt-only, which drifts).
@@ -52,7 +52,7 @@ TIMEOUT_S = 20.0
 TOOL_LABEL = "camera view"
 
 _FRAME_PATH = os.environ.get("VOICE_CAMERA_FRAME", "/dev/shm/voice_camera_frame.jpg")
-_VISION_URL = os.environ.get("VISION_LLM_URL", "http://localhost:8084/v1/chat/completions")
+_VISION_URL = os.environ.get("VISION_LLM_URL", "http://localhost:11434/v1/chat/completions")
 _VISION_MODEL = os.environ.get("VISION_LLM_MODEL", "gemma4-12b")
 _MAX_FRAME_AGE_S = float(os.environ.get("VOICE_CAMERA_MAX_AGE_S", "10"))
 _MAX_CHARS = 600

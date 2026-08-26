@@ -230,7 +230,7 @@ the same way `test_webclient.py`'s contrast gate does.
 `.lcd-label` is the trap: the same class is used for nomenclature bare on
 the faceplate (`.selector-label`, `.stat .lcd-label`) *and* nomenclature
 inside a real `.lcd-window`/`.lcd-head` — cream is only correct in the
-second case. `.stat-strip` (`index.html:1517`) paints its own hardcoded dark
+second case. `.stat-strip` (`index.html:2276`) paints its own hardcoded dark
 gradient, so `.stat .lcd-label` counts as a powered surface despite sitting
 outside an explicit `.lcd-window` element; `.selector-label` doesn't, so it
 needs the ink treatment instead.
@@ -1185,11 +1185,8 @@ variable `Cinzel[wght].ttf` at weights 700 and 900, subsetted to
 
 `hacker` (terminal/green-on-black) is a shipped custom theme -
 `webclient/themes/hacker.css`, registered in `webclient/themes/themes.json`.
-Mostly a straight 23-token override plus a scanline overlay, so most of it is
-a valid worked example - but a couple of its rules (`.sessionRow`,
-`.sessionKey`, and an `#ptt.recording ~ #waveform` sibling-combinator rule)
-were written against the pre-port DOM and are now dead selectors: harmless
-no-ops, not something to copy. Check `webclient/themes/themes.json` (and,
+A straight 23-token override plus a scanline overlay, so it's a valid worked
+example throughout. Check `webclient/themes/themes.json` (and,
 if present, `webclient/themes/local/themes.json`) for the live list rather
 than trusting a name list in this doc - themes get added, removed, or moved
 to the local overlay over time.

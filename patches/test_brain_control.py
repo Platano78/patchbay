@@ -2221,7 +2221,7 @@ def test_a_stated_model_still_wins_over_the_lanes_default(tmp_path):
 def test_an_untyped_entry_survives_the_load_untouched(tmp_path):
     """The non-negotiable one: the existing deployment's brains.json has no
     `type` anywhere, and must load as exactly the dict it is on disk."""
-    raw = {"coder": {"base_url": "http://10.0.0.7:8084/v1", "model": "auto", "available": True}}
+    raw = {"coder": {"base_url": "http://10.0.0.7:11434/v1", "model": "auto", "available": True}}
     bc = _brain_control_with(tmp_path, raw)
 
     assert bc.brains == raw
@@ -2452,7 +2452,7 @@ def test_an_untyped_entry_never_gets_the_key_check(tmp_path, monkeypatch):
     """The live deployment's own brains.json has no `type`; it must switch
     exactly as it always did, key or no key."""
     bc = _brain_control_with(
-        tmp_path, {"coder": {"base_url": "http://10.0.0.7:8084/v1", "model": "m", "available": True}}
+        tmp_path, {"coder": {"base_url": "http://10.0.0.7:11434/v1", "model": "m", "available": True}}
     )
     monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: "m")
     _stub_switch(monkeypatch)

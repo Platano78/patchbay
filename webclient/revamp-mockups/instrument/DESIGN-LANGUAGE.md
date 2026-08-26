@@ -105,7 +105,7 @@ not a "rounded card."
 - No soft-blur rounded-2xl cards (machined 0-4px radii; meter glass curve and physical round
   controls are the only exceptions).
 - One accent family only - the warm amber/red-zone. No purple/blue AI glow, no gradient text.
-- No pure black - warm-dark floor `#0a0806` / `--room`.
+- No pure black - warm-dark floor (`--room`, `#0d0b09`).
 - No `transition: all`.
 
 ## Screens in this set

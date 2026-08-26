@@ -14,6 +14,7 @@ import ipaddress
 import json
 import os
 import re
+import subprocess
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.normpath(os.path.join(HERE, ".."))
@@ -30,16 +31,54 @@ EXAMPLE_PATH = os.path.join(REPO_ROOT, "brains.json.example")
 # into shipped files, and nothing documents it as a default anyone would run.
 OWNER_ONLY_PORTS = {"8084"}
 
-# Shipped files scanned as TEXT for an owner-only port. brains.json.example is
-# checked structurally below (it is JSON, with a base_url per entry); a script
-# can name a port anywhere, so these are grepped line by line instead.
-#
-# setup.sh earns its place here: it printed
-# `--responses_api_base_url http://localhost:8084/v1` in the "Next steps"
-# block after every successful install -- the first thing a stranger reads,
-# naming a port only the maintainer's box serves, three lines below a
-# discovery scan that had just told them where their model server really is.
-TEXT_SCANNED_FILES = ("setup.sh",)
+# Mirrors scripts/export-public.sh's EXCLUDES (that script itself lives under
+# one of these prefixes and is not importable from here, so this list is kept
+# in step by hand, not by import). Prefix-matched the same way: a `git
+# ls-files` entry is excluded when it equals or starts with one of these.
+EXPORT_EXCLUDE_PREFIXES = (
+    "docs/plans/",  # maintainer notes, not in the public export
+    "docs/research/",  # maintainer notes, not in the public export
+    "_pickup-handoff.md",
+    "scripts/",
+    "webclient/revamp-mockups/INDEX.html",
+    "webclient/revamp-mockups/main-A-avatar-state/",
+    "webclient/revamp-mockups/main-B-avatar-plus-wave/",
+    "webclient/revamp-mockups/main-C-needle/",
+    "webclient/revamp-mockups/mobile/",
+    "webclient/revamp-mockups/neutral/",
+    "webclient/revamp-mockups/settings-tiered/",
+    "webclient/revamp-mockups/firstrun/",
+    "webclient/revamp-mockups/screenshots/",
+)
+
+
+def _exported_text_files():
+    """`(path, lines)` for every tracked file the public export actually
+    ships, readable as UTF-8 text.
+
+    Built from `git ls-files` minus `EXPORT_EXCLUDE_PREFIXES`, so the port
+    guard scans what a stranger's checkout really contains rather than a
+    hand-picked handful of files (that hand-picked list -- just `setup.sh` --
+    is exactly what missed `patches/README.md` and
+    `examples/tools/model_server_status.py` shipping port 8084 as a copy-pasteable
+    default). A file that isn't valid UTF-8 (a binary asset) is skipped: this
+    guard is about a port named in text, not about enumerating binaries.
+    """
+    out = subprocess.run(
+        ["git", "ls-files", "-z"], cwd=REPO_ROOT, capture_output=True, check=True
+    ).stdout
+    for raw in out.split(b"\x00"):
+        if not raw:
+            continue
+        f = raw.decode("utf-8")
+        if any(f == ex.rstrip("/") or f.startswith(ex) for ex in EXPORT_EXCLUDE_PREFIXES):
+            continue
+        try:
+            with open(os.path.join(REPO_ROOT, f), encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except (UnicodeDecodeError, OSError):
+            continue
+        yield f, lines
 
 
 def _load():
@@ -78,13 +117,12 @@ def test_no_lan_addresses_or_owner_ports():
         )
 
 
-def test_shipped_scripts_name_no_owner_only_port():
+def test_shipped_files_name_no_owner_only_port():
     """A port banned from brains.json.example must not reach a stranger
-    through a script either -- same defect, different file."""
-    for name in TEXT_SCANNED_FILES:
-        path = os.path.join(REPO_ROOT, name)
-        with open(path, encoding="utf-8") as f:
-            lines = f.readlines()
+    through any other shipped file either -- same defect, different file.
+    Widened 2026-08-26 (Slice G) from a hand-picked `("setup.sh",)` tuple to
+    every file the public export actually ships."""
+    for name, lines in _exported_text_files():
         for lineno, line in enumerate(lines, 1):
             for port in OWNER_ONLY_PORTS:
                 assert f":{port}" not in line, (
