@@ -9,7 +9,8 @@ bytes of audio instead of an error.
 
 This module asks the ACTIVE backend instead, for exactly three questions --
 `voices`, `can_clone`, `accepts_instructions` -- and nothing else. See
-`docs/plans/tts-capability-seam_spec.md` for the wire facts this is built on.
+`docs/plans/tts-capability-seam_spec.md` (maintainer notes, not in the public export)
+for the wire facts this is built on.
 """
 
 from __future__ import annotations

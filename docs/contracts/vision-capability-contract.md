@@ -68,7 +68,7 @@ do **not** prompt-only (small models drift/add prose).
 
 ## 5. Implementation pointers
 - **Cockpit**: `voice-tools/look.py` (describe + scan), `websocket_streamer.py` `camera_frame` →
-  `/dev/shm`, `webclient/index.html` camera toggle. Spec: `patchbay/docs/plans/camera-vision-lane_spec.md`.
+  `/dev/shm`, `webclient/index.html` camera toggle. Spec: `patchbay/docs/plans/camera-vision-lane_spec.md` (maintainer notes, not in the public export).
 - **Phone-embodiment client**: `IntentTriage.kt` (`isCameraVisual`/`isCameraScan`), `CameraLook*`, `CameraController`
   (describe half + LIST_SCHEMA), `llama_jni` GBNF path. Spec: `embodiment/docs/camera-vision_spec.md`.
   Memory: [[embodiment-camera-vision]].

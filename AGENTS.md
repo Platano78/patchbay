@@ -40,6 +40,9 @@ the browser UI it talks to over a WebSocket. Runs as systemd services on a LAN b
 - `*.service.template` = systemd units; the rendered copies live on the box, not in the repo.
 - `CONTEXT.md` / `NEXT-SESSION.md` = **local-only, git-excluded.** Present in a WSL clone,
   absent from the public repo. Read CONTEXT.md first for anything host- or deploy-shaped.
+- `docs/plans/` / `docs/research/` = **maintainer-only, absent from the public repo**
+  (excluded by `scripts/export-public.sh`). Comments in shipped files that point into them
+  are marked `maintainer notes, not in the public export`.
 - Skip by default: `bench-wavs/`, `__pycache__/`, `.pytest_cache/`, `.ruff_cache/`.
 
 ## Fallback law

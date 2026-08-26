@@ -465,6 +465,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("If it runs on another box, scan that instead, e.g.:")
         print("  python3 patches/brain_discovery.py --host 10.0.0.20")
         print("  python3 patches/brain_discovery.py --cidr 10.0.0.0/24")
+        print()
+        print("Don't have a model server anywhere yet? Install Ollama")
+        print("(https://ollama.com), `ollama pull llama3.2`, then run this again --")
+        print("or use a hosted provider instead (`python3 patches/brain_lanes.py")
+        print("show openrouter`).")
         return 0
 
     where = "model server(s)" if lan_mode else "local model server(s)"

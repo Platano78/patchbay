@@ -22,7 +22,24 @@ EXAMPLE_PATH = os.path.join(REPO_ROOT, "brains.json.example")
 # Ports the owner's private fleet actually uses -- never allowed in the
 # shipped example, regardless of host, so the owner's setup can't drift back
 # into the file strangers copy.
-OWNER_ONLY_PORTS = {"8084", "8087"}
+#
+# 8087 was on this list and came OFF it: `docs/agent-lane.md` publishes
+# `http://localhost:8087/v1/chat/completions` as the documented default for
+# HERMES_SHIM_URL, so it is public API any user may run -- not a leaked
+# private port. 8084 stays: it is one private box's model server that leaked
+# into shipped files, and nothing documents it as a default anyone would run.
+OWNER_ONLY_PORTS = {"8084"}
+
+# Shipped files scanned as TEXT for an owner-only port. brains.json.example is
+# checked structurally below (it is JSON, with a base_url per entry); a script
+# can name a port anywhere, so these are grepped line by line instead.
+#
+# setup.sh earns its place here: it printed
+# `--responses_api_base_url http://localhost:8084/v1` in the "Next steps"
+# block after every successful install -- the first thing a stranger reads,
+# naming a port only the maintainer's box serves, three lines below a
+# discovery scan that had just told them where their model server really is.
+TEXT_SCANNED_FILES = ("setup.sh",)
 
 
 def _load():
@@ -59,3 +76,18 @@ def test_no_lan_addresses_or_owner_ports():
         assert port not in OWNER_ONLY_PORTS, (
             f"{name}: base_url {base_url!r} uses an owner-only port {port}"
         )
+
+
+def test_shipped_scripts_name_no_owner_only_port():
+    """A port banned from brains.json.example must not reach a stranger
+    through a script either -- same defect, different file."""
+    for name in TEXT_SCANNED_FILES:
+        path = os.path.join(REPO_ROOT, name)
+        with open(path, encoding="utf-8") as f:
+            lines = f.readlines()
+        for lineno, line in enumerate(lines, 1):
+            for port in OWNER_ONLY_PORTS:
+                assert f":{port}" not in line, (
+                    f"{name}:{lineno} names owner-only port {port}, which no "
+                    f"stranger's box serves: {line.strip()!r}"
+                )

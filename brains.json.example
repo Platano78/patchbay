@@ -1,24 +1,27 @@
 {
   "local": {
     "label": "Local — Ollama",
+    "type": "openai-compatible",
     "base_url": "http://localhost:11434/v1",
     "model": "auto",
     "available": true
   },
   "local-alt": {
     "label": "Local — llama.cpp / LM Studio",
+    "type": "openai-compatible",
     "base_url": "http://localhost:8080/v1",
     "model": "auto",
     "available": false,
-    "note": "llama.cpp's llama-server defaults to :8080; LM Studio's local server defaults to :1234; a llama.cpp router setup is often :8081. Point base_url at whichever one you run."
+    "note": "llama.cpp's llama-server defaults to :8080; LM Studio's local server defaults to :1234; a llama.cpp router setup is often :8081. Point base_url at whichever one you run, or run `python3 patches/brain_discovery.py` to find it."
   },
   "frontier": {
-    "label": "Frontier — hosted model (any OpenAI-compatible endpoint)",
+    "label": "Frontier — OpenRouter",
+    "type": "openrouter",
     "base_url": "https://openrouter.ai/api/v1",
-    "model": "<YOUR_FRONTIER_MODEL>",
-    "api_key_file": "<PATH>/openrouter.env",
+    "model": "<OPENROUTER_MODEL_ID>",
+    "api_key_file": "/path/to/openrouter.env",
     "api_key_var": "OPENROUTER_API_KEY",
     "available": false,
-    "note": "set your key file and model, then flip available to true. (This lane was previously named \"claude\"; an old brains.json using that key keeps working — brains.json keys are free-form.)"
+    "note": "Put your key in a mode-0600 file as OPENROUTER_API_KEY=..., point api_key_file at it by absolute path, pick a model id, then flip available to true. `python3 patches/brain_lanes.py show openrouter` prints live model ids; `show nvidia-nim` and `show anthropic` are the other hosted lanes, and `show agent` is the delegation lane."
   }
 }

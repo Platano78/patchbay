@@ -28,7 +28,7 @@ REMOTE_SAMPLE_RATE = 24000
 
 # Zero-bytes-on-empty-`instructions` is a property of ONE VoiceDesign build we
 # probed, not every OpenAI-`/v1/audio/speech` server (qwen CustomVoice is happy
-# with the field absent -- see docs/plans/tts-capability-seam_spec.md). So this
+# with the field absent -- see docs/plans/tts-capability-seam_spec.md, maintainer notes, not in the public export). So this
 # is no longer a universal default: by default no instructions are sent at all
 # (owner ruling 2026-08-25 -- a fixed neutral instruct on every request IS a
 # one-string instruct layer, and the voice is meant to come back free-flowing).
@@ -307,7 +307,7 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
         # say AND the active backend actually wants it -- a backend that
         # declares accepts_instructions: false (e.g. a CustomVoice model) is
         # honored even if an operator configured one. See DEFAULT_INSTRUCTIONS
-        # and docs/plans/tts-capability-seam_spec.md.
+        # and docs/plans/tts-capability-seam_spec.md (maintainer notes, not in the public export).
         if self.instructions and tts_capabilities.get_capabilities(self).accepts_instructions:
             payload["instructions"] = self.instructions
 

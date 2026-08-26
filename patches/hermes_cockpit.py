@@ -41,6 +41,10 @@ _SHIM_TIMEOUT_S = 900.0
 
 _POLL_ACTIVE_S = 2.0
 _POLL_IDLE_S = 10.0
+# Backoff cap while the MCP endpoint stays unreachable and idle: doubling from
+# _POLL_IDLE_S would otherwise grow unbounded, and 60s is still frequent
+# enough to notice an agent coming back without hammering a dead port.
+_POLL_BACKOFF_MAX_S = 60.0
 _BASELINE_PAGE = 50
 _BASELINE_MAX_PAGES = 50  # safety valve while draining history to find the live tip
 
@@ -165,6 +169,18 @@ class HermesCockpit:
         # BrainControl.tts_queue: announcing is simply unavailable then.
         self.tts_queue = tts_queue
         self.hermes_ok = True
+        # Consecutive transport-failure counter (reset to 0 on any successful
+        # _mcp_call): drives both the "warn once, then go quiet" log
+        # suppression and the idle-poll backoff below. Deliberately NOT
+        # incremented for a payload-level {"error": ...} response -- that
+        # path means something answered and is misbehaving, which stays at
+        # WARNING every time (see _mcp_call).
+        self._consecutive_transport_failures = 0
+        # Consecutive failed *poll iterations* while idle (distinct from the
+        # per-call counter above, which drives log suppression): drives the
+        # idle-poll backoff in _poll_loop. Reset to 0 by any successful
+        # iteration or whenever a delegation/approval makes polling active.
+        self._idle_failure_streak = 0
         self._cursor = 0
         self._baseline_done = False
         self._permissions: list[dict[str, Any]] = []
@@ -197,9 +213,28 @@ class HermesCockpit:
             resp.raise_for_status()
             payload = resp.json()
         except Exception as e:
-            logger.warning("HermesCockpit: MCP call %s failed: %s", method, e)
+            # No agent configured is the normal state for most self-hosters
+            # (SETUP.md step 6, docs/agent-lane.md), and this fires every
+            # idle poll -- so only the FIRST consecutive transport failure
+            # gets a WARNING; the rest are DEBUG. Any later success resets
+            # the counter, so a real outage still produces a fresh WARNING.
+            self._consecutive_transport_failures += 1
+            if self._consecutive_transport_failures == 1:
+                logger.warning(
+                    "HermesCockpit: MCP call %s to %s timed out or failed: %s -- this is expected if "
+                    "you haven't configured an agent; see docs/agent-lane.md and "
+                    "examples/agent-lane/verify_contract.py if you have. Further failures logged at DEBUG.",
+                    method,
+                    _MCP_URL,
+                    e,
+                )
+            else:
+                logger.debug("HermesCockpit: MCP call %s failed: %s", method, e)
             return None
+        self._consecutive_transport_failures = 0
         if "error" in payload:
+            # The endpoint answered -- something is present and misbehaving.
+            # Always WARNING, unlike the transport-failure path above.
             logger.warning("HermesCockpit: MCP call %s returned error: %s", method, payload["error"])
             return None
         return payload.get("result")
@@ -274,13 +309,32 @@ class HermesCockpit:
                     self._poll_once()
             except Exception:
                 logger.exception("HermesCockpit: poll iteration failed")
-            with self._delegation_lock:
-                active = self._delegation["active"]
-            # Never start normal polling from a half-drained cursor: retry the
-            # baseline at idle cadence until it fully succeeds, rather than
-            # falling through to _poll_once and replaying history.
-            interval = _POLL_ACTIVE_S if (active or self._permissions) else _POLL_IDLE_S
-            time.sleep(interval)
+            time.sleep(self._next_poll_interval())
+
+    def _next_poll_interval(self) -> float:
+        """Sleep interval for the next poll loop iteration. Pulled out of
+        `_poll_loop` so the backoff math is unit-testable without a real
+        `time.sleep`. Never start normal polling from a half-drained cursor:
+        the baseline retries at idle cadence (subject to the same backoff)
+        until it fully succeeds, rather than falling through to `_poll_once`
+        and replaying history."""
+        with self._delegation_lock:
+            active = self._delegation["active"]
+        if active or self._permissions:
+            # An active delegation or pending approvals always polls at the
+            # fast cadence -- backoff applies only to the failing-and-idle
+            # case below.
+            self._idle_failure_streak = 0
+            return _POLL_ACTIVE_S
+        if self.hermes_ok:
+            self._idle_failure_streak = 0
+            return _POLL_IDLE_S
+        # Bounded exponential backoff: 10s, 20s, 40s, 60s, 60s, ... A dead
+        # endpoint polled every 10s forever is wasted work (and a full
+        # _MCP_TIMEOUT_S wait each time); snaps straight back to
+        # _POLL_IDLE_S the moment a poll succeeds.
+        self._idle_failure_streak += 1
+        return min(_POLL_IDLE_S * (2 ** (self._idle_failure_streak - 1)), _POLL_BACKOFF_MAX_S)
     # -- Delegation ----------------------------------------------------------
 
     def _append_step(self, role: str, text: str) -> None:

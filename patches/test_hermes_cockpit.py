@@ -251,3 +251,175 @@ def test_finish_delegation_announces_and_schedules_with_current_generation(monke
     assert cockpit._delegation["active"] is False
     assert cockpit._delegation["status"] == "done"
     assert cockpit._delegation["result"] == "the result"
+
+
+# ── transport-failure log suppression + reset (D2) ───────────────────────
+
+
+class _RaisingClient:
+    """Stand-in for httpx.Client whose .post always raises -- simulates a
+    dead/unreachable MCP endpoint without touching the network."""
+
+    def __init__(self, *a, **kw):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def post(self, *a, **kw):
+        raise ConnectionError("nobody home")
+
+
+class _OkClient:
+    """Stand-in for httpx.Client whose .post always succeeds with an empty
+    JSON-RPC result -- simulates the endpoint recovering."""
+
+    def __init__(self, *a, **kw):
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def post(self, *a, **kw):
+        return _OkResponse()
+
+
+class _OkResponse:
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return {"jsonrpc": "2.0", "id": 1, "result": {"ok": True}}
+
+
+def test_mcp_call_first_transport_failure_warns_subsequent_are_debug(monkeypatch, caplog):
+    cockpit = _make_cockpit(monkeypatch)
+    monkeypatch.setattr(hermes_cockpit.httpx, "Client", _RaisingClient)
+
+    with caplog.at_level("DEBUG", logger="patches.hermes_cockpit"):
+        first = cockpit._mcp_call("events_poll", {})
+        second = cockpit._mcp_call("events_poll", {})
+        third = cockpit._mcp_call("events_poll", {})
+
+    assert first is None and second is None and third is None
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    debugs = [r for r in caplog.records if r.levelname == "DEBUG"]
+    assert len(warnings) == 1
+    assert len(debugs) == 2
+    assert cockpit._consecutive_transport_failures == 3
+
+
+def test_mcp_call_first_warning_names_url_and_docs(monkeypatch, caplog):
+    cockpit = _make_cockpit(monkeypatch)
+    monkeypatch.setattr(hermes_cockpit.httpx, "Client", _RaisingClient)
+
+    with caplog.at_level("DEBUG", logger="patches.hermes_cockpit"):
+        cockpit._mcp_call("events_poll", {})
+
+    msg = caplog.records[0].getMessage()
+    assert hermes_cockpit._MCP_URL in msg
+    assert "docs/agent-lane.md" in msg
+    assert "examples/agent-lane/verify_contract.py" in msg
+
+
+def test_mcp_call_success_resets_failure_counter_and_rewarn(monkeypatch, caplog):
+    cockpit = _make_cockpit(monkeypatch)
+    monkeypatch.setattr(hermes_cockpit.httpx, "Client", _RaisingClient)
+
+    with caplog.at_level("DEBUG", logger="patches.hermes_cockpit"):
+        cockpit._mcp_call("events_poll", {})  # 1st failure -> WARNING
+        cockpit._mcp_call("events_poll", {})  # 2nd failure -> DEBUG
+
+        monkeypatch.setattr(hermes_cockpit.httpx, "Client", _OkClient)
+        result = cockpit._mcp_call("events_poll", {})
+        assert result == {"ok": True}
+        assert cockpit._consecutive_transport_failures == 0
+
+        monkeypatch.setattr(hermes_cockpit.httpx, "Client", _RaisingClient)
+        cockpit._mcp_call("events_poll", {})  # fresh outage -> WARNING again
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2
+
+
+def test_mcp_call_payload_error_always_warns_and_does_not_touch_counter(monkeypatch, caplog):
+    cockpit = _make_cockpit(monkeypatch)
+
+    class _ErrorResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"jsonrpc": "2.0", "id": 1, "error": {"code": -1, "message": "boom"}}
+
+    class _ErrorClient(_OkClient):
+        def post(self, *a, **kw):
+            return _ErrorResponse()
+
+    monkeypatch.setattr(hermes_cockpit.httpx, "Client", _ErrorClient)
+
+    with caplog.at_level("DEBUG", logger="patches.hermes_cockpit"):
+        cockpit._mcp_call("events_poll", {})
+        cockpit._mcp_call("events_poll", {})
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 2  # every payload-error call warns, unlike transport failures
+    assert cockpit._consecutive_transport_failures == 0
+
+
+# ── idle-poll backoff (D2) ─────────────────────────────────────────────────
+
+
+def test_next_poll_interval_normal_idle_cadence_when_ok(monkeypatch):
+    cockpit = _make_cockpit(monkeypatch)
+    cockpit.hermes_ok = True
+    assert cockpit._next_poll_interval() == hermes_cockpit._POLL_IDLE_S
+    assert cockpit._idle_failure_streak == 0
+
+
+def test_next_poll_interval_backs_off_and_caps(monkeypatch):
+    cockpit = _make_cockpit(monkeypatch)
+    cockpit.hermes_ok = False
+
+    intervals = [cockpit._next_poll_interval() for _ in range(6)]
+
+    assert intervals == [10.0, 20.0, 40.0, 60.0, 60.0, 60.0]
+    assert all(i <= hermes_cockpit._POLL_BACKOFF_MAX_S for i in intervals)
+
+
+def test_next_poll_interval_snaps_back_on_success(monkeypatch):
+    cockpit = _make_cockpit(monkeypatch)
+    cockpit.hermes_ok = False
+    for _ in range(3):
+        cockpit._next_poll_interval()
+    assert cockpit._idle_failure_streak == 3
+
+    cockpit.hermes_ok = True
+    assert cockpit._next_poll_interval() == hermes_cockpit._POLL_IDLE_S
+    assert cockpit._idle_failure_streak == 0
+
+
+def test_next_poll_interval_active_delegation_ignores_backoff(monkeypatch):
+    cockpit = _make_cockpit(monkeypatch)
+    cockpit.hermes_ok = False
+    cockpit._idle_failure_streak = 4  # pretend we were already backed off
+    cockpit._delegation["active"] = True
+
+    assert cockpit._next_poll_interval() == hermes_cockpit._POLL_ACTIVE_S
+    assert cockpit._idle_failure_streak == 0
+
+
+def test_next_poll_interval_pending_approvals_ignore_backoff(monkeypatch):
+    cockpit = _make_cockpit(monkeypatch)
+    cockpit.hermes_ok = False
+    cockpit._idle_failure_streak = 4
+    cockpit._permissions = [{"id": "p1"}]
+
+    assert cockpit._next_poll_interval() == hermes_cockpit._POLL_ACTIVE_S
+    assert cockpit._idle_failure_streak == 0

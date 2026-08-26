@@ -53,7 +53,10 @@ you at install time.
 - The LLM ("brain") is any OpenAI-compatible `chat-completions` endpoint —
   local (llama.cpp, vLLM, Ollama, etc.) or hosted. `patches/brain_control.py`
   lets you register several brains in `brains.json` and hot-swap between them
-  from the cockpit UI without restarting the service.
+  from the cockpit UI without restarting the service. A brain entry can carry
+  a `"type"` (`openai-compatible`, `openrouter`, `nvidia-nim`, `anthropic`,
+  `agent`) that supplies its `base_url` and `api_key_var` for you — see
+  *Hosted brains* below.
 - A brain's endpoint can serve more than one model — an NVIDIA NIM endpoint
   serves hundreds, a llama.cpp router a handful — so `brains.json`'s `model`
   field is only the *configured default*. Add a `"models": ["id", ...]` array
@@ -109,6 +112,55 @@ in). Also reachable live, once the pipeline is up: the settings panel's
 "Scan for local models" button under **Brain**, for adding a second brain
 without a restart — that button is loopback-only, the LAN modes are the
 CLI's.
+
+### Hosted brains
+
+Prefer to rent a model instead of running one? A `brains.json` entry can
+carry a `"type"` field — `openai-compatible` (the default, for your own
+server), `openrouter`, `nvidia-nim`, or `anthropic` — and the type supplies
+that provider's `base_url`, `api_key_var`, and (where it has one) a default
+model, so you don't have to look them up yourself. `python3
+patches/brain_lanes.py show <type>` prints the required fields, where to get
+a key, and a paste-ready entry; for example:
+
+```
+$ python3 patches/brain_lanes.py show openrouter
+OpenRouter
+  type        openrouter   (kind: hosted)
+  base_url    https://openrouter.ai/api/v1   -- supplied by the type; you may omit it
+  API key     REQUIRED, as OPENROUTER_API_KEY
+              get one at https://openrouter.ai/keys
+              put it in a mode-0600 file as `VAR=value`, then point
+              api_key_file at that file -- an absolute path or
+              `~/...`, both work
+  model       no default: this provider's ids drift, so pick a live one
+              "auto" is NOT safe on this lane: it exposes no loaded-model
+              status, so "auto" means "whatever is first in the catalogue"
+  ...
+```
+
+Three hosted providers ship types today:
+
+| Provider | `type` | Key console | Free tier |
+|---|---|---|---|
+| OpenRouter | `openrouter` | <https://openrouter.ai/keys> | `:free`-suffixed model ids |
+| NVIDIA NIM | `nvidia-nim` | <https://build.nvidia.com/settings/api-keys> | free credits on signup, no card |
+| Anthropic (OpenAI-compat) | `anthropic` | <https://platform.claude.com/settings/keys> | none |
+
+The key itself goes in a file named by `api_key_file` (absolute path or
+`~/...`), one `VAR=value` line per key (`#` comments and blanks ignored,
+mode `0600`), with `api_key_var` naming which line to read.
+
+`"model": "auto"` is **not safe** on any hosted lane — unlike a self-hosted
+server, none of these three expose a loaded-model status, so `"auto"` just
+means "whatever is first in the provider's catalogue". Pick a real model id
+(`brain_lanes.py show <type>` prints a live spread from the provider's own
+`/v1/models`).
+
+Anthropic's own docs call its OpenAI-compatible layer "not considered a
+long-term or production-ready solution … primarily intended to test and
+compare model capabilities" — it works, but treat it as a way in, not a
+destination.
 
 ### One conversation, many screens
 
@@ -230,26 +282,31 @@ them.
 | `GENESIS_API_URL` | `http://localhost:8080` | optional Agent-Genesis endpoint; adds a conversation-history lane to `knowledge_lookup`. Probed at startup — if nothing answers, the lane is silently dropped |
 | `FAULKNER_API_URL` | `http://localhost:8086` | optional Faulkner-DB endpoint backing `decision_lookup`. Same probe-or-drop behaviour |
 
-### Hermes (optional)
+### Agent lane (optional)
 
-Hermes is **a separate, self-hosted agent service** — not part of Patchbay,
-not bundled, and not required. It's the backing service for the three
-`*_hermes` voice tools below. Most self-hosters will never set this up, and
-that's the normal case, not a missing feature: without `HERMES_SHIM_URL` /
-`HERMES_MCP_URL` answering, the Hermes tools simply stay unarmed and the rest
-of the voice agent works exactly the same. If you do run something that
-speaks Hermes' shim/MCP surface, point the env vars above at it.
-
-**Bring your own agent.** Hermes is the maintainer's own background agent —
-it's one implementation of a plain, documented contract, not a requirement.
-The `HERMES_*` env var names stay as shipped API, but they name a *contract*:
-an OpenAI-compatible chat-completions endpoint plus four MCP tools
+**Bring your own agent.** This is a plain, documented contract — an
+OpenAI-compatible chat-completions endpoint plus four MCP tools
 (`events_poll`, `permissions_list_open`, `permissions_respond`,
-`messages_send`). Wire up your own agent to the same shapes and it plugs
-into the same delegate/status/approve lane. See
-[`docs/agent-lane.md`](docs/agent-lane.md) for the full spec and
+`messages_send`) — that any background agent can implement, not a
+maintainer-only service. Wire up your own agent to the same shapes and it
+plugs into the cockpit's delegate/status/approve lane. See
+[`docs/agent-lane.md`](docs/agent-lane.md) for the full spec,
 [`examples/agent-lane/`](examples/agent-lane/) for a runnable reference
-server to develop and test against.
+server to develop and test against, and
+[`examples/agent-lane/verify_contract.py`](examples/agent-lane/verify_contract.py)
+to check your own shim against the contract — it's stdlib-only, so you can
+run it before you have a pipeline installed at all.
+
+Hermes is the maintainer's own implementation of this contract — **a
+separate, self-hosted agent service**, not part of Patchbay, not bundled,
+and not required. It's the backing service for the three `*_hermes` voice
+tools below. Most self-hosters will never set this up, and that's the
+normal case, not a missing feature: without `HERMES_SHIM_URL` /
+`HERMES_MCP_URL` answering, the Hermes tools simply stay unarmed and the
+rest of the voice agent works exactly the same. If you do run something
+that speaks the same shim/MCP surface — Hermes or your own — point the
+`HERMES_*` env vars above at it; those names stay as shipped API regardless
+of what implements the other end.
 
 ### Behaviour & safety knobs
 

@@ -9,9 +9,9 @@ build/export, performed by the caller, not here) -- are only ever imported
 lazily inside the one function that needs them, so this module (and its
 tests) stay importable with neither installed.
 
-See ``docs/plans/custom-voice-cloning-v1.3.md`` (rulings 1, 3, 5, 9, 10) and
-``docs/research/pocket-tts-voice-cloning-2026-07-17.md`` for the underlying
-pocket_tts API this builds on.
+See ``docs/plans/custom-voice-cloning-v1.3.md`` (rulings 1, 3, 5, 9, 10; maintainer notes, not in the public export) and
+``docs/research/pocket-tts-voice-cloning-2026-07-17.md`` (maintainer notes, not in the public export)
+for the underlying pocket_tts API this builds on.
 """
 
 from __future__ import annotations

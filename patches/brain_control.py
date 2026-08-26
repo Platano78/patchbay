@@ -26,6 +26,13 @@ from speech_to_speech import voice_tools
 # probing share one parser instead of two that could drift.
 from speech_to_speech import brain_discovery
 from speech_to_speech.brain_discovery import _extract_model_ids, MAX_PROBED_MODEL_IDS  # noqa: F401 -- re-exported for existing brain_control._extract_model_ids call sites/tests
+# brain_lanes is dependency-light for the same reason and under the same
+# one-way import rule as brain_discovery: its `check` CLI has to run standalone
+# before a pipeline exists. `resolve_api_key` lives there rather than here so
+# the CLI resolves a key exactly the way this module does -- two copies of that
+# parser would drift, and a key the panel finds but the CLI doesn't (or the
+# reverse) is the worst kind of failure to debug.
+from speech_to_speech import brain_lanes
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +111,37 @@ BRAIN_PRESETS: dict[str, str] = {
         "Everything you say is spoken aloud, so use no markdown, lists, or code blocks."
     ),
 }
+
+# The same presets, reachable by lane KIND for a brain whose NAME we've never
+# heard of (ruling 5). Before this, a stranger who called their brain `ollama`
+# got "no preset available for brain: ollama" -- the presets were keyed on the
+# maintainer's own brain names, so they only ever worked for the maintainer.
+#
+# These are references, not copies: a preset improved above reaches both paths.
+# An exact NAME match still wins first (see `preset_for`), so an existing
+# config resolves to exactly what it resolved to before.
+KIND_PRESETS: dict[str, str] = {
+    brain_lanes.KIND_LOCAL: BRAIN_PRESETS["local"],
+    brain_lanes.KIND_HOSTED: BRAIN_PRESETS["frontier"],
+    brain_lanes.KIND_AGENT: BRAIN_PRESETS["hermes"],
+}
+
+
+def preset_for(name: Optional[str], entry: Optional[dict[str, Any]]) -> str:
+    """The shipped preset text for a brain, or "" when it has none.
+
+    Exact name first (so `coder`/`local`/`frontier`/`hermes` resolve exactly as
+    they did), then the lane KIND declared by the entry's `type`. An entry with
+    no type and an unrecognised name still has no preset -- there is nothing
+    honest to say about a lane that hasn't told us what it is.
+    """
+    if name and BRAIN_PRESETS.get(name):
+        return BRAIN_PRESETS[name]
+    lane = brain_lanes.get_lane((entry or {}).get("type"))
+    if lane is None:
+        return ""
+    return KIND_PRESETS.get(lane.kind, "")
+
 
 # Resolution tiers, most specific first. Reported to the UI as `resolved_from`.
 TIER_BRAIN_CUSTOM = "brain_custom"
@@ -452,18 +490,31 @@ def _curated_models(entry: dict[str, Any]) -> list[str]:
     return [m for m in curated if isinstance(m, str) and m]
 
 
-def resolve_persona(store: dict[str, Any], brain: str, default: str) -> tuple[str, str]:
+def resolve_persona(
+    store: dict[str, Any], brain: Optional[str], default: str, preset: Optional[str] = None
+) -> tuple[str, str]:
     """Resolve the effective persona for `brain`, most specific tier first.
 
-    Returns `(text, tier)`. A brain in preset mode reads `BRAIN_PRESETS` live,
-    so a preset improved in a later release reaches the users who selected it
+    Returns `(text, tier)`. A brain in preset mode reads its preset live, so a
+    preset improved in a later release reaches the users who selected it
     instead of being frozen at the moment they clicked.
+
+    `preset` is the caller's already-resolved preset text -- `BrainControl`
+    passes `preset_for`'s answer, which knows the brain's lane KIND and so can
+    offer one to a brain whose name isn't in `BRAIN_PRESETS`. Omitted, it falls
+    back to the name-keyed lookup, which is what every pre-lane-types caller
+    (and every existing test) gets.
+
+    `brain` may be None -- there is no active brain when `brains.json` is empty
+    or unreadable (ruling 9); the per-brain tiers simply can't match.
     """
     entry = (store.get("brains") or {}).get(brain) or {}
+    if preset is None:
+        preset = BRAIN_PRESETS.get(brain or "", "")
     if entry.get("mode") == "custom" and entry.get("text"):
         return entry["text"], TIER_BRAIN_CUSTOM
-    if entry.get("mode") == "preset" and BRAIN_PRESETS.get(brain):
-        return BRAIN_PRESETS[brain], TIER_BRAIN_PRESET
+    if entry.get("mode") == "preset" and preset:
+        return preset, TIER_BRAIN_PRESET
     if store.get("global"):
         return store["global"], TIER_GLOBAL
     return default, TIER_DEFAULT
@@ -492,7 +543,13 @@ class BrainControl:
         self.runtime_config = runtime_config
         self.brains_path = brains_path
         self.brains: dict[str, dict[str, Any]] = self._load_brains(brains_path)
-        self.active_brain = "coder"
+        # Derived, never a literal (ruling 9). This used to be hardcoded to
+        # "coder" -- a brain name only the maintainer's own brains.json ever
+        # had, so on anyone else's box the cockpit booted claiming an active
+        # brain that did not exist. None is a real state: an empty or
+        # unreadable brains.json means no brain is switchable, and the
+        # pipeline still serves the one its command line configured.
+        self.active_brain: Optional[str] = self._derive_active_brain()
         self.tts_handler = tts_handler
         self.cockpit = cockpit
         # lm_processed_queue -- lets BrainControl inject an audition TTSInput
@@ -576,7 +633,9 @@ class BrainControl:
         runtime config. Returns True when the effective persona changed --
         the caller resets chat history on that, since the system prompt the
         earlier turns were produced under is no longer the one in force."""
-        text, tier = resolve_persona(self.persona_store, self.active_brain, self.default_persona)
+        text, tier = resolve_persona(
+            self.persona_store, self.active_brain, self.default_persona, preset=self._active_preset()
+        )
         self.persona_tier = tier
         new_instructions = text or None
         if new_instructions == self.runtime_config.session.instructions:
@@ -596,9 +655,34 @@ class BrainControl:
             "brain": self.active_brain,
             "brain_mode": entry.get("mode") or "inherit",
             "brain_text": entry.get("text") or "",
-            "preset": BRAIN_PRESETS.get(self.active_brain, ""),
+            # Kind-resolved (ruling 5), so the panel's "Use the tuned preset"
+            # button appears for a brain whose name we've never seen. `presets`
+            # stays the name-keyed map it has always been -- it is keyed by
+            # brain NAME, and a kind is not one.
+            "preset": self._active_preset(),
             "presets": dict(BRAIN_PRESETS),
         }
+
+    def _active_preset(self) -> str:
+        """The shipped preset for the ACTIVE brain, resolved by name then by
+        lane kind. "" when it has neither."""
+        if self.active_brain is None:
+            return ""
+        return preset_for(self.active_brain, self.brains.get(self.active_brain))
+
+    def _derive_active_brain(self) -> Optional[str]:
+        """Which brain the cockpit starts on: the first one configured
+        `available: true`, else the first one at all, else None.
+
+        Falling back to the first UNAVAILABLE entry rather than to None is
+        deliberate -- a brains.json where nothing is marked available is a
+        config the user is still filling in, and the panel showing its first
+        lane selected is a truer picture of that than showing nothing.
+        """
+        for name, entry in self.brains.items():
+            if isinstance(entry, dict) and entry.get("available", False):
+                return name
+        return next(iter(self.brains), None)
 
     @property
     def persona_persisted(self) -> bool:
@@ -611,31 +695,79 @@ class BrainControl:
             return False
 
     def _load_brains(self, path: str) -> dict[str, dict[str, Any]]:
-        with open(path, "r") as f:
-            return json.load(f)
+        """Read brains.json into the registry. **Never raises** (ruling 8).
+
+        This used to be a bare `json.load`, which made brains.json a BOOT
+        DEPENDENCY: following SETUP.md exactly produced a service that
+        crash-looped, because the shipped systemd template never set
+        `BRAINS_JSON` and the default path is a directory only the
+        maintainer's box has. The registry is a convenience layered over the
+        command line -- it lets you SWITCH brains from the panel -- so its
+        absence must cost you switching, not the assistant.
+
+        A failure logs ONE line naming the path (and, for a parse error, the
+        line and column) and leaves the registry empty. Same fail-open
+        contract as `_env_seconds` and `load_voice_choice`.
+
+        Lane types are resolved here, at the single load choke point, so every
+        later reader (`_set_brain`, the background reconcile, `_state_payload`)
+        sees one already-resolved shape and an unknown `type` warns once
+        rather than once per probe. An entry with no `type` is passed through
+        untouched -- byte for byte what it was before lane types existed.
+        """
+        try:
+            with open(path, "r") as f:
+                raw = json.load(f)
+        except FileNotFoundError:
+            logger.warning(
+                "BrainControl: no brains.json at %s -- brain switching is off. The pipeline "
+                "still serves the brain its command line configured. Create the file (see "
+                "brains.json.example, or run `python3 patches/brain_lanes.py show <type>`), "
+                "or point BRAINS_JSON at it.",
+                path,
+            )
+            return {}
+        except json.JSONDecodeError as e:
+            logger.warning(
+                "BrainControl: brains.json at %s is not valid JSON (%s at line %d, column %d) "
+                "-- brain switching is off until it parses. The pipeline still serves the "
+                "brain its command line configured.",
+                path,
+                e.msg,
+                e.lineno,
+                e.colno,
+            )
+            return {}
+        except OSError as e:
+            logger.warning(
+                "BrainControl: could not read brains.json at %s (%s) -- brain switching is "
+                "off. The pipeline still serves the brain its command line configured.",
+                path,
+                e,
+            )
+            return {}
+
+        if not isinstance(raw, dict):
+            logger.warning(
+                "BrainControl: brains.json at %s is not a JSON object of brain-name -> entry "
+                "-- brain switching is off.",
+                path,
+            )
+            return {}
+
+        return {
+            name: brain_lanes.resolve_entry(entry) if isinstance(entry, dict) else entry
+            for name, entry in raw.items()
+        }
 
     def _resolve_api_key(self, entry: dict[str, Any]) -> Optional[str]:
         """Resolve a brain's API key: literal `api_key`, or lazily parsed from
         `api_key_file` (env-style `VAR=value` lines) looking up `api_key_var`.
-        Never logs the resolved value."""
-        if entry.get("api_key"):
-            return entry["api_key"]
-        api_key_file = entry.get("api_key_file")
-        api_key_var = entry.get("api_key_var")
-        if not api_key_file or not api_key_var:
-            return None
-        try:
-            with open(api_key_file, "r") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line or line.startswith("#") or "=" not in line:
-                        continue
-                    key, _, value = line.partition("=")
-                    if key.strip() == api_key_var:
-                        return value.strip().strip('"').strip("'")
-        except OSError as e:
-            logger.warning("BrainControl: failed to read api_key_file %s: %s", api_key_file, e)
-        return None
+        Never logs the resolved value.
+
+        The parse itself lives in `brain_lanes` so the standalone `check` CLI
+        resolves a key by exactly this rule -- see that module's docstring."""
+        return brain_lanes.resolve_api_key(entry)
 
     def _resolve_model(self, base_url: str, model: str, api_key: Optional[str]) -> Optional[str]:
         """GET {base_url}/models to resolve the model id and probe reachability.
@@ -791,6 +923,16 @@ class BrainControl:
                 base_url = entry.get("base_url")
                 model = self._effective_model(name, entry)
                 api_key = self._resolve_api_key(entry)
+                lane = brain_lanes.get_lane(entry.get("type"))
+                if lane is not None and lane.needs_key and not api_key:
+                    # Ruling 7 again, and this is the half that shows: a
+                    # keyless hosted lane ANSWERS its /models, so without this
+                    # the sweep would paint it green in the panel and the user
+                    # would only find out at their first turn.
+                    changed |= self._record_probe(
+                        name, False, brain_lanes.missing_key_error(name, entry, lane), []
+                    )
+                    continue
                 # Network probe stays OUTSIDE the lock -- only the
                 # compare-and-record in `_record_probe` needs it.
                 resolved = self._resolve_model(base_url, model, api_key)
@@ -1009,9 +1151,15 @@ class BrainControl:
             mode = msg.get("persona_mode", "custom")
             if mode not in ("custom", "preset", "inherit"):
                 return False, f"unknown persona mode: {mode}"
+            # There is no "this brain" to write to when brains.json is empty
+            # or unreadable (ruling 9). Refused rather than stored under a
+            # None key, which would serialize as the JSON key "null" and never
+            # match anything again.
+            if self.active_brain is None:
+                return False, "no active brain -- set one in brains.json, or use the global persona"
             brains = self.persona_store.setdefault("brains", {})
             if mode == "preset":
-                if not BRAIN_PRESETS.get(self.active_brain):
+                if not self._active_preset():
                     return False, f"no preset available for brain: {self.active_brain}"
                 brains[self.active_brain] = {"mode": "preset"}
             elif mode == "custom" and persona:
@@ -1059,6 +1207,32 @@ class BrainControl:
         base_url = entry["base_url"]
         model = self._effective_model(name, entry)
         api_key = self._resolve_api_key(entry)
+
+        lane = brain_lanes.get_lane(entry.get("type"))
+        # Ruling 7 -- fail HERE, before the probe. A reachability probe is not
+        # a key check: OpenRouter and NVIDIA NIM both serve `/models` with no
+        # key at all, so without this the probe returns 200, the panel shows
+        # the brain healthy and green, and then every single actual turn 401s
+        # with nothing on screen to explain it. The message names the variable
+        # and the file, because "no API key" without them sends the reader
+        # looking in the wrong place.
+        if lane is not None and lane.needs_key and not api_key:
+            error = brain_lanes.missing_key_error(name, entry, lane)
+            self._record_probe(name, False, error, [])
+            return False, error
+
+        if model == "auto" and lane is not None and not lane.auto_ok:
+            # Not fatal -- "auto" still resolves to SOMETHING -- but on a lane
+            # with no loaded-model status it resolves to whatever happens to be
+            # first in a catalogue of hundreds, which is a surprise worth one
+            # line in the log rather than a silent choice.
+            logger.warning(
+                "BrainControl: brain %s is a %s lane with model \"auto\" -- that lane reports no "
+                "loaded model, so \"auto\" means whatever its catalogue lists first. Name a model id.",
+                name,
+                lane.key,
+            )
+
         resolved = self._resolve_model(base_url, model, api_key)
         probed_models = getattr(self._probed_model_ids, "ids", [])
         if resolved is None:
@@ -1098,7 +1272,17 @@ class BrainControl:
                     effort,
                     sorted(_VALID_REASONING_EFFORTS),
                 )
-        if extra_body is None:
+        if extra_body is None and lane is not None and not lane.sends_chat_template_kwargs:
+            # Ruling 6: `chat_template_kwargs` is a self-hosted vLLM/Qwen idiom
+            # for servers that render a chat template themselves. A hosted
+            # provider either ignores it or rejects the request outright, so a
+            # lane that declares itself hosted sends nothing. Only ever reached
+            # for an entry that DECLARED a type -- an untyped entry (every
+            # pre-existing brains.json) keeps `_build_extra_body`'s behaviour
+            # exactly. The per-brain `reasoning_effort` above still wins over
+            # this: asking for a specific effort is an explicit act.
+            extra_body = None
+        elif extra_body is None:
             extra_body = BaseOpenAICompatibleHandler._build_extra_body(base_url, True, None)
         self.llm_handler._extra_body = extra_body
         self.active_brain = name

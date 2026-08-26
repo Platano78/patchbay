@@ -53,7 +53,8 @@ class RemoteSpeechTTSHandlerArguments:
             "value means the field is OMITTED from the request rather than sent blank -- a "
             "backend that declares accepts_instructions: false (probed at runtime, see "
             "tts_capabilities.py) never receives it even if you do set one. See "
-            "docs/plans/tts-capability-seam_spec.md for the wire facts this is built on."
+            "docs/plans/tts-capability-seam_spec.md (maintainer notes, not in the public export) "
+            "for the wire facts this is built on."
         },
     )
     remote_speech_sample_rate: int = field(

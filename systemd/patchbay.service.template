@@ -7,6 +7,7 @@
 #   ${HOME_DIR}             - that user's home directory
 #   ${VENV_DIR}             - path to the speech-to-speech venv (e.g. $HOME_DIR/speech-to-speech-main/.venv)
 #   ${WORKING_DIR}          - working directory (repo checkout containing brains.json, etc.)
+#                            also where BRAINS_JSON below points
 #   ${WS_PORT}              - WebSocket port the cockpit connects to (default 8765)
 #   ${STT_BACKEND}          - STT backend (default parakeet-tdt)
 #   ${TTS_BACKEND}          - TTS backend (default pocket)
@@ -24,6 +25,12 @@ Type=simple
 User=${RUN_USER}
 Environment=HOME=${HOME_DIR}
 WorkingDirectory=${WORKING_DIR}
+# Where the brain registry lives. Set explicitly: the built-in default is a
+# path that only exists on the machine this project was written on, so without
+# this line the panel's brain switcher is simply off. (It is not fatal either
+# way -- a missing or unparseable brains.json logs one line and the pipeline
+# still serves the brain configured on the ExecStart line below.)
+Environment=BRAINS_JSON=${WORKING_DIR}/brains.json
 # --ws_host 0.0.0.0 binds EVERY interface, including your LAN. Anything that can
 # reach ${WS_PORT} becomes a full screen: live audio, transcripts, persona edits,
 # brain switching. If a VPN is meant to be your perimeter, bind that address (or

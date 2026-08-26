@@ -7,7 +7,7 @@ output doesn't match. Run the steps in order; do not skip ahead.
 ## 0. What you need
 
 - `python3` 3.10 or newer, and `git`.
-- ~2 GB free disk (framework checkout + venv + downloaded model weights).
+- ~3 GB free disk (framework checkout + venv + downloaded model weights).
 - A microphone and a browser (Chrome/Edge/Firefox — any recent build).
 - An **OpenAI-compatible chat-completions LLM endpoint**, reachable from this
   box — local (llama.cpp, vLLM, Ollama, an LLM router) or remote. It does not
@@ -18,6 +18,15 @@ output doesn't match. Run the steps in order; do not skip ahead.
   installs the CPU build of torch; if you want a CUDA build anyway, swap it
   in after setup finishes (`pip install torch torchaudio --index-url
   https://download.pytorch.org/whl/cuXXX` in the venv).
+
+**Don't have an LLM endpoint yet?** The cheapest local path is
+[Ollama](https://ollama.com): install it, `ollama pull llama3.2` (or any
+small model), then it serves an OpenAI-compatible API at
+`http://localhost:11434/v1` — check it with the same `curl .../models`
+command step 3 teaches. If you'd rather rent a model than run one, a hosted
+provider works too — see `python3 patches/brain_lanes.py show openrouter`
+(or `show nvidia-nim`, `show anthropic`) for what each needs and a
+paste-ready `brains.json` entry. Either way, step 3 is where it plugs in.
 
 Verify the prerequisites:
 
@@ -123,6 +132,13 @@ address); `local-alt` and `frontier` ship `available: false` — leave them
 that way unless you're using them. `local-alt` needs a real port for whatever
 you run there (see its `note`); `frontier` needs an `api_key_file` you likely
 don't have yet — safe to ignore both for a first run.
+
+`frontier`'s `api_key_file` points at a plain env-style file: one `VAR=value`
+line per key, `#` comments and blank lines ignored, `~` expands to your home
+directory, and it should be mode `0600` (it holds a secret). `api_key_var`
+names which line in that file to read. `python3 patches/brain_lanes.py show
+<type>` (e.g. `openrouter`, `nvidia-nim`, `anthropic`) prints exactly which
+var each hosted provider expects and where to get a key.
 
 Verify the endpoint answers before starting the pipeline:
 
@@ -291,4 +307,14 @@ env vars): every one of these is probed once at pipeline startup and
 silently dropped if nothing answers — the core voice agent (LLM brain + STT
 + TTS) works with none of them set. Only set these if you're running the
 corresponding service; see `README.md`'s *Optional integrations* table for
-what each does.
+what each does. The systemd unit template from this step already sets
+`BRAINS_JSON` for you, so you don't need to add it yourself.
+
+**Agent lane** (background-agent delegation, `HERMES_*` above): this is a
+plain, documented contract — an OpenAI-compatible chat-completions endpoint
+plus four MCP tools — that *any* background agent can implement, not a
+maintainer-only service. See [`docs/agent-lane.md`](docs/agent-lane.md) for
+the full spec and run
+[`examples/agent-lane/verify_contract.py`](examples/agent-lane/verify_contract.py)
+(stdlib-only) against your own shim to check it matches the contract before
+wiring it into a running pipeline.

@@ -127,6 +127,12 @@ from patches import brain_discovery  # noqa: E402
 
 sys.modules["speech_to_speech.brain_discovery"] = brain_discovery
 
+# Same alias, same reason, for brain_lanes -- also dependency-light by design,
+# also imported by brain_control.py at module level.
+from patches import brain_lanes  # noqa: E402
+
+sys.modules["speech_to_speech.brain_lanes"] = brain_lanes
+
 from patches import brain_control  # noqa: E402
 from patches import voice_clone  # noqa: E402
 
@@ -236,9 +242,16 @@ class _FakeRuntimeConfig:
         self.chat = types.SimpleNamespace(reset=lambda: None)
 
 
-def _make_brain_control(tmp_path, runtime_config=None, **kwargs):
+# BrainControl DERIVES `active_brain` from the registry (ruling 9) rather than
+# hardcoding a name, so a fixture that wants a named active brain has to
+# configure one. `coder` here is just a name these tests already use; it is
+# `available: false` so nothing tries to probe it.
+_DEFAULT_FIXTURE_BRAINS = {"coder": {"available": False}}
+
+
+def _make_brain_control(tmp_path, runtime_config=None, brains=None, **kwargs):
     brains_path = tmp_path / "brains.json"
-    brains_path.write_text("{}")
+    brains_path.write_text(json.dumps(_DEFAULT_FIXTURE_BRAINS if brains is None else brains))
     return brain_control.BrainControl(
         llm_handler=types.SimpleNamespace(model_name="test-model"),
         runtime_config=runtime_config or _FakeRuntimeConfig(),
@@ -2152,3 +2165,439 @@ def test_voice_clone_end_refuses_when_active_backend_cannot_clone(tmp_path):
 
     assert result["ok"] is False
     assert result["error"] == voice_clone.BACKEND_CANNOT_CLONE_MSG
+
+
+# ══ brain lane types ══════════════════════════════════════════════════
+#
+# A brains.json entry may declare an optional `"type"` naming a lane in
+# `brain_lanes`. Everything below is about what that buys, and about the
+# invariant that runs underneath all of it: an entry WITHOUT a type behaves
+# exactly as it did before lane types existed.
+
+
+def _brain_control_with(tmp_path, brains, **kwargs):
+    return _make_brain_control(tmp_path, brains=brains, **kwargs)
+
+
+# ── ruling 4: `type` is optional and additive ─────────────────────────
+
+
+def test_a_typed_entry_is_loaded_with_its_lanes_base_url(tmp_path):
+    bc = _brain_control_with(tmp_path, {"frontier": {"type": "openrouter", "available": True}})
+
+    assert bc.brains["frontier"]["base_url"] == "https://openrouter.ai/api/v1"
+    assert bc.brains["frontier"]["api_key_var"] == "OPENROUTER_API_KEY"
+
+
+def test_an_entrys_own_values_beat_its_lanes(tmp_path):
+    bc = _brain_control_with(
+        tmp_path,
+        {"frontier": {"type": "openrouter", "base_url": "http://10.0.0.4:9000/v1", "api_key_var": "MINE"}},
+    )
+
+    assert bc.brains["frontier"]["base_url"] == "http://10.0.0.4:9000/v1"
+    assert bc.brains["frontier"]["api_key_var"] == "MINE"
+
+
+def test_a_typed_entry_is_loaded_with_its_lanes_default_model(tmp_path):
+    """And `_effective_model` reads it, so a switch probes a real id rather
+    than falling through to "auto" on a lane with no loaded-model status to
+    report -- which surfaced as "model probe failed" when the real answer was
+    "you never named a model"."""
+    bc = _brain_control_with(tmp_path, {"claude": {"type": "anthropic", "available": True}})
+
+    assert bc.brains["claude"]["model"] == "claude-sonnet-5"
+    assert bc._effective_model("claude", bc.brains["claude"]) == "claude-sonnet-5"
+
+
+def test_a_stated_model_still_wins_over_the_lanes_default(tmp_path):
+    bc = _brain_control_with(
+        tmp_path, {"claude": {"type": "anthropic", "model": "claude-opus-5", "available": True}}
+    )
+
+    assert bc._effective_model("claude", bc.brains["claude"]) == "claude-opus-5"
+
+
+def test_an_untyped_entry_survives_the_load_untouched(tmp_path):
+    """The non-negotiable one: the existing deployment's brains.json has no
+    `type` anywhere, and must load as exactly the dict it is on disk."""
+    raw = {"coder": {"base_url": "http://10.0.0.7:8084/v1", "model": "auto", "available": True}}
+    bc = _brain_control_with(tmp_path, raw)
+
+    assert bc.brains == raw
+
+
+def test_an_unknown_type_warns_and_leaves_the_brain_working(tmp_path, caplog):
+    with caplog.at_level(logging.WARNING, logger=brain_lanes.__name__):
+        bc = _brain_control_with(
+            tmp_path, {"x": {"type": "openrouterr", "base_url": "http://x/v1", "available": True}}
+        )
+
+    assert bc.brains["x"]["base_url"] == "http://x/v1"
+    assert "openrouterr" in caplog.text
+
+
+# ── ruling 5: presets resolve by lane kind ────────────────────────────
+
+
+def test_a_stranger_named_brain_still_gets_a_preset(tmp_path, monkeypatch):
+    """Before lane types the presets were keyed on the maintainer's own brain
+    NAMES, so anyone who called their brain something else got
+    "no preset available" and the panel's preset button never appeared."""
+    _persona_env(tmp_path, monkeypatch)
+    bc = _brain_control_with(
+        tmp_path,
+        {"ollama": {"type": "openai-compatible", "base_url": "http://localhost:11434/v1", "available": True}},
+        runtime_config=_FakeRuntimeConfig(instructions=CLI_DEFAULT),
+    )
+    assert bc.active_brain == "ollama"
+
+    ack = bc._config_set({"persona_scope": "brain", "persona_mode": "preset"})
+
+    assert ack["ok"] is True
+    assert bc.runtime_config.session.instructions == brain_control.BRAIN_PRESETS["local"]
+    assert bc.persona_tier == "brain_preset"
+
+
+@pytest.mark.parametrize(
+    "lane_type,preset_name",
+    [
+        ("openai-compatible", "local"),
+        ("openrouter", "frontier"),
+        ("nvidia-nim", "frontier"),
+        ("anthropic", "frontier"),
+        ("agent", "hermes"),
+    ],
+)
+def test_each_lane_kind_maps_to_a_shipped_preset(tmp_path, lane_type, preset_name):
+    entry = {"type": lane_type, "base_url": "http://x/v1"}
+    assert brain_control.preset_for("whatever-they-called-it", entry) == (
+        brain_control.BRAIN_PRESETS[preset_name]
+    )
+
+
+def test_an_exact_name_still_wins_over_the_lane_kind(tmp_path):
+    """Nothing changes for a config that already worked: `coder` keeps the
+    always-on preset even if it now also declares a hosted type."""
+    assert brain_control.preset_for("coder", {"type": "openrouter"}) == brain_control.BRAIN_PRESETS["coder"]
+    assert brain_control.preset_for("coder", None) == brain_control.BRAIN_PRESETS["coder"]
+
+
+def test_an_untyped_unknown_brain_still_has_no_preset(tmp_path, monkeypatch):
+    """A lane that has told us nothing about itself gets no preset -- there is
+    nothing honest to say about it."""
+    _persona_env(tmp_path, monkeypatch)
+    assert brain_control.preset_for("custom_lane", {"base_url": "http://x"}) == ""
+    bc = _brain_control_with(tmp_path, {"custom_lane": {"base_url": "http://x", "available": True}})
+
+    ack = bc._config_set({"persona_scope": "brain", "persona_mode": "preset"})
+
+    assert ack["ok"] is False
+    assert "no preset available" in ack["error"]
+
+
+def test_the_panel_is_told_the_kind_resolved_preset(tmp_path, monkeypatch):
+    _persona_env(tmp_path, monkeypatch)
+    bc = _brain_control_with(
+        tmp_path, {"ollama": {"type": "openai-compatible", "base_url": "http://x/v1", "available": True}}
+    )
+
+    tiers = bc._config_state()["persona_tiers"]
+
+    # The panel hides its "Use the tuned preset" button on a falsy `preset`.
+    assert tiers["preset"] == brain_control.BRAIN_PRESETS["local"]
+
+
+# ── ruling 6: a hosted lane sends no chat_template_kwargs ─────────────
+
+
+def test_a_hosted_lane_sends_no_chat_template_kwargs(tmp_path, monkeypatch):
+    bc = _brain_control_with(
+        tmp_path, {"frontier": {"type": "openrouter", "model": "a/b", "available": True}}
+    )
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: "a/b")
+    monkeypatch.setattr(bc, "_resolve_api_key", lambda entry: "sk-x")
+    monkeypatch.setattr(
+        brain_control.BaseOpenAICompatibleHandler,
+        "_build_extra_body",
+        staticmethod(lambda *a, **k: {"chat_template_kwargs": {"enable_thinking": False}}),
+        raising=False,
+    )
+
+    ok, error = bc._set_brain("frontier")
+
+    assert (ok, error) == (True, "")
+    assert bc.llm_handler._extra_body is None
+
+
+def test_a_local_lane_still_sends_them(tmp_path, monkeypatch):
+    bc = _brain_control_with(
+        tmp_path,
+        {"ollama": {"type": "openai-compatible", "base_url": "http://x/v1", "model": "m", "available": True}},
+    )
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: "m")
+    monkeypatch.setattr(
+        brain_control.BaseOpenAICompatibleHandler,
+        "_build_extra_body",
+        staticmethod(lambda *a, **k: {"sentinel": "built"}),
+        raising=False,
+    )
+
+    ok, _ = bc._set_brain("ollama")
+
+    assert ok is True
+    assert bc.llm_handler._extra_body == {"sentinel": "built"}
+
+
+def test_an_agent_lane_sends_no_chat_template_kwargs_either(tmp_path, monkeypatch):
+    """A shim renders no chat template, and may be fronting a hosted model
+    that rejects the field."""
+    bc = _brain_control_with(
+        tmp_path,
+        {"shim": {"type": "agent", "base_url": "http://localhost:8087/v1", "model": "m", "available": True}},
+    )
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: "m")
+    monkeypatch.setattr(
+        brain_control.BaseOpenAICompatibleHandler,
+        "_build_extra_body",
+        staticmethod(lambda *a, **k: {"chat_template_kwargs": {"enable_thinking": False}}),
+        raising=False,
+    )
+
+    ok, error = bc._set_brain("shim")
+
+    assert (ok, error) == (True, "")
+    assert bc.llm_handler._extra_body is None
+
+
+def test_reasoning_effort_still_wins_on_a_hosted_lane(tmp_path, monkeypatch):
+    """The per-brain escape hatch is an explicit act and outranks the lane's
+    default -- asking for an effort is asking for the kwargs blob."""
+    bc = _brain_control_with(
+        tmp_path,
+        {"frontier": {"type": "openrouter", "model": "a/b", "available": True, "reasoning_effort": "high"}},
+    )
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: "a/b")
+    monkeypatch.setattr(bc, "_resolve_api_key", lambda entry: "sk-x")
+
+    ok, _ = bc._set_brain("frontier")
+
+    assert ok is True
+    assert bc.llm_handler._extra_body == {
+        "chat_template_kwargs": {"enable_thinking": False, "reasoning_effort": "high"}
+    }
+
+
+# ── ruling 7: a lane that needs a key fails BEFORE the probe ──────────
+
+
+def test_a_hosted_lane_with_no_key_fails_the_switch_without_probing(tmp_path, monkeypatch):
+    """OpenRouter and NVIDIA NIM both serve /models WITHOUT a key. Probe
+    first and the panel goes green, then every real turn 401s with nothing on
+    screen to explain it -- so this must fail before the probe runs at all."""
+    key_file = tmp_path / "keys.env"
+    key_file.write_text("SOMETHING_ELSE=x\n")
+    bc = _brain_control_with(
+        tmp_path,
+        {
+            "frontier": {
+                "type": "openrouter",
+                "model": "a/b",
+                "available": True,
+                "api_key_file": str(key_file),
+            }
+        },
+    )
+    probes = []
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: probes.append(1) or "a/b")
+
+    ok, error = bc._set_brain("frontier")
+
+    assert ok is False
+    assert probes == [], "probed a lane that has no key"
+    assert "OPENROUTER_API_KEY" in error
+    assert str(key_file) in error
+    # And the panel is told, rather than being left showing a stale green.
+    entry = next(b for b in bc._config_state()["brains"] if b["name"] == "frontier")
+    assert entry["reachable"] is False
+    assert "OPENROUTER_API_KEY" in entry["probe_error"]
+
+
+def test_the_background_sweep_will_not_paint_a_keyless_hosted_lane_green(tmp_path, monkeypatch):
+    bc = _brain_control_with(
+        tmp_path, {"frontier": {"type": "openrouter", "model": "a/b", "available": True}}
+    )
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: "a/b")
+
+    bc.handle({"type": "config_get"})
+    bc._reconcile_thread.join(timeout=2)
+
+    entry = next(b for b in bc._config_state()["brains"] if b["name"] == "frontier")
+    assert entry["reachable"] is False
+    assert "OPENROUTER_API_KEY" in entry["probe_error"]
+
+
+def test_a_keyless_lane_is_unaffected(tmp_path, monkeypatch):
+    bc = _brain_control_with(
+        tmp_path,
+        {"ollama": {"type": "openai-compatible", "base_url": "http://x/v1", "model": "m", "available": True}},
+    )
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: "m")
+    _stub_switch(monkeypatch)
+
+    assert bc._set_brain("ollama") == (True, "")
+
+
+def test_an_untyped_entry_never_gets_the_key_check(tmp_path, monkeypatch):
+    """The live deployment's own brains.json has no `type`; it must switch
+    exactly as it always did, key or no key."""
+    bc = _brain_control_with(
+        tmp_path, {"coder": {"base_url": "http://10.0.0.7:8084/v1", "model": "m", "available": True}}
+    )
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: "m")
+    _stub_switch(monkeypatch)
+
+    assert bc._set_brain("coder") == (True, "")
+
+
+# ── ruling 8: brains.json failures are soft and legible ───────────────
+
+
+def test_a_missing_brains_json_is_not_a_boot_failure(tmp_path, caplog):
+    """The BLOCKER this fixes: `_load_brains` was a bare `json.load`, the
+    shipped systemd template never set BRAINS_JSON, and the built-in default
+    path exists on exactly one machine -- so following SETUP.md exactly
+    produced a service that crash-looped on startup."""
+    missing = tmp_path / "nowhere" / "brains.json"
+
+    with caplog.at_level(logging.WARNING, logger=brain_control.__name__):
+        bc = brain_control.BrainControl(
+            llm_handler=types.SimpleNamespace(model_name="test-model"),
+            runtime_config=_FakeRuntimeConfig(),
+            brains_path=str(missing),
+        )
+
+    assert bc.brains == {}
+    assert bc.active_brain is None
+    # ONE line, and it names the path the reader has to create or repoint.
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert str(missing) in caplog.text
+    # ...and the pipeline is still serving the brain its command line set up.
+    assert bc.llm_handler.model_name == "test-model"
+    assert bc._config_state()["type"] == "config_state"
+
+
+def test_invalid_json_names_the_line_and_column(tmp_path, caplog):
+    path = tmp_path / "brains.json"
+    path.write_text('{\n  "a": }\n')
+
+    with caplog.at_level(logging.WARNING, logger=brain_control.__name__):
+        bc = brain_control.BrainControl(
+            llm_handler=types.SimpleNamespace(model_name="test-model"),
+            runtime_config=_FakeRuntimeConfig(),
+            brains_path=str(path),
+        )
+
+    assert bc.brains == {}
+    assert "line 2" in caplog.text
+    assert "column" in caplog.text
+    assert str(path) in caplog.text
+
+
+def test_a_brains_json_that_is_not_an_object_is_refused_softly(tmp_path, caplog):
+    path = tmp_path / "brains.json"
+    path.write_text("[1, 2, 3]")
+
+    with caplog.at_level(logging.WARNING, logger=brain_control.__name__):
+        bc = brain_control.BrainControl(
+            llm_handler=types.SimpleNamespace(model_name="test-model"),
+            runtime_config=_FakeRuntimeConfig(),
+            brains_path=str(path),
+        )
+
+    assert bc.brains == {}
+
+
+def test_an_unreadable_brains_json_is_soft_too(tmp_path, caplog):
+    path = tmp_path / "brains.json"
+    path.mkdir()  # a directory where a file was expected -> IsADirectoryError
+
+    with caplog.at_level(logging.WARNING, logger=brain_control.__name__):
+        bc = brain_control.BrainControl(
+            llm_handler=types.SimpleNamespace(model_name="test-model"),
+            runtime_config=_FakeRuntimeConfig(),
+            brains_path=str(path),
+        )
+
+    assert bc.brains == {}
+    assert str(path) in caplog.text
+
+
+# ── ruling 9: active_brain is derived, never a literal ────────────────
+
+
+def test_the_first_available_brain_is_the_active_one(tmp_path):
+    bc = _brain_control_with(
+        tmp_path,
+        {
+            "nope": {"base_url": "http://a", "available": False},
+            "yes": {"base_url": "http://b", "available": True},
+            "also-yes": {"base_url": "http://c", "available": True},
+        },
+    )
+
+    assert bc.active_brain == "yes"
+
+
+def test_with_nothing_available_the_first_entry_is_selected(tmp_path):
+    bc = _brain_control_with(
+        tmp_path, {"first": {"base_url": "http://a"}, "second": {"base_url": "http://b"}}
+    )
+
+    assert bc.active_brain == "first"
+
+
+def test_with_no_brains_at_all_there_is_no_active_brain(tmp_path):
+    bc = _brain_control_with(tmp_path, {})
+
+    assert bc.active_brain is None
+
+
+def test_no_read_of_a_none_active_brain_raises(tmp_path, monkeypatch):
+    """Every site that touches `active_brain` has to tolerate None -- that is
+    a real state now, not a defensive hypothetical."""
+    _persona_env(tmp_path, monkeypatch)
+    bc = _brain_control_with(tmp_path, {}, runtime_config=_FakeRuntimeConfig(instructions=CLI_DEFAULT))
+
+    state = bc.handle({"type": "config_get"})
+
+    assert state["active_brain"] is None
+    assert state["brains"] == []
+    assert state["persona_tiers"]["brain"] is None
+    assert state["persona_tiers"]["preset"] == ""
+    assert bc._apply_persona() is False
+    assert bc.runtime_config.session.instructions == CLI_DEFAULT
+
+
+def test_a_global_persona_still_works_with_no_brains(tmp_path, monkeypatch):
+    _persona_env(tmp_path, monkeypatch)
+    bc = _brain_control_with(tmp_path, {}, runtime_config=_FakeRuntimeConfig(instructions=CLI_DEFAULT))
+
+    ack = bc._config_set({"persona": "the user's own words"})
+
+    assert ack["ok"] is True
+    assert bc.runtime_config.session.instructions == "the user's own words"
+
+
+def test_a_brain_scoped_persona_is_refused_with_no_active_brain(tmp_path, monkeypatch):
+    """Refused rather than stored under a None key -- json.dump would write
+    that as the string "null" and it would never match anything again."""
+    _persona_env(tmp_path, monkeypatch)
+    bc = _brain_control_with(tmp_path, {}, runtime_config=_FakeRuntimeConfig(instructions=CLI_DEFAULT))
+
+    ack = bc._config_set({"persona": "just here", "persona_scope": "brain"})
+
+    assert ack["ok"] is False
+    assert "no active brain" in ack["error"]
+    assert bc.persona_store.get("brains", {}) == {}

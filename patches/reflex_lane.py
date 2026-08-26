@@ -6,7 +6,7 @@ entirely. Deploy-safe: the pipeline only inserts :class:`ReflexGate` when
 ``VOICE_REFLEX=1`` (see ``s2s_pipeline._build_pipeline_handlers``), so a plain
 restart leaves behaviour unchanged.
 
-Design (docs/plans/fulloch-borrow-voice-agent-2026-07-10.md, Slice 2):
+Design (docs/plans/fulloch-borrow-voice-agent-2026-07-10.md, Slice 2; maintainer notes, not in the public export):
 
 * **Bias hard toward false negatives.** A false positive costs an LLM-quality
   answer; a false negative costs only the normal ~1s LLM path. Triggers mirror

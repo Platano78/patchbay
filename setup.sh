@@ -137,7 +137,7 @@ Next steps:
          --stt parakeet-tdt --parakeet_tdt_device cpu \\
          --tts pocket --pocket_tts_voice jean --pocket_tts_device cpu \\
          --llm_backend chat-completions \\
-         --responses_api_base_url http://localhost:8084/v1 \\
+         --responses_api_base_url http://localhost:11434/v1 \\
          --responses_api_api_key dummy \\
          --model_name <your-model-name> \\
          --responses_api_stream

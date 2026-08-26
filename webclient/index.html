@@ -4806,7 +4806,7 @@ els.personaVoicePairBtn.addEventListener("click", () => {
 populatePersonaSelect();
 
 // ── Custom voice cloning ────────────────────────────────────────────────
-// Protocol: docs/plans/custom-voice-cloning-v1.3.md (rulings 5, 6, 9, 10, 11) +
+// Protocol: docs/plans/custom-voice-cloning-v1.3.md (rulings 5, 6, 9, 10, 11; maintainer notes, not in the public export) +
 // patches/voice_clone.py + patches/brain_control.py + patches/websocket_streamer.py.
 let lastPredefinedVoices = [];
 let lastCustomVoices = [];
@@ -5388,7 +5388,7 @@ function renderConfigState(ev) {
   if (Array.isArray(ev.brains)) lastBrains = ev.brains;
   if (ev.model) lastKnownModel = ev.model; // now on both frames, so the rail fills in on connect
   const active = lastBrains.find((b) => b.name === ev.active_brain);
-  els.brainStatus.textContent = `Active: ${active ? active.label : ev.active_brain}`;
+  els.brainStatus.textContent = `Active: ${active ? active.label : (ev.active_brain || "—")}`;
 
   els.brainList.innerHTML = "";
   lastBrains.forEach((b) => {
@@ -5516,7 +5516,7 @@ function renderConfigState(ev) {
   // — the caveat that used to live here (only config_state carried it) is gone.
   // The clone panel is gated on `can_clone` instead, not on a voice list
   // existing -- a remote backend can have plenty of voices and still be
-  // unable to clone any (see docs/plans/tts-capability-seam_spec.md).
+  // unable to clone any (see docs/plans/tts-capability-seam_spec.md, maintainer notes, not in the public export).
   els.voiceCloneAdvanced.hidden = !lastCanClone;
   renderVoiceDropdown(ev.voice);
   renderCustomVoiceList();
