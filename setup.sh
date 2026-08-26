@@ -43,11 +43,20 @@ run_checks() {
     overall=1
   fi
 
+  # Import the patched entry points themselves, not just the bare package --
+  # `import speech_to_speech` alone only exercises upstream's own __init__.py
+  # and would PASS even if a patch module's cross-import were unshippable
+  # (see patches/test_apply_pack.py for the incident this replays). Picked
+  # for being genuine entry points that are also cheap: brain_control (the
+  # agent lane) and websocket_streamer (the cockpit transport) together pull
+  # in most of the patch pack. s2s_pipeline was tried and rejected here --
+  # it drags in torch/transformers and triggers an nltk data check, ~3.4s
+  # and network-shaped versus ~1.5s and offline for these two.
   if [ -x "$INSTALL_DIR/.venv/bin/python3" ] \
-     && "$INSTALL_DIR/.venv/bin/python3" -c "import speech_to_speech" >/dev/null 2>&1; then
-    echo "CHECK package-import: PASS speech_to_speech imports cleanly from the venv"
+     && "$INSTALL_DIR/.venv/bin/python3" -c "import speech_to_speech.brain_control, speech_to_speech.connections.websocket_streamer" >/dev/null 2>&1; then
+    echo "CHECK package-import: PASS speech_to_speech's patched entry points import cleanly from the venv"
   else
-    echo "CHECK package-import: FAIL speech_to_speech did not import (venv missing, or the editable install is incomplete)"
+    echo "CHECK package-import: FAIL speech_to_speech.brain_control / connections.websocket_streamer did not import (venv missing, editable install incomplete, or a patch module's cross-import is unshippable -- run: bash patches/apply.sh)"
     overall=1
   fi
 

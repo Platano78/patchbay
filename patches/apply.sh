@@ -39,6 +39,7 @@ done
 FILES=(
   "brain_control.py|brain_control.py"
   "brain_discovery.py|brain_discovery.py"
+  "brain_lanes.py|brain_lanes.py"
   "voice_clone.py|voice_clone.py"
   "tts_capabilities.py|tts_capabilities.py"
   "websocket_streamer.py|connections/websocket_streamer.py"
