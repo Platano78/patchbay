@@ -53,7 +53,10 @@ TOOL_LABEL = "camera view"
 
 _FRAME_PATH = os.environ.get("VOICE_CAMERA_FRAME", "/dev/shm/voice_camera_frame.jpg")
 _VISION_URL = os.environ.get("VISION_LLM_URL", "http://localhost:11434/v1/chat/completions")
-_VISION_MODEL = os.environ.get("VISION_LLM_MODEL", "gemma4-12b")
+# EDIT ME: a vision-capable model your endpoint actually serves. `llava` is the
+# canonical one for Ollama (`ollama pull llava`); vLLM/llama.cpp users name
+# whatever multimodal model they loaded.
+_VISION_MODEL = os.environ.get("VISION_LLM_MODEL", "llava")
 _MAX_FRAME_AGE_S = float(os.environ.get("VOICE_CAMERA_MAX_AGE_S", "10"))
 _MAX_CHARS = 600
 
