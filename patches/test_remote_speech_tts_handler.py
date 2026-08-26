@@ -117,6 +117,16 @@ FakePocketTTSHandler = _install_stubs()
 
 
 @pytest.fixture(autouse=True)
+def _clear_tts_capabilities_cache():
+    """Module-level cache in tts_capabilities.py, keyed on base_url -- each
+    test's `_StubServer` gets a fresh ephemeral port so keys don't usually
+    collide across tests, but clear it anyway rather than depend on that."""
+    tts_capabilities._cache.clear()
+    yield
+    tts_capabilities._cache.clear()
+
+
+@pytest.fixture(autouse=True)
 def _reassert_own_pocket_stub():
     """`test_brain_control.py` stubs the SAME `speech_to_speech.TTS.pocket_tts_handler`
     dotted path with its own fake `PocketTTSHandler` at ITS import (collection) time.
@@ -129,6 +139,14 @@ def _reassert_own_pocket_stub():
     to depend on). Re-assert our own stub before every test in this file so its
     assertions are correct regardless of collection order or which other files run."""
     sys.modules["speech_to_speech.TTS.pocket_tts_handler"].PocketTTSHandler = FakePocketTTSHandler
+
+# remote_speech_tts_handler.py imports `speech_to_speech.tts_capabilities` at
+# module scope -- alias it to the REAL module (same pattern as voice_clone/
+# brain_discovery in test_brain_control.py) BEFORE that import below, so these
+# tests exercise the actual cache/probe logic, not a missing stub.
+import patches.tts_capabilities as tts_capabilities  # noqa: E402
+
+sys.modules["speech_to_speech.tts_capabilities"] = tts_capabilities
 
 import patches.remote_speech_tts_handler as rsh  # noqa: E402
 
@@ -458,10 +476,20 @@ def test_boot_validation_fails_when_no_voice_configured():
         _make_handler(base_url=None, pocket_kwargs={})
 
 
-# ── instructions must never reach the wire empty ────────────────────────────
+# ── instructions: omitted by default, sent only when configured AND wanted ──
+# Owner ruling 2026-08-25: a fixed neutral instruct on every request IS a
+# one-string instruct layer, which the owner rejected -- the voice should come
+# back free-flowing unless an operator explicitly configures otherwise, and
+# even then only if the active backend's tts_capabilities probe says it wants
+# the field (some VoiceDesign builds fail silently on it -- see DEFAULT_INSTRUCTIONS).
 
 
-def _make_capturing_handler_cls(captured: list, pcm_bytes: bytes):
+def _make_capturing_handler_cls(captured: list, pcm_bytes: bytes, voices_response: dict | None = None):
+    """`voices_response`, when given, is served as the JSON body of
+    `GET /v1/audio/voices` -- lets a test control what `tts_capabilities`'s
+    remote probe observes. `None` means no route at all (404), which is what
+    a probe failure (and thus the empty-capabilities default) looks like."""
+
     class _Handler(BaseHTTPRequestHandler):
         def do_POST(self):
             length = int(self.headers.get("Content-Length", 0))
@@ -471,13 +499,24 @@ def _make_capturing_handler_cls(captured: list, pcm_bytes: bytes):
             self.end_headers()
             self.wfile.write(pcm_bytes)
 
+        def do_GET(self):
+            if self.path != "/v1/audio/voices" or voices_response is None:
+                self.send_response(404)
+                self.end_headers()
+                return
+            body = json.dumps(voices_response).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
         def log_message(self, *a):
             pass
 
     return _Handler
 
 
-def test_instructions_omitted_by_caller_uses_nonempty_default_on_wire():
+def test_instructions_omitted_when_none_configured():
     captured: list = []
     pcm_bytes = np.zeros(3000, dtype="<i2").tobytes()  # 6000 bytes, above the response floor
     server = _StubServer(_make_capturing_handler_cls(captured, pcm_bytes))
@@ -487,13 +526,12 @@ def test_instructions_omitted_by_caller_uses_nonempty_default_on_wire():
         list(handler.process(_TTSInput("hello")))
 
         assert len(captured) == 1
-        assert captured[0]["instructions"] == rsh.DEFAULT_INSTRUCTIONS
-        assert captured[0]["instructions"]  # non-empty on the wire
+        assert "instructions" not in captured[0]
     finally:
         server.close()
 
 
-def test_instructions_empty_or_whitespace_substitutes_default_on_wire():
+def test_instructions_whitespace_configured_is_also_omitted():
     captured: list = []
     pcm_bytes = np.zeros(3000, dtype="<i2").tobytes()
     server = _StubServer(_make_capturing_handler_cls(captured, pcm_bytes))
@@ -502,7 +540,41 @@ def test_instructions_empty_or_whitespace_substitutes_default_on_wire():
 
         list(handler.process(_TTSInput("hello")))
 
-        assert captured[0]["instructions"] == rsh.DEFAULT_INSTRUCTIONS
+        assert "instructions" not in captured[0]
+    finally:
+        server.close()
+
+
+def test_instructions_sent_when_configured_and_backend_accepts_them():
+    captured: list = []
+    pcm_bytes = np.zeros(3000, dtype="<i2").tobytes()
+    server = _StubServer(
+        _make_capturing_handler_cls(captured, pcm_bytes, voices_response={"voices": [], "accepts_instructions": True})
+    )
+    try:
+        handler = _make_handler(base_url=server.base_url, instructions="be dramatic")
+
+        list(handler.process(_TTSInput("hello")))
+
+        assert captured[0]["instructions"] == "be dramatic"
+    finally:
+        server.close()
+
+
+def test_instructions_omitted_when_backend_declares_it_does_not_accept_them():
+    captured: list = []
+    pcm_bytes = np.zeros(3000, dtype="<i2").tobytes()
+    server = _StubServer(
+        _make_capturing_handler_cls(
+            captured, pcm_bytes, voices_response={"voices": [], "accepts_instructions": False}
+        )
+    )
+    try:
+        handler = _make_handler(base_url=server.base_url, instructions="be dramatic")
+
+        list(handler.process(_TTSInput("hello")))
+
+        assert "instructions" not in captured[0]
     finally:
         server.close()
 
@@ -781,3 +853,25 @@ def test_setup_signature_matches_what_rename_args_produces():
         f"setup() accepts {sorted(unconsumed)}, but rename_args() (plus pocket_kwargs) "
         f"never produces them -- a dead parameter nobody can configure via CLI/JSON."
     )
+
+
+def test_rename_args_instructions_default_is_empty_on_the_real_pipeline_path():
+    """The seam that actually shipped wrong: `setup()`'s own default (asserted
+    on directly by every other test in this file, including the omission tests
+    above) is NEVER what the real pipeline hands the handler -- `rename_args()`
+    always produces an explicit `instructions` key, taken from
+    RemoteSpeechTTSHandlerArguments' field default, which overrides `setup()`'s
+    default entirely. `setup(instructions="")`'s default going empty was not
+    enough on its own; this ArgumentsClass field had to change too, or the live
+    pipeline kept sending the old neutral instruct on every request regardless.
+    Crosses the REAL rename_args boundary (same stub infra as
+    test_setup_signature_matches_what_rename_args_produces above), not a
+    reimplementation of it."""
+    _install_s2s_pipeline_stubs()
+    from patches.remote_speech_tts_arguments import RemoteSpeechTTSHandlerArguments
+    from patches.s2s_pipeline import rename_args
+
+    args = RemoteSpeechTTSHandlerArguments()
+    rename_args(args, "remote_speech")
+
+    assert args.__dict__["instructions"] == ""

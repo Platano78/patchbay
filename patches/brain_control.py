@@ -14,6 +14,7 @@ import httpx
 from openai import OpenAI
 
 from speech_to_speech.LLM.base_openai_compatible_language_model import BaseOpenAICompatibleHandler
+from speech_to_speech import tts_capabilities
 from speech_to_speech import voice_clone
 from speech_to_speech import voice_tools
 # brain_discovery is dependency-light by design (stdlib + httpx only, no
@@ -677,15 +678,14 @@ class BrainControl:
         return data[0].get("id")
 
     def _predefined_voices(self) -> list[str]:
-        """Names of pocket_tts's built-in preset voices, sorted. Empty on any
-        import failure (pocket_tts not installed, upstream rename, etc)."""
-        try:
-            from pocket_tts.utils.utils import _ORIGINS_OF_PREDEFINED_VOICES
-
-            return sorted(_ORIGINS_OF_PREDEFINED_VOICES.keys())
-        except Exception as e:
-            logger.warning("BrainControl: predefined voice list unavailable: %s", e)
+        """Names of the active TTS backend's built-in preset voices, sorted.
+        Delegates to `tts_capabilities` -- the backend-specific knowledge (the
+        local package import, the remote `/v1/audio/voices` probe) lives
+        there, not here. Empty when there is no TTS handler or nothing has
+        ever probed successfully."""
+        if self.tts_handler is None:
             return []
+        return tts_capabilities.get_capabilities(self.tts_handler).voices
 
     def handle(self, msg: dict[str, Any]) -> dict[str, Any]:
         try:
@@ -825,6 +825,11 @@ class BrainControl:
         """
         with self._config_lock:
             probes = dict(self._brain_probes)
+        # One capabilities snapshot for the whole payload -- `voices`,
+        # `can_clone`, and `accepts_instructions` must describe the SAME probe,
+        # not four separate ones that could disagree if a probe happened to
+        # land mid-build.
+        caps = tts_capabilities.get_capabilities(self.tts_handler) if self.tts_handler else None
         return {
             "active_brain": self.active_brain,
             "model": self.llm_handler.model_name,
@@ -833,9 +838,11 @@ class BrainControl:
             "persona_persisted": self.persona_persisted,
             "persona_tiers": self._persona_tier_state(),
             "voice": (self.tts_handler.voice or "") if self.tts_handler else "",
-            "voices": self._predefined_voices() if self.tts_handler else [],
+            "voices": caps.voices if caps else [],
             "custom_voices": voice_clone.list_custom_voices() if self.tts_handler else [],
             "speech_style": (getattr(self.tts_handler, "instructions", "") or "") if self.tts_handler else "",
+            "can_clone": caps.can_clone if caps else False,
+            "accepts_instructions": caps.accepts_instructions if caps else True,
             "tools_armed": self.tools_armed,
             "tools": list(self.tools_armed_names),
             "wake_word": self._wake_word_state(),
@@ -898,7 +905,13 @@ class BrainControl:
                 if self.streamer is not None:
                     self.streamer.broadcast_json(self._config_state())
             if "voice" in msg:
-                ok, error = self._set_voice(msg["voice"])
+                # `voice_audition` is opt-in: absent, or present but not a
+                # bool → True (unchanged behaviour). A caller can pass
+                # `voice_audition: false` to suppress the spoken sample
+                # (e.g. persona-switch voice change must not announce itself).
+                audition_val = msg.get("voice_audition")
+                audition = audition_val if isinstance(audition_val, bool) else True
+                ok, error = self._set_voice(msg["voice"], audition=audition)
                 if not ok:
                     return {"type": "config_ack", "ok": False, "error": error}
             if "speech_style" in msg:
@@ -1229,14 +1242,17 @@ class BrainControl:
         """Voice switching for the remote-speech backend (any OpenAI-compatible
         /v1/audio/speech server -- in practice your own TTS server).
 
-        Never probes the network: unlike the local path there is no state to
-        build up front, `voice` is just sent per-request (`_stream_remote`), so
-        this applies even while the remote is unreachable and simply takes
-        effect on the next utterance.
+        Unlike the local path there is no state to build up front: `voice` is
+        just sent per-request (`_stream_remote`), so a successful switch here
+        applies even while the remote is unreachable and simply takes effect on
+        the next utterance. `_predefined_voices()` below may still touch the
+        network (a `tts_capabilities` cache miss), but that's a validation
+        lookup, not this method building or sending any state itself.
         """
         if name not in self._predefined_voices():
-            # Preset names validate against the same list as the local backend --
-            # the remote server IS pocket-tts, so preset parity holds. Format-
+            # Preset names validate against the ACTIVE backend's own list (via
+            # `tts_capabilities`) -- not a pocket-specific one, so this holds
+            # for whatever remote server is actually configured. Format-
             # validated before the "custom voices unavailable" error so a
             # traversal-shaped name still gets the same "unknown voice" rejection
             # as the local path, even though nothing here builds a filesystem path.
@@ -1337,6 +1353,16 @@ class BrainControl:
 
         if self.tts_handler is None:
             return {"type": "voice_clone_result", "ok": False, "name": name, "error": "voice cloning unavailable"}
+        if not tts_capabilities.get_capabilities(self.tts_handler).can_clone:
+            # Distinct from the has_voice_cloning check below: this backend
+            # (a remote server) has no cloning capability at all, not "pocket
+            # is present but hasn't accepted the pocket-tts terms yet".
+            return {
+                "type": "voice_clone_result",
+                "ok": False,
+                "name": name,
+                "error": voice_clone.BACKEND_CANNOT_CLONE_MSG,
+            }
 
         ok, error = voice_clone.validate_name(name, self._predefined_voices())
         if not ok:
@@ -1365,6 +1391,14 @@ class BrainControl:
 
         if self.tts_handler is None:
             return {"type": "voice_clone_result", "ok": False, "name": name, "error": "voice cloning unavailable"}
+        if not tts_capabilities.get_capabilities(self.tts_handler).can_clone:
+            # Same distinction as _voice_clone_begin's early refusal.
+            return {
+                "type": "voice_clone_result",
+                "ok": False,
+                "name": name,
+                "error": voice_clone.BACKEND_CANNOT_CLONE_MSG,
+            }
         if not isinstance(raw, (bytes, bytearray)) or not raw:
             return {"type": "voice_clone_result", "ok": False, "name": name, "error": "empty upload"}
 

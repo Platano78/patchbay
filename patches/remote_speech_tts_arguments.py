@@ -44,15 +44,16 @@ class RemoteSpeechTTSHandlerArguments:
         metadata={"help": "Optional `voice` field, passed through to the server verbatim."},
     )
     remote_speech_instructions: str = field(
-        default="Speak in a clear, natural, neutral adult voice.",
+        default="",
         metadata={
             "help": "The `instructions` field, passed through to the server verbatim -- the "
             "expression/prosody handle. Sets the startup value; live-settable afterwards via "
             "config_set {speech_style: ...} (see brain_control.py). "
-            "Must never reach the server empty: this VoiceDesign build has no default speaker, "
-            "so an empty/whitespace instructions field yields a silent HTTP 200 with zero bytes "
-            "of audio (a verified failure mode, not hypothetical) -- an empty or whitespace-only "
-            "value here is replaced with this field's default at request time, never sent as-is."
+            "Empty by default: nothing is sent unless you set one, and an empty/whitespace "
+            "value means the field is OMITTED from the request rather than sent blank -- a "
+            "backend that declares accepts_instructions: false (probed at runtime, see "
+            "tts_capabilities.py) never receives it even if you do set one. See "
+            "docs/plans/tts-capability-seam_spec.md for the wire facts this is built on."
         },
     )
     remote_speech_sample_rate: int = field(

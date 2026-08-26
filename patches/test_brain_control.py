@@ -45,6 +45,7 @@ def _install_stubs():
         return m
 
     from patches import voice_clone as real_voice_clone
+    from patches import tts_capabilities as real_tts_capabilities
 
     pkg = mod("speech_to_speech")
     mod("speech_to_speech.LLM")
@@ -53,6 +54,8 @@ def _install_stubs():
     pkg.voice_tools = vt
     sys.modules["speech_to_speech.voice_clone"] = real_voice_clone
     pkg.voice_clone = real_voice_clone
+    sys.modules["speech_to_speech.tts_capabilities"] = real_tts_capabilities
+    pkg.tts_capabilities = real_tts_capabilities
 
     # Minimal surface needed to construct a REAL RemoteSpeechTTSHandler
     # (rather than a fake) so the speech_style tests below can assert on the
@@ -125,6 +128,7 @@ from patches import brain_discovery  # noqa: E402
 sys.modules["speech_to_speech.brain_discovery"] = brain_discovery
 
 from patches import brain_control  # noqa: E402
+from patches import voice_clone  # noqa: E402
 
 PREDEFINED_UNAVAILABLE_NOTE = "pocket_tts not installed -- _predefined_voices() returns [] safely"
 
@@ -140,6 +144,20 @@ def _default_voice_choice_env(tmp_path, monkeypatch):
     via `monkeypatch.delenv`/`monkeypatch.setenv` themselves.
     """
     monkeypatch.setenv("VOICE_CHOICE_FILE", str(tmp_path / "voice_choice.json"))
+
+
+@pytest.fixture(autouse=True)
+def _clear_tts_capabilities_cache():
+    """Module-level cache in tts_capabilities.py, keyed on base_url -- clear
+    it around every test so one test's probe result can never leak into
+    another's (most tests here use a fake handler with no base_url at all,
+    which is fine, but the few that stand up a real remote handler each get
+    a fresh ephemeral port anyway; this just makes that independence explicit)."""
+    from patches import tts_capabilities
+
+    tts_capabilities._cache.clear()
+    yield
+    tts_capabilities._cache.clear()
 
 
 # ── fakes ────────────────────────────────────────────────────────────────
@@ -167,6 +185,32 @@ class _FakeStreamer:
 
     def broadcast_json(self, payload):
         self.broadcasts.append(payload)
+
+
+def _closed_port_url() -> str:
+    """A base_url nothing listens on, so connections are refused instantly --
+    same helper as test_remote_speech_tts_handler.py's, avoids a slow (~3s
+    connect-timeout) probe against a merely-filtered port like 127.0.0.1:1."""
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return f"http://127.0.0.1:{port}"
+
+
+def _install_fake_pocket_module(monkeypatch, origins):
+    """Injects a fake `pocket_tts.utils.utils._ORIGINS_OF_PREDEFINED_VOICES`
+    -- same deterministic-not-ambient-environment reasoning as
+    test_tts_capabilities.py's helper of the same shape."""
+    pkg = types.ModuleType("pocket_tts")
+    utils_pkg = types.ModuleType("pocket_tts.utils")
+    utils_mod = types.ModuleType("pocket_tts.utils.utils")
+    utils_mod._ORIGINS_OF_PREDEFINED_VOICES = origins
+    monkeypatch.setitem(sys.modules, "pocket_tts", pkg)
+    monkeypatch.setitem(sys.modules, "pocket_tts.utils", utils_pkg)
+    monkeypatch.setitem(sys.modules, "pocket_tts.utils.utils", utils_mod)
 
 
 class _FakeTTSModel:
@@ -2009,3 +2053,102 @@ def test_discover_brains_failure_returns_empty_list_not_error(tmp_path, monkeypa
 
     assert ack["ok"] is True
     assert ack["discovered_brains"] == []
+
+
+# ── tts_capabilities seam: _predefined_voices delegation + can_clone gate ──
+
+
+def test_predefined_voices_delegates_to_tts_capabilities(tmp_path, monkeypatch):
+    _install_fake_pocket_module(monkeypatch, {"alba": object(), "jean": object()})
+    bc = _make_brain_control(tmp_path, tts_handler=_FakeTTSHandler("jean"))
+
+    assert bc._predefined_voices() == ["alba", "jean"]
+
+
+def test_predefined_voices_empty_without_tts_handler(tmp_path):
+    bc = _make_brain_control(tmp_path, tts_handler=None)
+
+    assert bc._predefined_voices() == []
+
+
+def test_state_payload_carries_local_backend_capabilities(tmp_path, monkeypatch):
+    _install_fake_pocket_module(monkeypatch, {"jean": object()})
+    bc = _make_brain_control(tmp_path, tts_handler=_FakeTTSHandler("jean"))
+
+    state = bc._config_state()
+
+    assert state["can_clone"] is True
+    assert state["accepts_instructions"] is False
+
+
+def test_voice_clone_begin_refuses_when_active_backend_cannot_clone(tmp_path):
+    # A remote-speech handler dialing a port nothing listens on: the capability
+    # probe fails fast (connection refused) and, having never succeeded, falls
+    # back to the empty default -- can_clone=False, same as any other backend
+    # with no cloning capability at all.
+    handler = _make_remote_speech_handler(_closed_port_url())
+    bc = _make_brain_control(tmp_path, tts_handler=handler)
+
+    result = bc._voice_clone_begin({"name": "my_voice", "ext": ".wav", "size": 100})
+
+    assert result["ok"] is False
+    assert result["error"] == voice_clone.BACKEND_CANNOT_CLONE_MSG
+
+
+# ── voice_audition suppression (config_set opt-in) ──────────────────────
+
+
+def test_config_set_voice_audition_false_suppresses_audition(tmp_path, monkeypatch):
+    """`config_set {voice: "javert", voice_audition: false}` must call
+    `_set_voice` with `audition=False`, which suppresses the spoken sample."""
+    handler = _make_remote_speech_handler("http://127.0.0.1:1")
+    bc = _make_brain_control(tmp_path, tts_handler=handler)
+    monkeypatch.setattr(bc, "_predefined_voices", lambda: ["jean", "javert"])
+
+    called = []
+    real_audition = bc._audition
+
+    def spy(name):
+        called.append(name)
+        return real_audition(name)
+
+    monkeypatch.setattr(bc, "_audition", spy)
+
+    ack = bc._config_set({"voice": "javert", "voice_audition": False})
+
+    assert ack["ok"] is True
+    assert handler.voice == "javert"
+    assert called == []  # no audition called
+
+
+def test_config_set_voice_without_audition_key_still_auditions(tmp_path, monkeypatch):
+    """Absent `voice_audition` → True (backward-compat: existing clients
+    still hear the sample after a voice switch)."""
+    handler = _make_remote_speech_handler("http://127.0.0.1:1")
+    bc = _make_brain_control(tmp_path, tts_handler=handler)
+    monkeypatch.setattr(bc, "_predefined_voices", lambda: ["jean", "javert"])
+
+    called = []
+    real_audition = bc._audition
+
+    def spy(name):
+        called.append(name)
+        return real_audition(name)
+
+    monkeypatch.setattr(bc, "_audition", spy)
+
+    ack = bc._config_set({"voice": "javert"})
+
+    assert ack["ok"] is True
+    assert handler.voice == "javert"
+    assert called == ["javert"]  # audition called -- default behaviour preserved
+
+
+def test_voice_clone_end_refuses_when_active_backend_cannot_clone(tmp_path):
+    handler = _make_remote_speech_handler(_closed_port_url())
+    bc = _make_brain_control(tmp_path, tts_handler=handler)
+
+    result = bc._voice_clone_end({"name": "my_voice", "ext": ".wav", "data": b"not empty"})
+
+    assert result["ok"] is False
+    assert result["error"] == voice_clone.BACKEND_CANNOT_CLONE_MSG

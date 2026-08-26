@@ -650,6 +650,9 @@
   #meterChrome, .panelFrame, #pttDeco, #fxBack, #bannerMount, .statCol { display: none; pointer-events: none; }
 
   .hint { font-size: 12px; color: var(--text-muted); text-align: center; }
+  /* A nudge, not an error: the editor holds something the brain isn't running
+     yet. Accent rather than --bad — nothing is broken, a step is outstanding. */
+  .hint.warn { color: var(--accent); }
 
   /* ── Diagnostics ─────────────────────────────────────────────────── */
   .diagToggle {
@@ -946,7 +949,12 @@
   #personaStatus { font-size: 12px; color: var(--text-muted); min-height: 16px; margin-top: 8px; word-break: break-word; }
   #personaTierHint { text-align: left; margin-top: 4px; }
   #personaScopeRow .panelBtn[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #05161a; font-weight: 700; }
-  #personaLibRow { display: flex; gap: 6px; }
+  /* wrap: the row holds a flex:1 name field plus buttons that deliberately
+     don't shrink (flex: 0 0 auto below), so a third button overflowed the
+     panel and forced a horizontal scrollbar rather than moving down. Wrapping
+     keeps every control fully readable at any panel width and survives a
+     longer button label (a voice name is appended to one of them). */
+  #personaLibRow { display: flex; gap: 6px; flex-wrap: wrap; }
   #personaLibRow .panelBtn { width: auto; flex: 0 0 auto; margin-top: 0; padding: 8px 12px; }
   #personaNameInput {
     flex: 1;
@@ -3105,11 +3113,13 @@
       <div class="jack"><span class="lcd-lamp" aria-hidden="true"></span><input type="text" id="personaNameInput" placeholder="Save as…" maxlength="40"></div>
       <button class="panelBtn" id="personaSaveBtn">Save</button>
       <button class="panelBtn" id="personaDeleteBtn">Delete</button>
+      <button class="panelBtn" id="personaVoicePairBtn">Pair voice</button>
     </div>
     <div class="voiceCloneLane">
       <button type="button" class="panelBtn" id="personaPresetBtn" hidden>Use the tuned preset</button>
       <button type="button" class="panelBtn" id="personaResetBtn">Clear</button>
     </div>
+    <div class="hint" id="personaApplyHint" role="status" aria-live="polite"></div>
     <div id="personaStatus" role="status" aria-live="polite"></div>
     <div class="hint" id="personaTierHint"></div>
   </details>
@@ -3589,9 +3599,11 @@ const els = {
   personaNameInput: document.getElementById("personaNameInput"),
   personaSaveBtn: document.getElementById("personaSaveBtn"),
   personaDeleteBtn: document.getElementById("personaDeleteBtn"),
+  personaVoicePairBtn: document.getElementById("personaVoicePairBtn"),
   personaResetBtn: document.getElementById("personaResetBtn"),
   personaPresetBtn: document.getElementById("personaPresetBtn"),
   personaStatus: document.getElementById("personaStatus"),
+  personaApplyHint: document.getElementById("personaApplyHint"),
   personaTierHint: document.getElementById("personaTierHint"),
   personaScopeGlobalBtn: document.getElementById("personaScopeGlobalBtn"),
   personaScopeBrainBtn: document.getElementById("personaScopeBrainBtn"),
@@ -4613,6 +4625,17 @@ const PERSONA_LIBRARY = [
 ];
 const PERSONA_LIB_KEY = "va-personas";
 const PERSONA_ACTIVE_KEY = "va-persona-active";
+// Persona -> default-voice pairing, keyed by the exact personaSelect option
+// value ("__default__", "builtin:<Name>", or a saved persona's plain name).
+// Deliberately a separate map -- va-personas' {name: text} shape is relied
+// on by existing users and this feature doesn't need to touch it.
+const PERSONA_VOICE_KEY = "va-persona-voices";
+function loadPersonaVoices() {
+  try { return JSON.parse(localStorage.getItem(PERSONA_VOICE_KEY)) || {}; } catch { return {}; }
+}
+function savePersonaVoices(obj) {
+  try { localStorage.setItem(PERSONA_VOICE_KEY, JSON.stringify(obj)); } catch {}
+}
 function loadPersonas() {
   try { return JSON.parse(localStorage.getItem(PERSONA_LIB_KEY)) || {}; } catch { return {}; }
 }
@@ -4657,6 +4680,41 @@ function populatePersonaSelect() {
     els.personaSelect.value = Object.prototype.hasOwnProperty.call(personas, active) ? active : "";
   }
   syncFaceplateSelectors();
+  updatePersonaVoicePairBtn();
+}
+// Look up this persona's paired voice (if any) and apply it, but only after
+// validating the name against the backend's live voice list. Pairings are
+// saved client-side per personaSelect option value, so a pairing made
+// against one TTS backend (its own name set) is meaningless against another
+// -- and sending config_set{voice} with a name the active backend doesn't
+// recognize isn't merely ignored: some backends answer HTTP 200 with zero
+// bytes of audio, i.e. silence with no error to surface. An unrecognized or
+// missing pairing is a no-op: the current voice is left exactly as it is.
+function applyPersonaVoicePairing(name) {
+  const voice = loadPersonaVoices()[name];
+  if (!voice) return;
+  if (!lastPredefinedVoices.includes(voice) && !lastCustomVoices.includes(voice)) return;
+  if (voice === els.voiceSelect.value) return;
+  els.voiceSelect.value = voice;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "config_set", voice, voice_audition: false }));
+  }
+}
+// Keeps the pair/unpair button's label truthful without a click: hidden for
+// the unnamed "custom" persona (no stable key to pair against), otherwise
+// says what a click will do against the CURRENTLY selected voice.
+function updatePersonaVoicePairBtn() {
+  if (!els.personaVoicePairBtn) return;
+  const name = els.personaSelect.value;
+  if (!name) {
+    els.personaVoicePairBtn.hidden = true;
+    return;
+  }
+  els.personaVoicePairBtn.hidden = false;
+  const paired = loadPersonaVoices()[name];
+  els.personaVoicePairBtn.textContent = paired
+    ? `Unpair voice (${paired})`
+    : `Pair voice (${els.voiceSelect.value || "none"})`;
 }
 els.personaSelect.addEventListener("change", () => {
   const name = els.personaSelect.value;
@@ -4685,8 +4743,15 @@ els.personaSelect.addEventListener("change", () => {
   } else {
     try { localStorage.setItem(PERSONA_ACTIVE_KEY, ""); } catch {}
   }
+  // Voice is a separate axis from persona text -- apply for every branch
+  // above, including built-ins (which never touch persona on the server).
+  applyPersonaVoicePairing(name);
   syncFaceplateSelectors();
+  updatePersonaVoicePairBtn();
+  updatePersonaApplyHint();
 });
+// Typing is the other way the editor drifts from what's running.
+els.personaInput.addEventListener("input", updatePersonaApplyHint);
 els.personaSaveBtn.addEventListener("click", () => {
   const name = els.personaNameInput.value.trim();
   if (!name) return;
@@ -4706,6 +4771,12 @@ els.personaDeleteBtn.addEventListener("click", () => {
   const personas = loadPersonas();
   delete personas[name];
   savePersonas(personas);
+  // The persona's key is gone, so any pairing keyed to it is dead weight too.
+  const pairings = loadPersonaVoices();
+  if (name in pairings) {
+    delete pairings[name];
+    savePersonaVoices(pairings);
+  }
   let active = ""; try { active = localStorage.getItem(PERSONA_ACTIVE_KEY) || ""; } catch {}
   if (active === name) {
     els.personaInput.value = "";
@@ -4716,6 +4787,22 @@ els.personaDeleteBtn.addEventListener("click", () => {
   }
   populatePersonaSelect();
 });
+// Explicit action only: this click is the sole place a pairing is written by
+// user intent (deletion above only ever removes one). A manual voice-select
+// change must never rewrite a pairing on its own -- trying a voice out is
+// not the same as declaring it a persona's default.
+els.personaVoicePairBtn.addEventListener("click", () => {
+  const name = els.personaSelect.value;
+  if (!name) return; // custom persona has no stable key to pair against
+  const pairings = loadPersonaVoices();
+  if (pairings[name]) {
+    delete pairings[name];
+  } else {
+    pairings[name] = els.voiceSelect.value;
+  }
+  savePersonaVoices(pairings);
+  updatePersonaVoicePairBtn();
+});
 populatePersonaSelect();
 
 // ── Custom voice cloning ────────────────────────────────────────────────
@@ -4723,6 +4810,11 @@ populatePersonaSelect();
 // patches/voice_clone.py + patches/brain_control.py + patches/websocket_streamer.py.
 let lastPredefinedVoices = [];
 let lastCustomVoices = [];
+// `can_clone` is a capability of the ACTIVE backend (tts_capabilities.py),
+// not "a voice list exists" -- absent key (an older server, or a frame that
+// doesn't carry it) must not be read as false, same "absent isn't news"
+// discipline as `wake_word` below. Defaults false: cloning is the exception.
+let lastCanClone = false;
 let voiceCloneBusy = false;      // true while an upload (file or recording) is in flight
 let pendingVoiceDeleteName = null; // set right before sending config_set{voice_delete}, so the
                                     // matching config_ack (ok or error) can be routed to this UI
@@ -5412,15 +5504,20 @@ function renderConfigState(ev) {
     els.personaInput.placeholder = personaPlaceholderForScope(defaultPersona);
   }
   renderPersonaStatus(ev);
+  updatePersonaApplyHint();
 
   if (Array.isArray(ev.voices)) lastPredefinedVoices = ev.voices;
   if (Array.isArray(ev.custom_voices)) lastCustomVoices = ev.custom_voices;
+  if ("can_clone" in ev) lastCanClone = !!ev.can_clone;
   const hasVoices = lastPredefinedVoices.length > 0;
   els.voiceLabel.hidden = !hasVoices;
   els.voiceSelect.hidden = !hasVoices;
   // `voices` is the tts-handler-present signal, and it now rides on both frames
   // — the caveat that used to live here (only config_state carried it) is gone.
-  els.voiceCloneAdvanced.hidden = !hasVoices;
+  // The clone panel is gated on `can_clone` instead, not on a voice list
+  // existing -- a remote backend can have plenty of voices and still be
+  // unable to clone any (see docs/plans/tts-capability-seam_spec.md).
+  els.voiceCloneAdvanced.hidden = !lastCanClone;
   renderVoiceDropdown(ev.voice);
   renderCustomVoiceList();
 
@@ -5461,6 +5558,33 @@ function renderConfigState(ev) {
 // doesn't send it leaves lastPersonaTiers null, and the panel degrades to the
 // single-field behaviour it had before.
 let lastPersonaTiers = null;
+// Says, IN the persona section, whether what you're reading is actually what
+// the brain is running. These diverge silently and often: selecting a built-in
+// fills the editor and deliberately never sends anything, and typing an edit
+// doesn't send either — while the Apply button that commits it lives OUTSIDE
+// this section, down with Reset chat. Nothing on screen said so, so a persona
+// could look active while the brain ran something else entirely.
+//
+// Compares against `personaTextForScope()` — the server's text for the
+// CURRENTLY SELECTED scope — not the resolved persona, because the editor
+// edits one tier. Comparing to the resolved persona would false-alarm whenever
+// global scope is selected but a brain override outranks it. Derived from
+// state rather than from "did the user click something", so it stays honest
+// for a typed edit, a built-in pick, and a fresh page load alike.
+function updatePersonaApplyHint() {
+  const el = els.personaApplyHint;
+  if (!el) return;
+  if (!lastPersonaTiers) { el.textContent = ""; el.classList.remove("warn"); return; }
+  const editor = (els.personaInput.value || "").trim();
+  const onServer = (personaTextForScope() || "").trim();
+  if (editor === onServer) {
+    el.textContent = "";
+    el.classList.remove("warn");
+  } else {
+    el.textContent = "Not in force yet — click Apply, below the panel's sections.";
+    el.classList.add("warn");
+  }
+}
 let personaScope = "global";
 
 // The textarea always edits exactly one tier: the global, or this brain's
@@ -5693,6 +5817,9 @@ els.voiceSelect.addEventListener("change", () => {
     ws.send(JSON.stringify({ type: "config_set", voice: els.voiceSelect.value }));
   }
   syncFaceplateSelectors();
+  // Label only, never the pairing itself -- see the explicit-action-only
+  // comment on the pair button's own click handler.
+  updatePersonaVoicePairBtn();
 });
 // Instrument faceplate glue: the ARM throw switch is a physical mirror of the
 // settings panel's wake-word checkbox, not a second source of truth.
@@ -6505,7 +6632,28 @@ function enqueuePlayback(arrayBuffer) {
   if (avatarAudioTapNode) src.connect(avatarAudioTapNode);
 
   const now = ctx.currentTime;
-  if (nextStartTime < now) nextStartTime = now + 0.02; // small priming gap
+  // DIAGNOSTIC (2026-08-26): `nextStartTime < now` means the playhead ran dry
+  // before this chunk arrived — an underrun, heard as a momentary cut with
+  // speech resuming after it. Counted (not just logged) so a whole
+  // conversation can be judged from one number: `window.vaAudioUnderruns`.
+  // Seeded to 0 at the first scheduled chunk, NOT lazily on the first
+  // underrun: a lazily-created counter reads `undefined` both when nothing
+  // went wrong and when this build never loaded, which are the two answers
+  // the diagnostic exists to tell apart.
+  if (window.vaAudioUnderruns === undefined) {
+    window.vaAudioUnderruns = 0;
+    window.vaAudioUnderrunGaps = [];
+  }
+  if (nextStartTime < now) {
+    if (nextStartTime > 0) {
+      window.vaAudioUnderruns = (window.vaAudioUnderruns || 0) + 1;
+      window.vaAudioUnderrunGaps = window.vaAudioUnderrunGaps || [];
+      window.vaAudioUnderrunGaps.push(+(now - nextStartTime).toFixed(3));
+      console.warn("[va] audio underrun #" + window.vaAudioUnderruns +
+                   " — playhead dry for " + (now - nextStartTime).toFixed(3) + "s");
+    }
+    nextStartTime = now + 0.02; // small priming gap
+  }
   src.start(nextStartTime);
   nextStartTime += buf.duration;
   noteLocalPlayback(nextStartTime); // nextStartTime already IS the scheduled tail

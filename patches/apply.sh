@@ -40,6 +40,7 @@ FILES=(
   "brain_control.py|brain_control.py"
   "brain_discovery.py|brain_discovery.py"
   "voice_clone.py|voice_clone.py"
+  "tts_capabilities.py|tts_capabilities.py"
   "websocket_streamer.py|connections/websocket_streamer.py"
   "s2s_pipeline.py|s2s_pipeline.py"
   "lm_output_processor.py|LLM/lm_output_processor.py"

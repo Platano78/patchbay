@@ -376,12 +376,42 @@ WebSocket control channel:
 {"type": "config_set", "speech_style": "cheerful and upbeat, like a game show host"}
 ```
 
-`config_get` reports the current value back. Clearing it (empty or
-whitespace) reverts to the default rather than ever sending an empty value —
-an empty `instructions` field is a verified silent failure mode (HTTP 200,
-zero bytes of audio) on at least one such server. `config_set {speech_style:
-...}` against `pocket` or `kokoro` returns a clear error naming the active
-backend instead of silently doing nothing, since neither has this handle.
+`config_get` reports the current value back. It is **empty by default**, and
+an empty value means the field is left out of the request entirely rather than
+sent blank — an empty `instructions` string is a verified silent failure mode
+(HTTP 200, zero bytes of audio) on at least one such server. Nothing is sent
+unless you ask for it, so the delivery you get is whatever the model does with
+the text itself. `config_set {speech_style: ...}` against `pocket` or `kokoro`
+returns a clear error naming the active backend instead of silently doing
+nothing, since neither has this handle.
+
+### What your TTS server can tell the cockpit
+
+The cockpit does not assume anything about which TTS backend you run — it
+*asks*. On `GET /v1/audio/voices` it reads three things, all optional:
+
+```json
+{
+  "voices": [{"name": "jean", "kind": "speaker"}],
+  "can_clone": false,
+  "accepts_instructions": false
+}
+```
+
+| field | default if absent | what it controls |
+|---|---|---|
+| `voices` | *(empty — the voice picker hides)* | the names in the cockpit's voice dropdown |
+| `can_clone` | `false` | whether the **Advanced — custom voice** panel is shown |
+| `accepts_instructions` | `true` | whether `instructions` is transmitted at all |
+
+A bare `["jean", "alba"]` array works too; `voices` is parsed liberally.
+
+Serving none of this is fine — the endpoint is optional and a server that
+doesn't answer simply gets the defaults above. But a server that *does* answer
+gets a cockpit whose dropdown matches reality, which matters more than it
+sounds: some servers answer an unknown voice with `200 OK` and zero bytes
+rather than an error, so a stale dropdown produces silence instead of a
+message you can act on.
 
 ## Custom voices (voice cloning)
 

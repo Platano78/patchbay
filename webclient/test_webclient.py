@@ -1617,6 +1617,122 @@ def test_persona_display_opens_service_panel(client):
     assert page.evaluate("() => document.getElementById('personaGroup').open") is True
 
 
+def test_persona_lib_row_does_not_overflow_with_longest_button_label(client):
+    """The persona row holds a flex:1 name field plus buttons that deliberately
+    don't shrink, so every control added to it eats width that isn't there.
+    Adding the pair button pushed it 120px past the row's right edge and forced
+    a horizontal scrollbar — invisible to every other test, because an idle
+    layout fits and only a populated one collides. Asserts on the widest label
+    the button can actually hold (the longest voice name), not the idle one."""
+    page, server = client
+    server.send(dict(CONFIG_STATE, voices=["alba", "jean", "ono_anna"], voice="jean"))
+    page.click("#personaDisplay")
+    page.wait_for_function(
+        "() => document.getElementById('personaGroup').open", timeout=10000)
+    # Force the widest realistic label rather than trusting the idle one to be
+    # representative -- this is the state the defect appeared in.
+    page.evaluate(
+        "() => { const b = document.getElementById('personaVoicePairBtn');"
+        "        b.hidden = false; b.textContent = 'Unpair voice (ono_anna)'; }")
+    page.wait_for_timeout(200)
+    metrics = page.evaluate(
+        "() => { const row = document.getElementById('personaLibRow');"
+        "        const btn = document.getElementById('personaVoicePairBtn');"
+        "        const rb = row.getBoundingClientRect();"
+        "        const bb = btn.getBoundingClientRect();"
+        "        return { overflow: row.scrollWidth - row.clientWidth,"
+        "                 inside: bb.right <= rb.right + 1 }; }")
+    assert metrics["overflow"] == 0, (
+        f"#personaLibRow overflows by {metrics['overflow']}px -- a control was added "
+        f"to a row with no width budget; it needs flex-wrap, not a shorter label")
+    assert metrics["inside"] is True, "pair button extends past the row's right edge"
+
+
+def test_persona_voice_pairing_applies_on_switch(client):
+    """A voice paired to a persona is applied (voiceSelect + config_set) the
+    next time that persona is selected -- and only then, not on every frame."""
+    page, server = client
+    server.send(dict(CONFIG_STATE, voices=["alba", "jean", "fantine"], voice="jean"))
+    page.wait_for_function(
+        "() => document.getElementById('voiceSelect').value === 'jean'", timeout=10000)
+    page.click("#personaDisplay")
+    page.wait_for_function(
+        "() => document.getElementById('personaGroup').open", timeout=10000)
+
+    page.select_option("#personaSelect", "builtin:The Butler")
+    page.select_option("#voiceSelect", "alba")
+    server.text_msgs.clear()
+    page.click("#personaVoicePairBtn")
+    assert page.evaluate(
+        "() => JSON.parse(localStorage.getItem('va-persona-voices'))['builtin:The Butler']"
+    ) == "alba"
+
+    # Switch away, put the voice back to something else manually, then
+    # switch back to the paired persona -- the pairing should reassert itself.
+    page.select_option("#personaSelect", "__default__")
+    page.select_option("#voiceSelect", "fantine")
+    server.text_msgs.clear()
+    page.select_option("#personaSelect", "builtin:The Butler")
+    page.wait_for_function(
+        "() => document.getElementById('voiceSelect').value === 'alba'", timeout=10000)
+    voice_sets = [m for m in server.text_msgs
+                  if m.get("type") == "config_set" and "voice" in m]
+    assert voice_sets and voice_sets[-1]["voice"] == "alba"
+    assert voice_sets[-1].get("voice_audition") is False
+
+
+def test_persona_voice_pairing_ignored_when_voice_unknown(client):
+    """A pairing naming a voice the CURRENT backend doesn't expose (e.g. a
+    pairing made against a different TTS backend) must be a no-op, never
+    sent to the server -- an unrecognized voice can mean silent audio on
+    some backends, so guessing is worse than doing nothing."""
+    page, server = client
+    server.send(dict(CONFIG_STATE, voices=["alba", "jean", "fantine"], voice="jean"))
+    page.wait_for_function(
+        "() => document.getElementById('voiceSelect').value === 'jean'", timeout=10000)
+    page.click("#personaDisplay")
+    page.wait_for_function(
+        "() => document.getElementById('personaGroup').open", timeout=10000)
+
+    # Simulate a stale pairing from a different backend's voice list -- the
+    # picker itself can never select an unknown voice, so this has to be
+    # injected directly, exactly as a leftover localStorage entry would be.
+    page.evaluate(
+        "() => localStorage.setItem('va-persona-voices', "
+        "JSON.stringify({'builtin:The Butler': 'not-a-real-voice'}))")
+    server.text_msgs.clear()
+    page.select_option("#personaSelect", "builtin:The Butler")
+    page.wait_for_timeout(300)
+    assert page.evaluate("() => document.getElementById('voiceSelect').value") == "jean"
+    voice_sets = [m for m in server.text_msgs
+                  if m.get("type") == "config_set" and "voice" in m]
+    assert not voice_sets
+
+
+def test_manual_voice_change_does_not_rewrite_pairing(client):
+    """Picking a different voice from the dropdown is trying it out, not
+    declaring a new default -- an existing pairing must survive untouched."""
+    page, server = client
+    server.send(dict(CONFIG_STATE, voices=["alba", "jean", "fantine"], voice="jean"))
+    page.wait_for_function(
+        "() => document.getElementById('voiceSelect').value === 'jean'", timeout=10000)
+    page.click("#personaDisplay")
+    page.wait_for_function(
+        "() => document.getElementById('personaGroup').open", timeout=10000)
+
+    page.select_option("#personaSelect", "builtin:The Butler")
+    page.select_option("#voiceSelect", "alba")
+    page.click("#personaVoicePairBtn")
+    assert page.evaluate(
+        "() => JSON.parse(localStorage.getItem('va-persona-voices'))['builtin:The Butler']"
+    ) == "alba"
+
+    page.select_option("#voiceSelect", "fantine")
+    assert page.evaluate(
+        "() => JSON.parse(localStorage.getItem('va-persona-voices'))['builtin:The Butler']"
+    ) == "alba"
+
+
 # ── Service panel (P3 instrument port) ───────────────────────────────────
 
 def test_service_panel_details_have_disclosure_lamps(client):

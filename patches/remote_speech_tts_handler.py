@@ -13,6 +13,7 @@ import httpx
 import numpy as np
 from rich.console import Console
 
+from speech_to_speech import tts_capabilities
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
@@ -25,9 +26,14 @@ console = Console()
 # The response_format="pcm" contract of OpenAI's /v1/audio/speech API: s16le, mono, 24kHz.
 REMOTE_SAMPLE_RATE = 24000
 
-# This VoiceDesign build has no default speaker: an empty/whitespace `instructions`
-# field yields a verified failure mode -- HTTP 200, Content-Type audio/pcm, ZERO
-# bytes, in well under a millisecond. `instructions` must never reach the wire empty.
+# Zero-bytes-on-empty-`instructions` is a property of ONE VoiceDesign build we
+# probed, not every OpenAI-`/v1/audio/speech` server (qwen CustomVoice is happy
+# with the field absent -- see docs/plans/tts-capability-seam_spec.md). So this
+# is no longer a universal default: by default no instructions are sent at all
+# (owner ruling 2026-08-25 -- a fixed neutral instruct on every request IS a
+# one-string instruct layer, and the voice is meant to come back free-flowing).
+# This constant is what an operator passes explicitly via
+# `--remote_speech_instructions` when running a backend that DOES need one.
 DEFAULT_INSTRUCTIONS = "Speak in a clear, natural, neutral adult voice."
 
 # A 200 response is not proof of a real utterance: the same empty-instructions bug
@@ -73,7 +79,7 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
         fallback_preload: bool = False,
         model: str = "tts-1",
         voice: Optional[str] = None,
-        instructions: str = DEFAULT_INSTRUCTIONS,
+        instructions: str = "",
         sample_rate: int = 16000,
         blocksize: int = 512,
         connect_timeout_s: float = 1.0,
@@ -104,8 +110,9 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.fallback_preload = fallback_preload
         self.model = model
         self.voice = voice
-        # Never send an empty/whitespace instructions field -- see DEFAULT_INSTRUCTIONS.
-        self.instructions = (instructions or "").strip() or DEFAULT_INSTRUCTIONS
+        # Empty/whitespace stays empty -- an operator-supplied instruct (or none
+        # at all, the default) is respected as-is. See DEFAULT_INSTRUCTIONS.
+        self.instructions = (instructions or "").strip()
         self.sample_rate = sample_rate
         self.blocksize = blocksize
         self.connect_timeout_s = connect_timeout_s
@@ -293,13 +300,16 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
             "model": self.model,
             "input": text,
             "response_format": "pcm",
-            # Always sent, never omitted or empty: this build has no default
-            # speaker, and an empty instructions field is a verified silent
-            # (200 + zero bytes) failure mode -- see DEFAULT_INSTRUCTIONS.
-            "instructions": self.instructions,
         }
         if self.voice:
             payload["voice"] = self.voice
+        # Omitted (never sent as an empty string) unless there's something to
+        # say AND the active backend actually wants it -- a backend that
+        # declares accepts_instructions: false (e.g. a CustomVoice model) is
+        # honored even if an operator configured one. See DEFAULT_INSTRUCTIONS
+        # and docs/plans/tts-capability-seam_spec.md.
+        if self.instructions and tts_capabilities.get_capabilities(self).accepts_instructions:
+            payload["instructions"] = self.instructions
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
         start = perf_counter()

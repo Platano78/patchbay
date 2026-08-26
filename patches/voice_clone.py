@@ -49,6 +49,13 @@ CLONING_UNAVAILABLE_MSG = (
     "service user, then restart the service."
 )
 
+# Distinct from CLONING_UNAVAILABLE_MSG above: that one means "pocket is the
+# backend but hasn't been set up for cloning yet" (an operator fix). This one
+# means the active TTS backend has no cloning capability at all -- a remote
+# server, which has no way to load the sidecar .safetensors state files
+# cloning writes on the pipeline host. No operator action closes this one.
+BACKEND_CANNOT_CLONE_MSG = "The active TTS backend does not support voice cloning."
+
 # Ruling 9: lowercase, digits, underscore, hyphen, 1-32 chars.
 _NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 
