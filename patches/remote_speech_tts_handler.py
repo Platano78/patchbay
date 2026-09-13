@@ -134,6 +134,9 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         self._consecutive_failures = 0
         self._circuit_open_until = 0.0
+        # Logged once (not per utterance) the first time an operator-set
+        # instruct suppresses a per-turn affect -- see _stream_remote.
+        self._affect_suppression_logged = False
 
         # Pocket is the automatic fallback. It runs as a plain synthesis engine
         # (setup() + direct process() calls below), never as its own pipeline
@@ -291,11 +294,18 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         return resample_poly(audio, up=self._resample_up, down=self._resample_down)
 
-    def _stream_remote(self, text: str) -> Iterator[TTSOut]:
+    def _stream_remote(self, text: str, affect: str | None = None) -> Iterator[TTSOut]:
         """Stream PCM audio from the remote server, resampled and blocked to match
         the pipeline's output contract. Raises on any failure (connect error, HTTP
         error, the total-duration cap, a mid-stream disconnect, or an implausibly
-        short/empty response) so the caller can fall back to pocket."""
+        short/empty response) so the caller can fall back to pocket.
+
+        ``affect`` is the brain's per-turn delivery note (see
+        ``voice_affect.py``). An operator-configured ``self.instructions``
+        always wins over it -- ``speech_style`` is an explicit live user
+        action surfaced in the cockpit panel, and silently overriding it
+        every turn would make the panel lie about what the voice is doing.
+        """
         payload: dict[str, Any] = {
             "model": self.model,
             "input": text,
@@ -308,8 +318,17 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
         # declares accepts_instructions: false (e.g. a CustomVoice model) is
         # honored even if an operator configured one. See DEFAULT_INSTRUCTIONS
         # and docs/plans/tts-capability-seam_spec.md (maintainer notes, not in the public export).
-        if self.instructions and tts_capabilities.get_capabilities(self).accepts_instructions:
-            payload["instructions"] = self.instructions
+        if self.instructions:
+            resolved_instructions = self.instructions
+            if affect and not self._affect_suppression_logged:
+                self._affect_suppression_logged = True
+                logger.info(
+                    "remote-speech: per-turn affect suppressed by operator instructions=%r", self.instructions
+                )
+        else:
+            resolved_instructions = affect
+        if resolved_instructions and tts_capabilities.get_capabilities(self).accepts_instructions:
+            payload["instructions"] = resolved_instructions
 
         gen = self.cancel_scope.generation if self.cancel_scope else None
         start = perf_counter()
@@ -425,11 +444,15 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
             speculative_turns.commit(tts_input.turn_id, tts_input.turn_revision)
 
         text = tts_input.text
+        # Feature-detection, never isinstance(): a plain TTSInput from the
+        # voice-audition or hermes-cockpit call sites has no `affect`
+        # attribute at all, and must send no instruct either.
+        affect = getattr(tts_input, "affect", None)
 
         if self.base_url is not None and self._circuit_allows_remote():
             console.print(f"[green]ASSISTANT: {text}")
             try:
-                for chunk in self._stream_remote(text):
+                for chunk in self._stream_remote(text, affect):
                     yield chunk
                 self._record_success()
                 return

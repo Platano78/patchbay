@@ -156,6 +156,16 @@ class _TTSInput:
         self.text = text
 
 
+class _AffectTTSInput(_TTSInput):
+    """Stands in for lm_output_processor.AffectTTSInput -- carries a per-turn
+    affect note. A plain `_TTSInput` (no `affect` attribute at all) is what
+    the voice-audition / hermes-cockpit call sites actually construct."""
+
+    def __init__(self, text: str, affect: str | None):
+        super().__init__(text)
+        self.affect = affect
+
+
 def _make_handler(base_url, pocket_kwargs=None, **overrides):
     FakePocketTTSHandler.calls = []
     FakePocketTTSHandler.construct_count = 0
@@ -385,7 +395,7 @@ def test_trickle_trips_duration_cap_and_falls_back():
 def test_circuit_breaker_opens_then_recloses_after_successful_probe(monkeypatch):
     handler = _make_handler(base_url="http://example.invalid", failure_threshold=3)
 
-    def always_fails(text):
+    def always_fails(text, affect=None):
         raise ConnectionError("simulated remote failure")
         yield  # pragma: no cover -- makes this a generator
 
@@ -423,7 +433,7 @@ def test_circuit_breaker_opens_then_recloses_after_successful_probe(monkeypatch)
     # A successful probe closes the circuit and this utterance is attempted
     # (and succeeds) on the remote again.
     monkeypatch.setattr(handler, "_probe_health", lambda: True)
-    monkeypatch.setattr(handler, "_stream_remote", lambda text: iter([np.array([1, 2], dtype=np.int16)]))
+    monkeypatch.setattr(handler, "_stream_remote", lambda text, affect=None: iter([np.array([1, 2], dtype=np.int16)]))
     chunks = list(handler.process(_TTSInput("hi")))
 
     assert handler._circuit_open_until == 0.0
@@ -579,6 +589,98 @@ def test_instructions_omitted_when_backend_declares_it_does_not_accept_them():
         server.close()
 
 
+# ── per-turn affect: precedence against operator instructions ──────────────
+# Owner ruling: operator-set `--remote_speech_instructions` (or live
+# `speech_style`) always wins over the brain's per-turn affect -- silently
+# overriding an explicit live user action would make the cockpit panel lie.
+
+
+def test_affect_used_when_no_operator_instructions_configured():
+    captured: list = []
+    pcm_bytes = np.zeros(3000, dtype="<i2").tobytes()
+    server = _StubServer(
+        _make_capturing_handler_cls(captured, pcm_bytes, voices_response={"voices": [], "accepts_instructions": True})
+    )
+    try:
+        handler = _make_handler(base_url=server.base_url)  # no operator instructions configured
+
+        list(handler.process(_AffectTTSInput("hello", "be amused")))
+
+        assert captured[0]["instructions"] == "be amused"
+    finally:
+        server.close()
+
+
+def test_operator_instructions_win_over_affect():
+    captured: list = []
+    pcm_bytes = np.zeros(3000, dtype="<i2").tobytes()
+    server = _StubServer(
+        _make_capturing_handler_cls(captured, pcm_bytes, voices_response={"voices": [], "accepts_instructions": True})
+    )
+    try:
+        handler = _make_handler(base_url=server.base_url, instructions="be dramatic")
+
+        list(handler.process(_AffectTTSInput("hello", "be amused")))
+
+        assert captured[0]["instructions"] == "be dramatic"
+    finally:
+        server.close()
+
+
+def test_no_operator_instructions_and_no_affect_sends_no_instructions_key():
+    captured: list = []
+    pcm_bytes = np.zeros(3000, dtype="<i2").tobytes()
+    server = _StubServer(
+        _make_capturing_handler_cls(captured, pcm_bytes, voices_response={"voices": [], "accepts_instructions": True})
+    )
+    try:
+        handler = _make_handler(base_url=server.base_url)
+
+        list(handler.process(_AffectTTSInput("hello", None)))
+
+        assert "instructions" not in captured[0]
+    finally:
+        server.close()
+
+
+def test_affect_omitted_when_backend_does_not_accept_instructions():
+    captured: list = []
+    pcm_bytes = np.zeros(3000, dtype="<i2").tobytes()
+    server = _StubServer(
+        _make_capturing_handler_cls(
+            captured, pcm_bytes, voices_response={"voices": [], "accepts_instructions": False}
+        )
+    )
+    try:
+        handler = _make_handler(base_url=server.base_url)
+
+        list(handler.process(_AffectTTSInput("hello", "be amused")))
+
+        assert "instructions" not in captured[0]
+    finally:
+        server.close()
+
+
+def test_plain_tts_input_with_no_affect_attribute_reaches_stream_remote_unaffected():
+    # The voice-audition / hermes-cockpit call sites construct a bare
+    # TTSInput with no `affect` attribute at all -- getattr(..., None) must
+    # not raise, and no instruct is sent.
+    captured: list = []
+    pcm_bytes = np.zeros(3000, dtype="<i2").tobytes()
+    server = _StubServer(
+        _make_capturing_handler_cls(captured, pcm_bytes, voices_response={"voices": [], "accepts_instructions": True})
+    )
+    try:
+        handler = _make_handler(base_url=server.base_url)
+
+        chunks = list(handler.process(_TTSInput("hello")))  # plain, no .affect
+
+        assert len(chunks) > 0
+        assert "instructions" not in captured[0]
+    finally:
+        server.close()
+
+
 # ── "success-shaped but empty" responses must fail over, not play as silence ──
 
 
@@ -686,7 +788,7 @@ def test_circuit_breaker_tolerates_warmup_without_retry_storm(monkeypatch):
         cooldown_s=5.0,
     )
 
-    def always_fails(text):
+    def always_fails(text, affect=None):
         raise ConnectionError("simulated remote down")
         yield  # pragma: no cover -- makes this a generator
 
@@ -725,7 +827,7 @@ def test_circuit_breaker_tolerates_warmup_without_retry_storm(monkeypatch):
 
     # The remote is now actually healthy -- the next probe should close it cleanly.
     monkeypatch.setattr(handler, "_probe_health", lambda: True)
-    monkeypatch.setattr(handler, "_stream_remote", lambda text: iter([np.array([9], dtype=np.int16)]))
+    monkeypatch.setattr(handler, "_stream_remote", lambda text, affect=None: iter([np.array([9], dtype=np.int16)]))
     fake_now[0] += handler.cooldown_s + 0.1
 
     chunks = list(handler.process(_TTSInput("hi")))

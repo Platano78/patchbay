@@ -48,11 +48,13 @@ FILES=(
   "voice_tools.py|voice_tools.py"
   "turn_stats.py|turn_stats.py"
   "reflex_lane.py|reflex_lane.py"
+  "parrot_lane.py|parrot_lane.py"
   "hermes_cockpit.py|hermes_cockpit.py"
   "wakeword_gate.py|wakeword_gate.py"
   "echo_gate.py|echo_gate.py"
   "think_filter.py|think_filter.py"
   "voice_rules.py|voice_rules.py"
+  "voice_affect.py|voice_affect.py"
   "phone_context.py|phone_context.py"
   "transcript_buffer.py|transcript_buffer.py"
   "chat_completions_language_model.py|LLM/chat_completions_language_model.py"
@@ -93,6 +95,32 @@ done
 [ "$DRY_RUN" -eq 1 ] && echo "DRY RUN — nothing will be written."
 echo "Destination: $PKG"
 echo "  ($ORIGIN)"
+
+# Back up every file we are about to overwrite, BEFORE overwriting any of them.
+# The deploy runbook has always said "backup FIRST", but that was a manual step
+# nobody automated -- a deploy on 2026-09-04 found the newest tar was ten days
+# stale, i.e. the safety net named in the docs did not exist. Only files that
+# already exist are saved; a `new` file has no prior version to restore. A
+# failed backup ABORTS rather than warning, because proceeding anyway would
+# silently recreate exactly the gap this closes.
+if [ "$DRY_RUN" -eq 0 ]; then
+  backup_tar="/tmp/pipeline-backup-$(date -u +%Y%m%d-%H%M%S).tar.gz"
+  backup_files=()
+  for entry in "${FILES[@]}"; do
+    rel="${entry#*|}"
+    [ -f "$PKG/$rel" ] && backup_files+=("$rel")
+  done
+  if [ "${#backup_files[@]}" -gt 0 ]; then
+    tar czf "$backup_tar" -C "$PKG" "${backup_files[@]}" || {
+      echo "Aborting: backup to $backup_tar failed, nothing was copied." >&2
+      exit 1; }
+    echo "Backup: $backup_tar (${#backup_files[@]} file(s))"
+    echo "  restore with: tar xzf $backup_tar -C $PKG"
+  else
+    echo "Backup: none needed — no existing destination files (first install)."
+  fi
+fi
+
 for entry in "${FILES[@]}"; do
   src="$SCRIPT_DIR/${entry%%|*}"
   dst="$PKG/${entry#*|}"

@@ -43,6 +43,11 @@ docs/pronunciation-smoke-test.md
 # Local benchmark audio (large, and voice recordings are not distributable)
 bench-wavs/
 
+# TTS Arena audition instrument — rendered audio + verdict log are outputs,
+# not source; the code (arena/*.py, arena/*.html, arena/configs.json) is tracked.
+arena/renders/
+arena/verdicts.jsonl
+
 # Python
 __pycache__/
 *.pyc

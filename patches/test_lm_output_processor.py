@@ -143,6 +143,13 @@ def _install_stubs():
         response_wants_audio=lambda response: True,
         _generate_id=lambda prefix: f"{prefix}_{next(_id_counter)}",
     )
+    # Aliased to the REAL module (not stubbed), same pattern as
+    # test_stream_watchdog.py's phone_context/think_filter aliasing:
+    # voice_affect.py is dependency-free, so exercising the real
+    # extraction/env-gate logic costs nothing and the tests below need it.
+    from patches import voice_affect as real_voice_affect
+
+    sys.modules["speech_to_speech.voice_affect"] = real_voice_affect
 
 
 _install_stubs()
@@ -608,3 +615,214 @@ def test_buffer_items_all_satisfy_compaction_invariant(monkeypatch):
 
     assert len(rc.chat.buffer) == 10
     _assert_compaction_invariant(rc.chat)
+
+
+# ── unparseable tool-call arguments are refused, not executed on {} ─────
+
+
+def test_unparseable_arguments_are_refused_not_executed(monkeypatch, caplog):
+    calls = []
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: calls.append(1) or "ok")
+    tpq = Queue()
+    proc = _make_processor(text_prompt_queue=tpq)
+    rc = _FakeRuntimeConfig()
+    tool_call = _FakeToolCall("weather", "call-1", arguments='{"location": "Denver"')  # truncated, unparseable
+    chunk = _chunk(tools=[tool_call], runtime_config=rc)
+
+    with caplog.at_level("WARNING", logger=lm_output_processor.__name__):
+        list(proc.process(chunk))
+
+    assert calls == []  # execute() must NOT run
+    assert len(rc.chat.tool_outputs) == 1
+    output_obj = rc.chat.tool_outputs[0][1]
+    assert output_obj.output == lm_output_processor._SYNTHETIC_UNPARSEABLE_ARGS_OUTPUT
+    assert output_obj.id
+    assert tpq.qsize() == 1  # refused call still counts as resolved -> follow-up pushed
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("weather" in r.getMessage() for r in warnings)
+
+
+def test_empty_arguments_still_execute_with_empty_dict(monkeypatch):
+    # Regression guard: no-arg tools (e.g. hermes_status) send None/"" and
+    # must keep resolving to {} and executing normally.
+    calls = []
+
+    def fake_execute(name, kwargs):
+        calls.append((name, kwargs))
+        return "ok"
+
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", fake_execute)
+    tpq = Queue()
+    proc = _make_processor(text_prompt_queue=tpq)
+    rc = _FakeRuntimeConfig()
+    tool_call = _FakeToolCall("hermes_status", "call-1", arguments=None)
+    chunk = _chunk(tools=[tool_call], runtime_config=rc)
+
+    list(proc.process(chunk))
+
+    assert calls == [("hermes_status", {})]
+    assert rc.chat.tool_outputs[0][1].output == "ok"
+    assert tpq.qsize() == 1
+
+
+def test_valid_arguments_execute_unchanged(monkeypatch):
+    calls = []
+
+    def fake_execute(name, kwargs):
+        calls.append((name, kwargs))
+        return "sunny"
+
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", fake_execute)
+    proc = _make_processor()
+    rc = _FakeRuntimeConfig()
+    tool_call = _FakeToolCall("weather", "call-1", arguments='{"location": "Denver"}')
+    chunk = _chunk(tools=[tool_call], runtime_config=rc)
+
+    list(proc.process(chunk))
+
+    assert calls == [("weather", {"location": "Denver"})]
+    assert rc.chat.tool_outputs[0][1].output == "sunny"
+
+
+# ── per-turn affect: extraction, stripping, carry-over ──────────────────
+#
+# voice_affect.py is aliased to the REAL module in this file's stubs (see
+# _install_stubs above), so `lm_output_processor.voice_affect.ENABLED` is
+# toggled directly via monkeypatch rather than through the env var --
+# VOICE_AFFECT is read once at that real module's import time, long before
+# any test runs.
+
+
+def test_affect_disabled_by_default_leaves_text_and_events_untouched(monkeypatch):
+    # Most important test in this set: the default (VOICE_AFFECT unset) must
+    # be byte-identical to pre-affect behaviour -- no stripping, no marker
+    # extraction, affect always None on the yielded TTSInput.
+    assert lm_output_processor.voice_affect.ENABLED is False  # sanity: real default
+    tq = Queue()
+    proc = _make_processor(text_output_queue=tq)
+    raw_text = "[affect: this is funny. Amused] Well that's a surprise."
+    chunk = _chunk(tools=[], runtime_config=None, text=raw_text)
+
+    outputs = list(proc.process(chunk))
+
+    assert len(outputs) == 1
+    assert outputs[0].text == raw_text  # marker NOT stripped
+    assert getattr(outputs[0], "affect", None) is None
+    event = tq.get_nowait()
+    assert event.text == raw_text  # marker reaches the transcript queue untouched
+
+
+def test_affect_enabled_strips_marker_from_text_and_event(monkeypatch):
+    monkeypatch.setattr(lm_output_processor.voice_affect, "ENABLED", True)
+    tq = Queue()
+    proc = _make_processor(text_output_queue=tq)
+    chunk = _chunk(tools=[], runtime_config=None, text="[affect: this is funny. Amused] Well that's a surprise.")
+
+    outputs = list(proc.process(chunk))
+
+    assert len(outputs) == 1
+    assert outputs[0].text == "Well that's a surprise."
+    assert outputs[0].affect == "this is funny. Amused"
+    event = tq.get_nowait()
+    assert event.text == "Well that's a surprise."  # marker never reaches text_output_queue either
+
+
+def test_affect_marker_only_chunk_yields_no_tts_input_when_enabled(monkeypatch):
+    monkeypatch.setattr(lm_output_processor.voice_affect, "ENABLED", True)
+    proc = _make_processor()
+    chunk = _chunk(tools=[], runtime_config=None, text="[affect: just a note]")
+
+    outputs = list(proc.process(chunk))
+
+    assert outputs == []  # empty after stripping -> no TTSInput emitted
+
+
+def test_affect_carries_over_to_a_chunk_with_no_marker(monkeypatch):
+    monkeypatch.setattr(lm_output_processor.voice_affect, "ENABLED", True)
+    proc = _make_processor()
+    chunk1 = _chunk(tools=[], runtime_config=None, text="[affect: amused] first part.", turn_id="turn-1")
+    chunk2 = _chunk(tools=[], runtime_config=None, text="second part, no marker.", turn_id="turn-1")
+
+    out1 = list(proc.process(chunk1))
+    out2 = list(proc.process(chunk2))
+
+    assert out1[0].affect == "amused"
+    assert out2[0].affect == "amused"  # inherited
+    assert out2[0].text == "second part, no marker."
+
+
+def test_affect_resets_on_new_turn_id(monkeypatch):
+    monkeypatch.setattr(lm_output_processor.voice_affect, "ENABLED", True)
+    proc = _make_processor()
+    chunk1 = _chunk(tools=[], runtime_config=None, text="[affect: amused] first turn.", turn_id="turn-1")
+    chunk2 = _chunk(tools=[], runtime_config=None, text="new turn, no marker.", turn_id="turn-2")
+
+    list(proc.process(chunk1))
+    out2 = list(proc.process(chunk2))
+
+    assert out2[0].affect is None
+
+
+def test_affect_second_marker_in_same_turn_updates_it(monkeypatch):
+    monkeypatch.setattr(lm_output_processor.voice_affect, "ENABLED", True)
+    proc = _make_processor()
+    chunk1 = _chunk(tools=[], runtime_config=None, text="[affect: amused] first part.", turn_id="turn-1")
+    chunk2 = _chunk(tools=[], runtime_config=None, text="[affect: serious] second part.", turn_id="turn-1")
+
+    list(proc.process(chunk1))
+    out2 = list(proc.process(chunk2))
+
+    assert out2[0].affect == "serious"
+
+
+def test_tool_filler_never_carries_affect(monkeypatch):
+    monkeypatch.setattr(lm_output_processor.voice_affect, "ENABLED", True)
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: "ok")
+    proc = _make_processor()
+    rc = _FakeRuntimeConfig()
+    chunk = _chunk(
+        tools=[_FakeToolCall("weather", "call-1")],
+        runtime_config=rc,
+        turn_id="turn-1",
+        text="[affect: curious] let me check that.",
+    )
+
+    outputs = list(proc.process(chunk))
+
+    filler_outputs = [o for o in outputs if o.text != "let me check that."]
+    assert filler_outputs, "expected a filler TTSInput in the output"
+    for filler in filler_outputs:
+        assert getattr(filler, "affect", None) is None
+
+
+def test_affect_marker_split_across_chunks_never_leaks_fragment_to_assistant_text_event(monkeypatch):
+    # Correction 3 regression guard, exercised through the real process()
+    # path (not just the tracker directly): a marker containing a full stop
+    # arrives as two separate LLMResponseChunks (the LM layer sentence-splits
+    # before extraction ever runs) -- neither fragment may reach
+    # AssistantTextEvent or a TTSInput.
+    monkeypatch.setattr(lm_output_processor.voice_affect, "ENABLED", True)
+    tq = Queue()
+    proc = _make_processor(text_output_queue=tq)
+    chunk1 = _chunk(tools=[], runtime_config=None, text="[affect: this is a funny mix-up.", turn_id="turn-1")
+    chunk2 = _chunk(
+        tools=[],
+        runtime_config=None,
+        text="Light, warm, amused] Oh no, your poor keyboard is now a swimming pool!",
+        turn_id="turn-1",
+    )
+
+    out1 = list(proc.process(chunk1))
+    out2 = list(proc.process(chunk2))
+
+    assert out1 == []  # nothing to speak yet -- the whole chunk was the dangling opener
+    event1 = tq.get_nowait()
+    assert event1.text == ""
+    assert "[affect" not in event1.text and "]" not in event1.text
+
+    assert len(out2) == 1
+    assert "[affect" not in out2[0].text and "]" not in out2[0].text
+    assert out2[0].text == "Oh no, your poor keyboard is now a swimming pool!"
+    assert out2[0].affect is not None and "amused" in out2[0].affect
+    event2 = tq.get_nowait()
+    assert "[affect" not in event2.text and "]" not in event2.text

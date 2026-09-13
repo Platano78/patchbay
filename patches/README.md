@@ -355,6 +355,46 @@ shared by both OpenAI-style handlers) instead of `responses-api`.
   the system content) and dependency-free (stdlib only, no
   `speech_to_speech` import), like `think_filter.py`.
 
+- `voice_affect.py` (new) — `speech_to_speech/voice_affect.py`. Per-turn
+  affect instruct seam (owner ruling 2026-09-13). The brain prefixes each
+  reply with a short delivery note, `[affect: what this moment is - how it
+  should sound]`; `TurnAffectTracker.feed()` strips the marker before the
+  text reaches the client transcript or the TTS, and the note rides the
+  `TTSInput` message (as `AffectTTSInput.affect`, a subclass defined in
+  `lm_output_processor.py`) to `RemoteSpeechTTSHandler`, which sends it as
+  the OpenAI `/v1/audio/speech` `instructions` field for that one request.
+  Identity stays frozen by the backend's voice preset; only delivery is
+  conditioned — "freeze identity, condition delivery".
+  `VOICE_AFFECT` gates it and is **off by default**: unset/blank/`0`/`off`
+  disables it entirely (byte-identical behaviour to not having it), `1`/`on`
+  injects the note rule, `words` additionally asks the brain to write the
+  reply in the register its own note names. Anything else fails closed to
+  `off`.
+  An operator-set `instructions` (via `--remote_speech_instructions` or a
+  live `config_set {speech_style: ...}`) always WINS over the per-turn
+  affect — `speech_style` is surfaced in the cockpit panel and silently
+  overriding it every turn would make the panel lie. A backend declaring
+  `accepts_instructions: false` still receives nothing, as before.
+  The extracted note is sanitised before it can reach the wire (control
+  characters collapsed, capped at 120 chars on a word boundary).
+  ⚠ The marker is extracted at the `LLMResponseChunk` boundary, but the LM
+  layer sentence-splits with nltk *before* that — a note containing a full
+  stop straddles two chunks at `--stream_batch_sentences 1`, and both halves
+  would be spoken aloud. Hence two defences: the rule text forbids a full
+  stop inside the brackets, and `feed()` holds back an unclosed `[affect:`
+  opener across chunks, mirroring `think_filter.py`'s straddle handling
+  (dropping a still-open fragment at turn end rather than speaking it, and
+  releasing it verbatim past 200 chars so ordinary user text is never
+  swallowed).
+  Measured 2026-09-13 on the live brain and TTS: marker compliance 85/85,
+  the word "affect" never leaked into a reply (0/24), 70 real brain turns
+  replay clean. With the spoken text held identical (n=20/arm), the instruct
+  buys **+12% duration** and a register shift — it is a DELIVERY channel,
+  not an event generator. See Law 10 in
+  `docs/research/voice-stack-review-2026-08-11.md` (maintainer notes, not in the public export).
+  Dependency-free (stdlib only, no `speech_to_speech` import), like
+  `voice_rules.py`/`think_filter.py`.
+
 - `phone_context.py` (new) — `speech_to_speech/phone_context.py`. Ambient
   phone context: the webclient (shipped separately) sends opt-in
   `{"type":"phone_context", "lat":.., "lon":.., "accuracy":.., "tz":..,

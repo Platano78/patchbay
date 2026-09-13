@@ -83,9 +83,11 @@ def _install_stubs():
     # overwriting an attribute here would corrupt another file's module.
     from patches import phone_context as real_phone_context
     from patches import think_filter as real_think_filter
+    from patches import voice_affect as real_voice_affect
 
     sys.modules["speech_to_speech.phone_context"] = real_phone_context
     sys.modules["speech_to_speech.think_filter"] = real_think_filter
+    sys.modules["speech_to_speech.voice_affect"] = real_voice_affect
     mod("speech_to_speech.utils")
     mod("speech_to_speech.utils.utils", _generate_id=lambda prefix: f"{prefix}_1")
     mod("speech_to_speech.voice_rules", apply_system_rules=lambda messages: messages)

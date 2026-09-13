@@ -538,6 +538,7 @@ class BrainControl:
         cockpit: Any = None,
         streamer: Any = None,
         tts_queue: Any = None,
+        parrot_gate: Any = None,
     ) -> None:
         self.llm_handler = llm_handler
         self.runtime_config = runtime_config
@@ -562,6 +563,11 @@ class BrainControl:
         # every pre-existing call site/test valid -- wake word control is
         # simply unavailable then.
         self.streamer = streamer
+        # ParrotGate instance, for the live parrot-mode toggle (ruling R3/R4
+        # of the B6 UI slice). None keeps every pre-existing call site/test
+        # valid -- the toggle is simply unavailable then, same pattern as
+        # `streamer` above.
+        self.parrot_gate = parrot_gate
         # Captured at construction time, before any config_set — this IS the
         # args-class init_chat_prompt default. Empty persona restores this,
         # it never means "no system prompt".
@@ -988,6 +994,10 @@ class BrainControl:
             "tools_armed": self.tools_armed,
             "tools": list(self.tools_armed_names),
             "wake_word": self._wake_word_state(),
+            # Live diagnostic state (B6 UI slice) -- False when the gate
+            # isn't wired up (e.g. no BrainControl-managed pipeline), same
+            # convention as the other Optional[handler]-gated fields above.
+            "parrot": self.parrot_gate.armed if self.parrot_gate is not None else False,
             "brains": [
                 {
                     "name": name,
@@ -1087,6 +1097,18 @@ class BrainControl:
                 if not ok:
                     return {"type": "config_ack", "ok": False, "error": error}
                 self.streamer.broadcast_wakeword_state()
+            if "parrot" in msg:
+                if self.parrot_gate is None:
+                    return {"type": "config_ack", "ok": False, "error": "parrot mode unavailable"}
+                self.parrot_gate.armed = bool(msg["parrot"])
+                logger.info(
+                    "BrainControl: parrot mode %s", "armed" if self.parrot_gate.armed else "disarmed"
+                )
+                # Broadcast explicitly (same reasoning as wake_word above): a
+                # reconnecting/other screen must render the current toggle
+                # position, not just the requester's own ack.
+                if self.streamer is not None:
+                    self.streamer.broadcast_json(self._config_state())
             discovered_brains: Optional[list[dict[str, Any]]] = None
             if msg.get("discover_brains"):
                 try:

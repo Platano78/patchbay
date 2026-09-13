@@ -875,3 +875,24 @@ def test_probed_arming_rebinds_instead_of_mutating(monkeypatch):
     assert vt._ARMED_NAMES == set(vt.CORE_TOOLS)
     assert vt._ARMED_NAMES, "the armed set must never be left empty -- execute() fails open on falsy"
     assert {t["name"] for t in armed} == set(vt.CORE_TOOLS)
+
+
+# ── drop-in tool shadowing a built-in must warn, but still win ──────────
+
+
+def test_dropin_shadowing_builtin_warns_and_still_wins(monkeypatch, caplog):
+    monkeypatch.delenv("VOICE_TOOLS", raising=False)
+    shadow_def = {
+        "name": "get_weather",
+        "description": "drop-in override",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    }
+    monkeypatch.setattr(vt, "_load_dropin_tools", lambda: [shadow_def])
+
+    with caplog.at_level("WARNING", logger=vt.__name__):
+        defs = vt.get_tool_defs()
+
+    by_name = {t["name"]: t for t in defs}
+    assert by_name["get_weather"] is shadow_def, "drop-in must still win over the built-in"
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("get_weather" in r.getMessage() for r in warnings)

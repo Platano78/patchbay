@@ -423,20 +423,47 @@ def _build_pipeline_handlers(
         parakeet_tdt_stt_handler_kwargs,
     )
 
+    # Parrot mode (diagnostic instrument, B6). ALWAYS inserted -- see
+    # parrot_lane.py's module docstring for why: it must be armable live from
+    # the cockpit panel (config_set {"parrot": ...}), and a restart to arm it
+    # would destroy the conversation it exists to diagnose. VOICE_PARROT=1
+    # only sets the startup state; disarmed is a pure passthrough, one queue
+    # hop per turn.
+    #
     # Pre-LLM reflex lane (Slice 2). Default OFF: only inserted when VOICE_REFLEX=1,
     # so a plain restart is behaviourally identical to the un-gated chain. When on,
-    # ReflexGate consumes text_prompt_queue (the LM's former input) and forwards
-    # normal turns to a fresh queue the LM now reads; reflex-resolved turns are
-    # answered by injecting onto lm_response_queue and never reach the LM.
+    # ReflexGate consumes ParrotGate's output and forwards normal turns to a fresh
+    # queue the LM now reads; reflex-resolved turns are answered by injecting onto
+    # lm_response_queue and never reach the LM.
+    #
+    # ParrotGate sits BEFORE ReflexGate: an armed parrot turn never reaches
+    # reflex, so it can't be misanswered from the HA tool instead of echoed.
+    # Both gates may be present in the chain; only one (at most) ever answers
+    # a given turn.
+    from speech_to_speech.parrot_lane import ParrotGate
+
+    voice_reflex_enabled = os.environ.get("VOICE_REFLEX") == "1"
+    parrot_to_next_queue: Queue[TextPromptItem] = Queue()
+    parrot_gate = ParrotGate(
+        stop_event,
+        queue_in=text_prompt_queue,
+        queue_out=parrot_to_next_queue,
+        setup_kwargs={
+            "lm_response_queue": lm_response_queue,
+            "armed": os.environ.get("VOICE_PARROT") == "1",
+            "reflex_present": voice_reflex_enabled,
+        },
+    )
+    lm_input_queue: Queue[TextPromptItem] = parrot_to_next_queue
+
     reflex_gate: Any | None = None
-    lm_input_queue: Queue[TextPromptItem] = text_prompt_queue
-    if os.environ.get("VOICE_REFLEX") == "1":
+    if voice_reflex_enabled:
         from speech_to_speech.reflex_lane import ReflexGate
 
         reflex_to_lm_queue: Queue[TextPromptItem] = Queue()
         reflex_gate = ReflexGate(
             stop_event,
-            queue_in=text_prompt_queue,
+            queue_in=parrot_to_next_queue,
             queue_out=reflex_to_lm_queue,
             setup_kwargs={"lm_response_queue": lm_response_queue},
         )
@@ -477,8 +504,9 @@ def _build_pipeline_handlers(
     )
 
     handlers: list[Any] = [vad, stt, transcription_notifier, lm, lm_processor, tts]
+    handlers.insert(3, parrot_gate)  # between transcription_notifier and lm
     if reflex_gate is not None:
-        handlers.insert(3, reflex_gate)  # between transcription_notifier and lm
+        handlers.insert(4, reflex_gate)  # between parrot_gate and lm
     return handlers
 
 
@@ -799,9 +827,14 @@ def build_pipeline(
         from speech_to_speech.brain_control import BrainControl
         from speech_to_speech.hermes_cockpit import HermesCockpit
         from speech_to_speech.LLM.base_openai_compatible_language_model import BaseOpenAICompatibleHandler
+        from speech_to_speech.parrot_lane import ParrotGate
         from speech_to_speech import voice_tools
 
         llm_handler = next((h for h in pipeline_handlers if isinstance(h, BaseOpenAICompatibleHandler)), None)
+        # Always present (see _build_pipeline_handlers) -- BrainControl needs
+        # the live instance to flip `.armed` from a config_set, same idiom as
+        # the wake-word gate reached via `streamer`.
+        parrot_gate = next((h for h in pipeline_handlers if isinstance(h, ParrotGate)), None)
         # Any TTS handler qualifies, not just Pocket -- BrainControl's live
         # voice/style config_set feature-detects per handler (voice via
         # `_predefined_voices`/voice cloning, style via an `instructions`
@@ -820,6 +853,7 @@ def build_pipeline(
                 cockpit=cockpit,
                 streamer=websocket_streamer_ref,
                 tts_queue=lm_processed_queue,
+                parrot_gate=parrot_gate,
             ).handle
 
     return ThreadManager([*comms_handlers, *pipeline_handlers])

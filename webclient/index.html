@@ -3181,6 +3181,20 @@
       <div class="hint">Where the voice pipeline's websocket lives. Leave empty to derive it from this page's address. A page served over HTTPS needs a <code>wss://</code> URL — the browser blocks plain <code>ws://</code> from one.</div>
       <div id="wsUrlStatus" role="status" aria-live="polite"></div>
     </div>
+    <div id="parrotModeBlock">
+      <div class="label">Parrot mode</div>
+      <div class="brainOption switch-h-row">
+        <span class="switch-h-visual">
+          <input type="checkbox" id="parrotToggle" class="switch-h-input">
+          <span class="switch-track-h" aria-hidden="true">
+            <span class="switch-knob-h"></span>
+            <span class="switch-lamp-h"></span>
+          </span>
+        </span>
+        <label for="parrotToggle">Diagnostic: echo your words back, no brain</label>
+      </div>
+      <div class="hint">Ear test for the audio path. While on, every reply is just your own transcript spoken back — the brain is never consulted. Not a chat mode; turn it off when you're done testing.</div>
+    </div>
   </details>
   <details id="voiceCloneAdvanced" hidden>
     <summary><span class="disc-lamp" aria-hidden="true"></span><span class="nom">Voice Lab</span><span class="chev" aria-hidden="true">▸</span></summary>
@@ -3614,6 +3628,7 @@ const els = {
   wsUrlApplyBtn: document.getElementById("wsUrlApplyBtn"),
   wsUrlResetBtn: document.getElementById("wsUrlResetBtn"),
   wsUrlStatus: document.getElementById("wsUrlStatus"),
+  parrotToggle: document.getElementById("parrotToggle"),
   wakeWordBlock: document.getElementById("wakeWordBlock"),
   wakeToggle: document.getElementById("wakeToggle"),
   wakeModelSelect: document.getElementById("wakeModelSelect"),
@@ -5521,6 +5536,13 @@ function renderConfigState(ev) {
   renderVoiceDropdown(ev.voice);
   renderCustomVoiceList();
 
+  // Unlike `wake_word`, `parrot` is a plain bool on every frame (no
+  // "unavailable" state to distinguish) -- a server too old to send it just
+  // leaves the checkbox at its last-known value.
+  if ("parrot" in ev && document.activeElement !== els.parrotToggle) {
+    els.parrotToggle.checked = !!ev.parrot;
+  }
+
   // `wake_word: null` is real news — no streamer, so wake-word control is
   // unavailable. An absent key is not news, and must not be read as "off":
   // setOpenMicMode owns a live mic graph, and disarming one because a frame
@@ -5855,6 +5877,12 @@ els.wakeModelSelect.addEventListener("change", () => {
     ws.send(JSON.stringify({ type: "config_set", wake_word_model: els.wakeModelSelect.value }));
   }
   syncLegendWakePhrase();
+});
+
+els.parrotToggle.addEventListener("change", () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "config_set", parrot: els.parrotToggle.checked }));
+  }
 });
 
 // ── Server socket URL (device-local, like the theme — never round-tripped) ──

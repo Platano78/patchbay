@@ -251,40 +251,53 @@ class ReflexGate(BaseHandler[LLMIn, LLMIn]):
         logger.info("REFLEX route=reflex latency_s=%.3f text=%r", latency_s, text[:80])
 
     def _emit_reply(self, request: GenerateResponseRequest, reply_text: str) -> None:
-        """Inject a synthetic LM response for *reply_text* onto lm_response_queue.
+        emit_synthetic_reply(self.lm_response_queue, request, reply_text, "reflex")
 
-        Turn bookkeeping: start and stamp the turn on *this* thread before the
-        synthetic chunk is dequeued downstream. The chunk carries
-        ``speech_stopped_at_s=None`` so ``LMOutputProcessor.on_llm_chunk`` does
-        not flush-and-restart the turn (which would reset route to "llm") -- it
-        only observes the already-open reflex turn. The trailing EndOfResponse
-        then flushes it, logging TURN_STATS route=reflex. Ordering is
-        guaranteed: set_route happens-before the put, which happens-before the
-        downstream dequeue.
-        """
-        turn_stats.on_llm_chunk(request.speech_stopped_at_s)
-        turn_stats.set_route("reflex")
 
-        if self.lm_response_queue is None:
-            return
+def emit_synthetic_reply(
+    lm_response_queue: Optional[Queue[LMOutItem]],
+    request: GenerateResponseRequest,
+    reply_text: str,
+    route: str,
+) -> None:
+    """Inject a synthetic LM response for *reply_text* onto lm_response_queue.
 
-        self.lm_response_queue.put(
-            LLMResponseChunk(
-                text=reply_text,
-                language_code=request.language_code,
-                tools=[],
-                runtime_config=request.runtime_config,
-                response=request.response,
-                turn_id=request.turn_id,
-                turn_revision=request.turn_revision,
-                speech_stopped_at_s=None,
-                cancel_generation=None,
-            )
+    Shared by :class:`ReflexGate` and any other pre-LLM gate that answers a
+    turn itself (e.g. parrot_lane's echo gate) with a caller-supplied *route*
+    label for ``turn_stats``.
+
+    Turn bookkeeping: start and stamp the turn on *this* thread before the
+    synthetic chunk is dequeued downstream. The chunk carries
+    ``speech_stopped_at_s=None`` so ``LMOutputProcessor.on_llm_chunk`` does
+    not flush-and-restart the turn (which would reset the route) -- it only
+    observes the already-open synthetic turn. The trailing EndOfResponse then
+    flushes it, logging TURN_STATS with *route*. Ordering is guaranteed:
+    set_route happens-before the put, which happens-before the downstream
+    dequeue.
+    """
+    turn_stats.on_llm_chunk(request.speech_stopped_at_s)
+    turn_stats.set_route(route)
+
+    if lm_response_queue is None:
+        return
+
+    lm_response_queue.put(
+        LLMResponseChunk(
+            text=reply_text,
+            language_code=request.language_code,
+            tools=[],
+            runtime_config=request.runtime_config,
+            response=request.response,
+            turn_id=request.turn_id,
+            turn_revision=request.turn_revision,
+            speech_stopped_at_s=None,
+            cancel_generation=None,
         )
-        self.lm_response_queue.put(
-            EndOfResponse(
-                turn_id=request.turn_id,
-                turn_revision=request.turn_revision,
-                cancel_generation=None,
-            )
+    )
+    lm_response_queue.put(
+        EndOfResponse(
+            turn_id=request.turn_id,
+            turn_revision=request.turn_revision,
+            cancel_generation=None,
         )
+    )

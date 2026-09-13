@@ -193,6 +193,15 @@ class _FakeStreamer:
         self.broadcasts.append(payload)
 
 
+class _FakeParrotGate:
+    """Mirrors the real ParrotGate's contract for the config_set toggle:
+    `.armed` is a plain attribute a config_set flips directly, no method
+    call, same idiom as `_FakeWakewordGate.enabled`."""
+
+    def __init__(self, armed=False):
+        self.armed = armed
+
+
 def _closed_port_url() -> str:
     """A base_url nothing listens on, so connections are refused instantly --
     same helper as test_remote_speech_tts_handler.py's, avoids a slow (~3s
@@ -278,6 +287,63 @@ def test_wake_word_state_model_is_one_of_the_offered_models(tmp_path):
 
 def test_wake_word_state_none_without_a_streamer(tmp_path):
     assert _make_brain_control(tmp_path)._wake_word_state() is None
+
+
+# ── parrot mode live toggle (B6 UI slice) ────────────────────────────────
+
+
+def test_config_set_parrot_true_arms_the_gate_and_acks(tmp_path):
+    gate = _FakeParrotGate(armed=False)
+    bc = _make_brain_control(tmp_path, parrot_gate=gate)
+
+    ack = bc._config_set({"parrot": True})
+
+    assert ack["ok"] is True
+    assert gate.armed is True
+    assert ack["parrot"] is True
+
+
+def test_config_set_parrot_false_disarms_the_gate_and_acks(tmp_path):
+    gate = _FakeParrotGate(armed=True)
+    bc = _make_brain_control(tmp_path, parrot_gate=gate)
+
+    ack = bc._config_set({"parrot": False})
+
+    assert ack["ok"] is True
+    assert gate.armed is False
+    assert ack["parrot"] is False
+
+
+def test_config_set_parrot_broadcasts_config_state_to_other_screens(tmp_path):
+    gate = _FakeParrotGate(armed=False)
+    streamer = _FakeStreamer()
+    bc = _make_brain_control(tmp_path, parrot_gate=gate, streamer=streamer)
+
+    bc._config_set({"parrot": True})
+
+    assert len(streamer.broadcasts) == 1
+    assert streamer.broadcasts[0]["type"] == "config_state"
+    assert streamer.broadcasts[0]["parrot"] is True
+
+
+def test_config_set_parrot_refused_without_a_gate(tmp_path):
+    bc = _make_brain_control(tmp_path)  # no parrot_gate wired
+
+    ack = bc._config_set({"parrot": True})
+
+    assert ack["ok"] is False
+    assert "parrot" in ack["error"]
+
+
+def test_config_state_reports_parrot_false_without_a_gate(tmp_path):
+    assert _make_brain_control(tmp_path)._config_state()["parrot"] is False
+
+
+def test_config_state_reports_live_parrot_armed_state(tmp_path):
+    gate = _FakeParrotGate(armed=True)
+    bc = _make_brain_control(tmp_path, parrot_gate=gate)
+
+    assert bc._config_state()["parrot"] is True
 
 
 # ── voice_delete broadcast (fix #2) ─────────────────────────────────────

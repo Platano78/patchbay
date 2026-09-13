@@ -610,6 +610,13 @@ def get_tool_defs() -> list[dict]:
     # under the GIL, so a concurrent reader sees the old set or the new one.
     global _ARMED_NAMES
     dropins = _load_dropin_tools()
+    builtin_names = {t["name"] for t in TOOL_DEFS}
+    for dropin in dropins:
+        if dropin["name"] in builtin_names:
+            logger.warning(
+                "voice_tools: drop-in tool %r shadows a built-in of the same name (drop-in wins)",
+                dropin["name"],
+            )
     catalog = TOOL_DEFS + dropins
     by_name = {t["name"]: t for t in catalog}
     dropin_suffix = f" +{len(dropins)} drop-in" if dropins else ""

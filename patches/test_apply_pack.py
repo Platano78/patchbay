@@ -167,6 +167,32 @@ class TestApplyPackFiles:
             "in the checkout:\n" + "\n".join(unresolved)
         )
 
+    def test_shipped_modules_do_not_import_patches_package(self):
+        """No FILES-listed module may import from the `patches` package.
+
+        `patches` only exists on sys.path inside this repo (where tests run
+        from the root); apply.sh copies these modules INTO the installed
+        speech_to_speech package, where `patches` does not exist. A runtime
+        `from patches...` / `import patches` import is invisible to every
+        unit test (they all run with `patches` importable) and only surfaces
+        as a ModuleNotFoundError crash on the live box. Modules must instead
+        import siblings via `speech_to_speech.<name>`, matching how apply.sh
+        deploys them.
+        """
+        offenders = []
+        for src, _dst in self.files:
+            path = HERE / src
+            for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+                if re.match(r"^\s*(from patches(\.\w+)*\s+import\b|import patches\b)", line):
+                    offenders.append(f"{src}:{lineno}: {line.strip()!r}")
+        assert not offenders, (
+            "module(s) shipped via apply.sh's FILES array import from the "
+            "`patches` package, which does not exist once deployed into "
+            "speech_to_speech -- this crashes the pipeline on the live box "
+            "with ModuleNotFoundError. Import via speech_to_speech.<name> "
+            "instead:\n" + "\n".join(offenders)
+        )
+
     def test_all_patch_modules_are_shipped(self):
         """Blunter invariant: every non-test patches/*.py file is in FILES."""
         shipped_srcs = {src for src, _dst in self.files}

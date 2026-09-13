@@ -39,6 +39,7 @@ from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn
 from speech_to_speech.phone_context import apply_ambient
 from speech_to_speech.think_filter import ThinkTagFilter
 from speech_to_speech.utils.utils import _generate_id
+from speech_to_speech.voice_affect import apply_affect_rule
 from speech_to_speech.voice_rules import apply_system_rules
 
 logger = logging.getLogger(__name__)
@@ -239,7 +240,7 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
     # ── base hooks ──────────────────────────────────────────────────────────--
 
     def _serialize(self, active_chat: Chat) -> list[dict[str, Any]]:
-        return apply_ambient(apply_system_rules(self._chat_messages(active_chat)))
+        return apply_affect_rule(apply_ambient(apply_system_rules(self._chat_messages(active_chat))))
 
     def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
         optional_kwargs: dict[str, Any] = {}

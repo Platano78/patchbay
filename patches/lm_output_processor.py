@@ -17,7 +17,7 @@ from queue import Queue
 
 from openai.types.realtime.conversation_item import RealtimeConversationItemFunctionCallOutput
 
-from speech_to_speech import voice_tools
+from speech_to_speech import voice_affect, voice_tools
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import AssistantTextEvent, ResponseFailedEvent, TokenUsageEvent
 from speech_to_speech.pipeline.handler_types import LLMOut, TTSIn
@@ -28,6 +28,24 @@ from speech_to_speech.turn_stats import turn_stats
 from speech_to_speech.utils.utils import _generate_id, response_wants_audio
 
 logger = logging.getLogger(__name__)
+
+
+class AffectTTSInput(TTSInput):
+    """``TTSInput`` carrying the brain's per-turn delivery note (the
+    ``[affect: ...]`` marker extracted from the reply text), or ``None``
+    when affect is disabled or no marker has been seen this turn yet.
+
+    A subclass rather than a new field on ``TTSInput`` itself: that class
+    lives in the base ``speech_to_speech`` package, which patchbay does not
+    vendor, so extending it would put a whole upstream file under our
+    maintenance forever. The TTS handler reads this via
+    ``getattr(tts_input, "affect", None)`` (feature-detection, never an
+    ``isinstance`` check) so a plain ``TTSInput`` from another call site
+    (voice audition, hermes cockpit) keeps working unaffected.
+    """
+
+    affect: str | None = None
+
 
 # Tool-call filler phrases: a "let me check" alone gets stale on repeat tool
 # calls, so we rotate over a pool instead of a single hardcoded string.
@@ -71,6 +89,11 @@ _SYNTHETIC_CAP_OUTPUT = (
     "Tool budget for this turn is exhausted. Do not call any more tools. "
     "Answer the user now with what you already have, and say plainly what "
     "you could not finish."
+)
+
+_SYNTHETIC_UNPARSEABLE_ARGS_OUTPUT = (
+    "This tool call was not executed because its arguments were incomplete "
+    "or malformed. Retry with a shorter request, or answer without the tool."
 )
 
 
@@ -168,6 +191,10 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
         # naturally does the right thing on the very first chunk either way.
         self._tool_turn_id: str | None = None
         self._tool_rounds_this_turn = 0
+        # Per-turn affect carry-over: a chunk with no [affect: ...] marker of
+        # its own inherits the turn's last-seen affect (a tool-call follow-up
+        # generation reuses the same turn_id and may or may not repeat one).
+        self._affect_tracker = voice_affect.TurnAffectTracker()
 
     def _turn_output_allowed(self, turn_id: str | None, turn_revision: int | None) -> bool:
         if self.speculative_turns is None:
@@ -233,9 +260,33 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
         else:
             resolved_any = False
             for tool_call in lm_output.tools:
-                try:
-                    args = json.loads(tool_call.arguments) if tool_call.arguments else {}
-                except (TypeError, ValueError):
+                if tool_call.arguments:
+                    try:
+                        args = json.loads(tool_call.arguments)
+                    except (TypeError, ValueError):
+                        logger.warning(
+                            "LMOutputProcessor: unparseable arguments for tool %s, refusing execution: %.200s",
+                            tool_call.name,
+                            tool_call.arguments,
+                        )
+                        try:
+                            chat.append_tool_output(
+                                tool_call.call_id,
+                                RealtimeConversationItemFunctionCallOutput(
+                                    type="function_call_output",
+                                    id=_generate_id("fco"),
+                                    call_id=tool_call.call_id,
+                                    output=_SYNTHETIC_UNPARSEABLE_ARGS_OUTPUT,
+                                ),
+                            )
+                            resolved_any = True
+                        except Exception:
+                            logger.exception(
+                                "LMOutputProcessor: failed to record synthetic unparseable-args output for %s",
+                                tool_call.name,
+                            )
+                        continue
+                else:
                     args = {}
                 try:
                     result = voice_tools.execute(tool_call.name, args)
@@ -338,18 +389,33 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
 
         logger.debug(f"LM processor: text='{lm_output.text}', tools={lm_output.tools}")
 
+        # Affect extraction/stripping happens here, before the text reaches
+        # AssistantTextEvent (the webclient transcript + server-side transcript
+        # buffer) or TTS -- a marker that survives either would be shown to the
+        # user or, worse, spoken aloud. Disabled is a no-op: text_for_speech
+        # stays exactly lm_output.text and affect_for_turn stays None.
+        text_for_speech = lm_output.text
+        affect_for_turn: str | None = None
+        if voice_affect.ENABLED:
+            # feed() (not the pure extract_affect()) because the LM layer
+            # sentence-splits before this method ever sees the text, and a
+            # marker containing a full stop can straddle two chunks --
+            # feed() holds back a dangling opener rather than ever letting
+            # half a marker reach speech. See TurnAffectTracker's docstring.
+            text_for_speech, affect_for_turn = self._affect_tracker.feed(lm_output.turn_id, lm_output.text)
+
         if self.text_output_queue is not None:
             event = AssistantTextEvent(
-                text=lm_output.text,
+                text=text_for_speech,
                 turn_id=lm_output.turn_id,
                 turn_revision=lm_output.turn_revision,
                 cancel_generation=lm_output.cancel_generation,
             )
             if lm_output.tools:
                 event.tools = lm_output.tools
-                logger.info(f"Sending to clients: text='{lm_output.text}', tools={[t.name for t in lm_output.tools]}")
+                logger.info(f"Sending to clients: text='{text_for_speech}', tools={[t.name for t in lm_output.tools]}")
             else:
-                logger.debug(f"Sending to clients: text='{lm_output.text}' (no tools)")
+                logger.debug(f"Sending to clients: text='{text_for_speech}' (no tools)")
             self.text_output_queue.put(event)
 
         if lm_output.tools and lm_output.runtime_config is not None:
@@ -377,11 +443,11 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                     )
             self._run_tool_calls(lm_output, round_num)
 
-        if lm_output.text and response_wants_audio(lm_output.response):
-            logger.debug(f"Forwarding to TTS: '{lm_output.text}'")
+        if text_for_speech and response_wants_audio(lm_output.response):
+            logger.debug(f"Forwarding to TTS: '{text_for_speech}'")
             turn_stats.on_tts_input()
-            yield TTSInput(
-                text=lm_output.text,
+            yield AffectTTSInput(
+                text=text_for_speech,
                 language_code=lm_output.language_code,
                 runtime_config=lm_output.runtime_config,
                 response=lm_output.response,
@@ -389,4 +455,5 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                 turn_revision=lm_output.turn_revision,
                 speech_stopped_at_s=lm_output.speech_stopped_at_s,
                 cancel_generation=lm_output.cancel_generation,
+                affect=affect_for_turn,
             )
