@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Tiny stdlib-only static server for the voice web client.
 
-Serves the files in this directory (index.html and friends) on 0.0.0.0:<port>
-so the same page is reachable over the LAN (desktop) and Tailscale (phone).
+Serves the files in this directory (index.html and friends) on
+127.0.0.1:<port> by default -- this machine only. Pass `--host 0.0.0.0` to
+serve the LAN too; see "Who can connect" in the README before you do.
 No dependencies beyond the Python standard library.
 
 Also answers /models (and /v1/models) with an llama-router-shaped JSON blob
 reporting whether the voice-agent websocket (127.0.0.1:8765) is listening -
-this lets the WigiDash LLM Launcher widget poll it like any other backend.
+this lets any llama-router-style dashboard poll it like any other backend.
 Checked passively via /proc/net/tcp{,6} (no connection made) so polling
 doesn't spam the voice-agent websocket server with bare-TCP-connect noise.
 """
@@ -132,7 +133,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="0.0.0.0")
+    ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8770)
     ap.add_argument("--certfile", help="TLS cert (PEM); with --keyfile, serves HTTPS")
     ap.add_argument("--keyfile", help="TLS private key (PEM)")

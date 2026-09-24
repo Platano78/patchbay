@@ -69,17 +69,21 @@ run_checks() {
       echo "CHECK patches-applied: PASS all patch files present and unchanged (idempotent re-run confirmed)"
     fi
   else
-    echo "CHECK patches-applied: FAIL patches/apply.sh --dry-run errored: $dry_out"
+    # Last line only: when speech_to_speech isn't importable apply.sh dies
+    # with a whole Python traceback, and the line that names the problem is
+    # the final one.
+    echo "CHECK patches-applied: FAIL patches/apply.sh --dry-run errored: $(printf '%s\n' "$dry_out" | tail -n 1) (run ./setup.sh first, or set INSTALL_DIR to where it lives)"
     overall=1
   fi
 
-  # webclient/test_webclient.py runs under the system python3, not the
-  # framework venv (README.md: `python3 -m pytest webclient/`) — probe the
-  # same interpreter the tests actually use.
-  if command -v python3 >/dev/null 2>&1 && python3 -c "import playwright.sync_api" >/dev/null 2>&1; then
-    echo "CHECK playwright (optional): PASS installed in system python3 — webclient browser tests will run"
+  # The test suite runs in the framework venv, not the system python3: on
+  # PEP-668 distros system python can't pip-install at all, and it lacks the
+  # patch pack's own deps (httpx, numpy, openai, pydantic) -- probe the
+  # interpreter the tests actually use.
+  if [ -x "$INSTALL_DIR/.venv/bin/python3" ] && "$INSTALL_DIR/.venv/bin/python3" -c "import playwright.sync_api" >/dev/null 2>&1; then
+    echo "CHECK playwright (optional): PASS installed in the venv ($INSTALL_DIR/.venv) — webclient browser tests will run"
   else
-    echo "CHECK playwright (optional): FAIL not installed in system python3 (webclient tests run there, not the venv) — webclient browser tests will skip, rest of the suite still runs"
+    echo "CHECK playwright (optional): FAIL not installed in the venv ($INSTALL_DIR/.venv, where the tests run) — webclient browser tests will skip, rest of the suite still runs"
   fi
 
   return "$overall"
@@ -93,6 +97,17 @@ fi
 if [ -d "$INSTALL_DIR" ]; then
   echo "INSTALL_DIR already exists: $INSTALL_DIR" >&2
   echo "Remove it or set INSTALL_DIR to a fresh path, then re-run." >&2
+  exit 1
+fi
+
+# Preflight, before anything is created: a clone followed by a failed venv
+# step leaves INSTALL_DIR behind, and the re-run then refuses to touch it.
+if ! command -v git >/dev/null 2>&1; then
+  echo "git is not installed. On Debian/Ubuntu: sudo apt install git   then re-run ./setup.sh" >&2
+  exit 1
+fi
+if ! python3 -c 'import venv, ensurepip' >/dev/null 2>&1; then
+  echo "python3 cannot create virtual environments on this system (the venv module is missing). On Debian/Ubuntu: sudo apt install python3-venv   then re-run ./setup.sh" >&2
   exit 1
 fi
 
@@ -113,7 +128,14 @@ echo "Installing speech-to-speech (editable) + extras"
 echo "Installing CPU-only torch/torchaudio (default install has no GPU requirement)"
 "$INSTALL_DIR/.venv/bin/pip" install torch torchaudio --index-url https://download.pytorch.org/whl/cpu
 
-"$INSTALL_DIR/.venv/bin/pip" install -e "$INSTALL_DIR[kokoro]"
+# kokoro (an optional TTS) caps Requires-Python below 3.13, so on a newer
+# Python its extra fails the whole install.
+VENV_PY_VERSION="$("$INSTALL_DIR/.venv/bin/python3" -c 'import sys; print("%d.%d" % sys.version_info[:2])')"
+if "$INSTALL_DIR/.venv/bin/python3" -c 'import sys; sys.exit(0 if sys.version_info < (3, 13) else 1)'; then
+  "$INSTALL_DIR/.venv/bin/pip" install -e "$INSTALL_DIR[kokoro]"
+else
+  echo "Skipping the optional kokoro TTS extra: it does not support Python $VENV_PY_VERSION yet (pocket, the default TTS, is unaffected)."
+fi
 "$INSTALL_DIR/.venv/bin/pip" install -e "$INSTALL_DIR[pocket,websocket]"
 
 echo "Applying cockpit patch pack"
@@ -140,9 +162,9 @@ Setup complete.
 
 Next steps:
   1. Edit $SCRIPT_DIR/brains.json with your LLM endpoint(s).
-  2. Start the pipeline (see README.md for the full flag list), e.g.:
-       $INSTALL_DIR/.venv/bin/speech-to-speech \\
-         --mode websocket --ws_host 0.0.0.0 --ws_port 8765 \\
+  2. Start the pipeline (SETUP.md step 4 has the full walkthrough), e.g.:
+       BRAINS_JSON=$SCRIPT_DIR/brains.json $INSTALL_DIR/.venv/bin/speech-to-speech \\
+         --mode websocket --ws_host 127.0.0.1 --ws_port 8765 \\
          --stt parakeet-tdt --parakeet_tdt_device cpu \\
          --tts pocket --pocket_tts_voice jean --pocket_tts_device cpu \\
          --llm_backend chat-completions \\
@@ -150,8 +172,10 @@ Next steps:
          --responses_api_api_key dummy \\
          --model_name <your-model-name> \\
          --responses_api_stream
-  3. Serve the cockpit:
+  3. Serve the cockpit, then open http://localhost:8770 on this machine:
        python3 $SCRIPT_DIR/webclient/serve.py --port 8770
+     (Both bind this machine only. For a phone or another computer, read
+     "Who can connect" in README.md first.)
 
 Verify the install any time with: $SCRIPT_DIR/setup.sh --check
 EOF

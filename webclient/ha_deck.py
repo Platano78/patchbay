@@ -34,9 +34,10 @@ as off would show OFF for a light that is physically unreachable, which is
 the exact lie this whole feature exists to prevent (rule 7).
 
 There is deliberately no auth on these routes (owner's LAN, his call), which
-makes three things the actual guardrails: the token never leaves this
-process, only known entity-id shapes and known services are forwarded, and
-every request/response is bounded and timed out.
+makes four things the actual guardrails: the token never leaves this
+process, only known entity-id shapes and known services are forwarded,
+every request/response is bounded and timed out, and a write must be a JSON
+POST whose browser Origin (if any) is this same host -- see handle_intent.
 """
 from __future__ import annotations
 
@@ -49,6 +50,7 @@ import socket
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -577,9 +579,39 @@ def _write_sse(handler, pub: dict) -> None:
     handler.wfile.flush()
 
 
+def _origin_matches_host(origin: Optional[str], host_header: Optional[str]) -> bool:
+    """Same-host rule as the pipeline WebSocket's default Origin policy
+    (websocket_streamer._origin_allowed_same_host): no Origin at all is a
+    native client (curl, a script) and is allowed; otherwise the Origin's
+    hostname must be the Host header's hostname -- this box, from any port."""
+    if origin is None:
+        return True
+    try:
+        origin_host = urllib.parse.urlsplit(origin).hostname
+        request_host = urllib.parse.urlsplit(f"//{host_header}").hostname if host_header else None
+    except ValueError:
+        return False
+    return bool(origin_host) and origin_host == request_host
+
+
 def handle_intent(handler) -> None:
     if _deck is None:
         _respond_json(handler, 404, {"error": "not found"})
+        return
+    # Cross-site request forgery: with no auth on this route, any page a LAN
+    # user visits could otherwise POST here (lock.unlock included). A
+    # text/plain or form POST is a CORS "simple request" the browser sends
+    # without asking, so require the JSON type the cockpit itself sends --
+    # a cross-origin page can only send that after a preflight nothing here
+    # answers -- and refuse a browser Origin from any other host.
+    media_type = (handler.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+    if media_type != "application/json":
+        handler.close_connection = True
+        _respond_json(handler, 415, {"error": "content-type must be application/json"})
+        return
+    if not _origin_matches_host(handler.headers.get("Origin"), handler.headers.get("Host")):
+        handler.close_connection = True
+        _respond_json(handler, 403, {"error": "origin not allowed"})
         return
     length_hdr = handler.headers.get("Content-Length")
     try:

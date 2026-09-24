@@ -17,6 +17,12 @@ Design:
 * **Fail open.** Any exception while loading the model or scoring a frame is
   logged once and treated as an immediate, permanent wake for the rest of
   the session -- a broken detector must never brick the assistant.
+* **But never arm without a detector.** Failing open is for a detector that
+  breaks; ``openwakeword`` simply not being installed is knowable up front
+  (:attr:`WakewordGate.available`), and arming then would fail open on the
+  first frame while the user believes they're wake-gated. So an unavailable
+  detector keeps the gate disabled instead: ``VOICE_WAKE_WORD=1`` logs one
+  warning at boot, and ``BrainControl`` refuses to enable it.
 * **Calibration affordance.** Any score above 0.05 is logged at DEBUG so the
   threshold can be tuned against a real microphone. A score at or above 0.25
   that doesn't cross the (higher) detection threshold is also logged at INFO
@@ -36,6 +42,8 @@ Design:
 
 from __future__ import annotations
 
+import functools
+import importlib.util
 import logging
 import os
 import re
@@ -60,6 +68,17 @@ _NEAR_MISS_FLOOR = 0.25  # visibility affordance: log a near-miss at INFO (not j
 _NON_WAKE_MODEL_NAMES = {"melspectrogram", "embedding_model", "silero_vad", "timer", "weather"}
 
 
+@functools.lru_cache(maxsize=1)
+def _openwakeword_installed() -> bool:
+    """find_spec, not an import: the answer is all that's needed here, and
+    importing openwakeword pulls in onnxruntime. Cached -- installing it
+    takes a pipeline restart anyway (see WakewordGate.UNAVAILABLE_REASON)."""
+    try:
+        return importlib.util.find_spec("openwakeword") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def _env_number(name: str, default: float) -> float:
     """Read a numeric env var, falling back to `default` on anything
     unparseable rather than raising -- same fail-open contract as
@@ -81,8 +100,16 @@ class WakewordGate:
     configured wake phrase is heard, then stays awake for the rest of the
     session."""
 
+    UNAVAILABLE_REASON = (
+        "openwakeword is not installed in the pipeline's venv "
+        "(pip install openwakeword onnxruntime, then restart the pipeline)"
+    )
+
     def __init__(self) -> None:
         self.enabled = os.environ.get("VOICE_WAKE_WORD", "").strip().lower() in _TRUTHY
+        if self.enabled and not self.available:
+            logger.warning("VOICE_WAKE_WORD=1 ignored, wake word stays off: %s", self.UNAVAILABLE_REASON)
+            self.enabled = False
         self._model_arg = os.environ.get("VOICE_WAKE_WORD_MODEL", "hey_jarvis")
         self.threshold = _env_number("VOICE_WAKE_WORD_THRESHOLD", 0.5)
         self._awake = False
@@ -98,6 +125,12 @@ class WakewordGate:
     @property
     def awake(self) -> bool:
         return self._awake
+
+    @property
+    def available(self) -> bool:
+        """Whether a detector can run at all (``openwakeword`` installed).
+        False means enabling the gate would only ever fail open."""
+        return _openwakeword_installed()
 
     @property
     def phrase(self) -> str:

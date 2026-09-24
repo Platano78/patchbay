@@ -893,6 +893,10 @@ LEVEL_BUS_BURST_FRAMES = 240
 #                            variable for the :root-vs-#waveform control
 #                            (question 1) without touching pushWaveform
 #                            itself -- index.html is frozen this slice.
+#   mode='root_control'  -- the same synthetic loop, writing
+#                            LEVEL_BUS_CONTROL_PROP (registered like --level,
+#                            inherits:true, but read by NO rule) on :root: the
+#                            same-run control the per-theme gate divides by.
 LEVEL_BUS_BURST_JS = """
 async ({ frames, mode }) => {
   const waveform = document.getElementById('waveform');
@@ -910,8 +914,12 @@ async ({ frames, mode }) => {
         synth += (Math.max(0, Math.min(1, peak * 3.2)) - synth) * 0.35;
         const str = synth.toFixed(3);
         if (str !== synthLast) {
-          if (mode !== 'element_only') root.style.setProperty('--level', str);
-          if (mode !== 'root_only') waveform.style.setProperty('--level', str);
+          if (mode === 'root_control') {
+            root.style.setProperty('--level-bus-control', str);
+          } else {
+            if (mode !== 'element_only') root.style.setProperty('--level', str);
+            if (mode !== 'root_only') waveform.style.setProperty('--level', str);
+          }
           synthLast = str;
         }
       }
@@ -980,96 +988,79 @@ def _drive_level_bus_burst(page, cdp, frames=LEVEL_BUS_BURST_FRAMES, mode="push"
     }
 
 
-# Budgets, derived from measurement (see the S4a report): the real
-# pushWaveform()-driven burst on this page currently costs ~1.6-1.9ms/frame
-# (instrument) .. ~2.7-2.9ms/frame (chainsawman) of style recalc and
-# ~0.08-0.12ms/frame of layout, stable across repeated runs. Set at roughly
-# 1.4-2x the worst observed theme with headroom short of the 16.6ms/frame
-# (60fps) total budget, so it fails on a real regression (e.g. a theme or a
-# future consumer adding materially more cost) without flaking on ordinary
-# run-to-run noise.
+# Gate: each theme's recalc cost as a RATIO against a control measured in
+# the same page and run, on both sides of the real burst -- the same :root
+# write of a registered inherits:true property that no rule reads
+# (LEVEL_BUS_CONTROL_PROP). The pattern of
+# test_heat_bus_updates_at_roughly_12hz_not_60hz: machine speed and load
+# scale both legs alike and cancel, so the verdict is the same on any box.
 #
-# WARNING -- this baseline is KNOWN BAD, not a target: an independent
-# control (writing a registered inherits:true property NOTHING reads)
-# measured ~1.8ms/frame recalc and 240/240 layout events on instrument --
-# essentially IDENTICAL to the real --level burst above. The current cost
-# is almost entirely the cost of writing an inherited registered custom
-# property on documentElement at all, not the cost of --level's own
-# consumers (see test_level_bus_root_write_costs_more_than_
-# element_scoped_write's element-only numbers: 0.089ms/frame instrument,
-# 0.309ms/frame chainsawman, zero/near-zero layout events). The durable
-# fix is scoped work already: the S4 two-bus migration moves the expensive
-# consumers (chainsawman's filter/box-shadow/animation-duration ones,
-# see the per-theme investigation below) off the inherited :root --level
-# onto the non-inherited, #meterChrome-scoped --level-fast -- S7's rig
-# conversion is exactly the vehicle for that move. Recalc should drop
-# toward the element-scoped numbers above once it lands -- a ~6-20x
-# improvement -- and these budgets MUST be re-derived then, and should
-# DROP substantially; if they don't, something is wrong. Do not treat
-# these numbers as a quality bar -- they only exist to catch a gross
-# regression on top of a currently-known-bad mechanism.
+# History: this was an absolute ms/frame table (instrument 4.5, hacker 5.0)
+# derived on the owner's fast box. On an idle 4-core i5-3210M the real code
+# measured 8.7 / 7.2ms/frame and failed every run; on the rig (Ryzen 9
+# 7900X) the same table was loose enough to pass the planted regression
+# below at 4.2 / 3.9ms/frame.
 #
-# PER-THEME, not one global number (V4 investigation, 2026-08-17): a
-# single constant covering the worst theme slackens the two that actually
-# matter. Re-derived after V4 added an extra grid-nesting level to
-# #contentGrid (now a grid item inside `body > .device`'s own outer grid,
-# see index.html's "V4: chassis widens" comment, where it used to be a
-# direct flex child of `.device`) -- negligible against instrument's cheap
-# consumers, small against hacker's, amplified against chainsawman's
-# expensive ones, because #contentGrid is exactly where hacker/chainsawman
-# ALSO promote their own cards via `display: contents` (their own
-# mechanism, not V4's). Confirmed by testing all three themes, not just
-# the one that crossed budget: instrument showed ~zero delta under the
-# identical unscoped V4 changes, which rules out `#lowerBay {display:
-# contents}` and the new `grid-template-areas` as the driver (both apply
-# to instrument too) and narrows it to the #contentGrid nesting x
-# chainsawman's own consumer cost. 5 alternating trials each, same
-# `test_webclient.py`, only `index.html` swapped between HEAD (9398e8d)
-# and V4, back-to-back on a quiet box (load 1.9-4.6, no other pytest
-# running) so load contention isn't the variable:
+# The mechanism is still known-bad, not a target: nearly all of this cost is
+# writing an inherited registered property on documentElement at all (hence
+# that write is the control); the ratio is what --level's own consumers and
+# pushWaveform's other DOM work add on top. The S4 two-bus migration (the
+# expensive consumers onto the #meterChrome-scoped --level-fast) should pull
+# it toward 1.0 -- re-derive these then.
 #
-#   theme        HEAD mean   V4 mean   delta
-#   instrument   3.32        3.34      ~0.02 (noise)
-#   hacker       3.63        3.68      ~0.05
-#   chainsawman  4.07        4.58      ~0.51 (max observed 4.69/10 trials)
+# Ceilings, measured 2026-09-24, 8 runs per theme on each of the rig
+# (container, load <0.3) and the i5-3210M (otherwise idle):
 #
-# The decisive fact: HEAD's own chainsawman mean (4.07) was already over
-# the old flat 4.0 budget -- 4 of 5 HEAD trials landed at/under 4.03, one
-# outlier at 4.51. That gate was never reliably green, with or without
-# this slice; V4's ~0.5ms addition is what tipped an already-marginal
-# number over the line, not a working gate breaking outright. Each budget
-# below is the theme's own quiet-box V4 mean plus headroom for real load
-# variance (chainsawman's own loaded runs during this same investigation
-# ranged 4.17-4.97, informing its headroom specifically).
+#   theme        real code    planted regression
+#   instrument   1.05-1.20x   2.04-4.28x
+#   hacker       1.14-1.33x   1.98-3.20x
 #
-# BACKLOG: the structurally correct fix is a SELF-CALIBRATING gate, not
-# better-guessed constants -- this repo already has the pattern:
-# test_heat_bus_updates_at_roughly_12hz_not_60hz asserts --level-fast's
-# cadence as a RATIO (>= 0.85x) against a raw-rAF ceiling measured in the
-# SAME run, not a fixed Hz, specifically so load/hardware variance cancels
-# out instead of being guessed at. The analogue here: measure a control
-# cost (e.g. the unused-registered-property burst already used above as a
-# comparison, or a raw layout/recalc no-op) in the same test run and
-# assert THIS burst's cost as a ratio against it. Out of scope for a
-# composition slice -- left as a note so the next person re-deriving these
-# numbers doesn't have to rediscover the pattern from scratch.
-LEVEL_BUS_RECALC_BUDGET_MS_PER_FRAME = {
-    "instrument": 4.5,
-    "hacker": 5.0,
+# Planted regression: `.device * { box-shadow: <a --level glow>; transition:
+# box-shadow 0.12s }` in a scratch copy of index.html -- a theme giving every
+# element a transitioned --level glow. The same glow WITHOUT the transition
+# moved the ratio only to 1.4-2.0x: the control's inherited write re-resolves
+# every element's style too, so consumer cost is partly diluted into both
+# legs. Each ceiling is ~1.17x the theme's worst real ratio, rounded up to
+# 0.05 -- room for run-to-run noise (about +/-0.08) with the plant well
+# clear. Blind spot, by design: a change that slows the WHOLE page's recalc
+# (more DOM, a heavier theme overall) scales both legs and leaves the ratio
+# where it was -- this gates the bus's marginal cost, not total page cost.
+#
+# Layout stays an absolute budget: real code measured 0.08ms/frame on the
+# rig and 0.23-0.29ms/frame on the i5-3210M, well inside 1.0 on both, so the
+# hardware problem the recalc table had does not apply to it.
+LEVEL_BUS_CONTROL_PROP = "--level-bus-control"
+LEVEL_BUS_RECALC_RATIO_CEILING = {
+    "instrument": 1.40,
+    "hacker": 1.55,
 }
 LEVEL_BUS_LAYOUT_BUDGET_MS_PER_FRAME = 1.0
 
+REGISTER_LEVEL_BUS_CONTROL_JS = f"""
+() => {{
+  try {{
+    CSS.registerProperty({{ name: '{LEVEL_BUS_CONTROL_PROP}', syntax: '<number>', inherits: true, initialValue: '0' }});
+  }} catch (e) {{ /* already registered on this page */ }}
+}}
+"""
 
-def _report_level_bus_burst(theme, consumer_count, result):
+
+def _report_level_bus_burst(theme, consumer_count, result, control):
     per_frame_recalc = result["recalc_ms"] / result["frames"]
     per_frame_layout = result["layout_ms"] / result["frames"]
+    control_recalc = control["recalc_ms"] / control["frames"]
+    control_layout = control["layout_ms"] / control["frames"]
     print(f"\n-- {theme}: --level bus frame budget --")
     print(f"  consumers reading --level: {consumer_count}")
     print(f"  recalc: {result['recalc_ms']:.3f}ms / {result['recalc_count']} events over "
           f"{result['frames']} frames  ({per_frame_recalc:.4f}ms/frame)")
     print(f"  layout: {result['layout_ms']:.3f}ms / {result['layout_count']} events over "
           f"{result['frames']} frames  ({per_frame_layout:.4f}ms/frame)")
-    return per_frame_recalc, per_frame_layout
+    print(f"  control ({LEVEL_BUS_CONTROL_PROP}, read by nothing): {control_recalc:.4f}ms/frame recalc, "
+          f"{control_layout:.4f}ms/frame layout")
+    ratio = per_frame_recalc / control_recalc if control_recalc > 0 else float("inf")
+    print(f"  recalc ratio vs control: {ratio:.2f}x")
+    return per_frame_recalc, per_frame_layout, control_recalc, ratio
 
 
 @pytest.mark.parametrize("theme", ["instrument", "hacker"])
@@ -1077,21 +1068,13 @@ def test_level_bus_frame_budget_by_theme(browser, static_server, theme):
     """Drives the real pushWaveform() on a rAF loop for
     LEVEL_BUS_BURST_FRAMES frames with a varying peak (so the lastLevelStr
     dedupe can't suppress the writes) and gates the resulting CDP
-    style-recalc/layout cost per theme. Prints the numbers on SUCCESS too
-    -- a gate that only speaks on failure teaches nothing on the runs where
-    it passes.
-
-    The per-theme total below is dominated by the :root write itself, NOT
-    by how many rules each theme has reading --level -- an independent
-    control (writing a registered inherits:true property nothing reads)
-    measured ~1.8ms/frame recalc and 240/240 layout events on instrument,
-    essentially matching the real --level burst. The theme's OWN consumer
-    style is a real but much smaller second-order effect: isolating it
-    (real burst minus that same unused-property control) is roughly
-    +0.05ms/frame for instrument's own 2 base consumers, ~+0.34ms/frame
-    for chainsawman's filter/box-shadow/animation-duration ones -- an
-    early draft of this comment compared theme totals directly and
-    overstated this by ~3x."""
+    style-recalc cost per theme AS A RATIO against a control burst measured
+    in the same page, same run: the same :root write of a registered
+    inherits:true property that no rule reads. Machine speed scales both
+    legs alike and cancels out; what's left is what this page's --level
+    consumers and pushWaveform's own DOM work cost on top of the bare write.
+    Prints the numbers on SUCCESS too -- a gate that only speaks on failure
+    teaches nothing on the runs where it passes."""
     server = StubControlServer()
     server.start()
     ctx, page, errors, console_errors = _new_page(browser, static_server, server)
@@ -1107,20 +1090,30 @@ def test_level_bus_frame_budget_by_theme(browser, static_server, theme):
     page.wait_for_timeout(60)
 
     consumer_count = page.evaluate(LEVEL_BUS_CONSUMER_COUNT_JS)
+    page.evaluate(REGISTER_LEVEL_BUS_CONTROL_JS)
 
     cdp = ctx.new_cdp_session(page)
     cdp.send("Performance.enable")
     _drive_level_bus_burst(page, cdp, frames=30, mode="push")  # warm-up, unmeasured
+    _drive_level_bus_burst(page, cdp, frames=30, mode="root_control")  # warm-up, unmeasured
+    # Control on both sides of the real burst, so drift across the run
+    # (thermal, a background task starting) lands on both legs.
+    control_a = _drive_level_bus_burst(page, cdp, mode="root_control")
     result = _drive_level_bus_burst(page, cdp, mode="push")
-    per_frame_recalc, per_frame_layout = _report_level_bus_burst(theme, consumer_count, result)
+    control_b = _drive_level_bus_burst(page, cdp, mode="root_control")
+    control = {k: control_a[k] + control_b[k] for k in ("recalc_ms", "layout_ms", "recalc_count", "frames")}
+    per_frame_recalc, per_frame_layout, control_recalc, ratio = _report_level_bus_burst(
+        theme, consumer_count, result, control)
 
     ctx.close()
     server.stop()
     assert not errors, f"uncaught page errors: {errors}"
-    recalc_budget = LEVEL_BUS_RECALC_BUDGET_MS_PER_FRAME[theme]
-    assert per_frame_recalc < recalc_budget, (
-        f"[{theme}] --level bus recalc cost {per_frame_recalc:.4f}ms/frame exceeds the "
-        f"{recalc_budget}ms/frame budget")
+    assert control["recalc_count"] > 0 and control_recalc > 0, \
+        "control burst produced no style recalc -- the harness isn't driving the page"
+    ceiling = LEVEL_BUS_RECALC_RATIO_CEILING[theme]
+    assert ratio < ceiling, (
+        f"[{theme}] --level bus recalc cost {per_frame_recalc:.4f}ms/frame is {ratio:.2f}x the same-run "
+        f"control ({control_recalc:.4f}ms/frame), over the {ceiling}x ceiling")
     assert per_frame_layout < LEVEL_BUS_LAYOUT_BUDGET_MS_PER_FRAME, (
         f"[{theme}] --level bus layout cost {per_frame_layout:.4f}ms/frame exceeds the "
         f"{LEVEL_BUS_LAYOUT_BUDGET_MS_PER_FRAME}ms/frame budget")
@@ -1170,21 +1163,39 @@ def test_level_bus_root_write_costs_more_than_element_scoped_write(browser, stat
 # comments for the design. --level stays exactly as measured/gated above
 # (grandfathered); these buses are new and additive.
 
-# Budget for --level-fast: it is written element-scoped on #meterChrome
-# alone (inherits:false), the same shape S4a's element-only control
-# measured at ~0.089ms/frame (instrument) / ~0.309ms/frame (chainsawman),
-# not --level's ~1.8-2.7ms/frame root-write cost. 7 samples of this
-# slice's own isolated-cost harness (test_level_fast_bus_frame_budget,
-# same shared-box conditions the suite normally runs under):
-#   recalc ms/frame: 0.0000, 0.0090, 0.0433, 0.0721, 0.1106, 0.1535, 0.3160  (mean ~0.10, max 0.316)
-#   layout ms/frame: 0.0000, 0.0008, 0.0015, 0.0032, 0.0033, 0.0070, 0.0144  (mean ~0.005, max 0.0144)
-# matching S4a's element-scoped table. Budget set at ~1.6x the observed
-# max (recalc) and ~3.5x the observed max (layout), well short of
-# --level's own 4.0/1.0 budget, so a future regression that (re)couples
-# this bus to a full-page write is caught instead of quietly inheriting
-# --level's much looser ceiling.
-LEVEL_FAST_RECALC_BUDGET_MS_PER_FRAME = 0.5
-LEVEL_FAST_LAYOUT_BUDGET_MS_PER_FRAME = 0.05
+# Gate for --level-fast: what its write adds to the real pushWaveform()
+# burst, as a RATIO over the same burst with only that write suppressed,
+# measured in the same page (see _level_fast_ratios). --level-fast is
+# written element-scoped on #meterChrome alone (inherits:false), so a
+# conforming write should barely move either number.
+#
+# History: this was an absolute budget (0.5ms/frame recalc, 0.05 layout)
+# on the with-minus-without DIFFERENCE. On the rig (Ryzen 9 7900X) the
+# negative control's deliberately expensive mount cost only 0.176 / 0.047
+# ms/frame -- under both -- so the gate could not fire on fast hardware;
+# a difference shrinks with the machine while an absolute budget doesn't.
+#
+# Every leg drops the :root --level/--heat writes (gated separately, by
+# test_level_bus_frame_budget_by_theme). Left in, they are ~95% of each
+# leg and the plant measured INSIDE real-code noise (real 0.93-1.39x
+# recalc vs plant 1.01-1.22x, rig).
+#
+# Ceilings, measured 2026-09-24 (control/real legs interleaved x5; 6 runs
+# per host, plus 5 earlier runs of a 3-leg version that agree):
+#
+#                     real code                plant (body-resize consumer)
+#   rig     recalc    1.03-1.12x               1.55-1.71x
+#           layout    1.00-1.08x               1.87-1.97x
+#   i5-3210M recalc   1.02-1.07x               1.05-1.17x
+#           layout    0.96-1.05x               1.20-1.34x
+#
+# Each ceiling sits about midway between the worst real ratio and the
+# weakest plant ratio on that axis. The slow box only separates on layout
+# -- its heavier baseline style work dilutes the plant's recalc -- so the
+# negative control's margin there is layout 1.20 vs 1.12: the tightest
+# number in this gate, and the first to re-derive if it ever flakes.
+LEVEL_FAST_RECALC_RATIO_CEILING = 1.33
+LEVEL_FAST_LAYOUT_RATIO_CEILING = 1.12
 
 
 # Below what ceiling a raw-rAF control is itself no longer trustworthy --
@@ -1400,95 +1411,133 @@ def test_reset_waveform_zeroes_heat_and_level_fast(browser, static_server):
     assert after["levelFast"] == "0", f"resetWaveform left --level-fast at {after['levelFast']!r}, expected 0"
 
 
-def test_level_fast_bus_frame_budget(browser, static_server):
-    """Extends the S4a frame-budget gate to --level-fast: drives the real
-    pushWaveform() on a rAF loop with a varying peak and gates the
-    resulting CDP style-recalc/layout cost against
-    LEVEL_FAST_RECALC_BUDGET_MS_PER_FRAME -- the element-scoped budget,
-    not --level's inherited-root one. Isolates --level-fast's own cost by
-    diffing a run with the property registered+written against a run
-    where pushWaveform is monkeypatched to skip only the --level-fast
-    write (same burst, same --level/--heat writes on both legs) -- a raw
-    total would otherwise fold in --level's own ~1.8ms/frame."""
+# The real pushWaveform() burst, optionally with its --level-fast write
+# suppressed (the same-run control leg) or with a deliberately expensive
+# consumer hung off that write (the negative control's plant). On EVERY leg
+# the :root --level/--heat writes are dropped: that page-wide inherited
+# write is gated by test_level_bus_frame_budget_by_theme, and left in it is
+# ~95% of each leg's cost, burying what --level-fast (or a plant on it)
+# adds under run-to-run noise. Everything else pushWaveform writes is
+# identical on every leg.
+LEVEL_FAST_BURST_JS = """
+async ({ frames, skipFast, plant }) => {
+  smoothedLevel = 0;
+  lastLevelStr = null;
+  heat = 0;
+  nextHeatWriteMs = 0;
+  nextLevelFastWriteMs = 0;
+  const mc = document.getElementById('meterChrome');
+  const origSet = mc.style.setProperty.bind(mc.style);
+  const rootStyle = document.documentElement.style;
+  const origRootSet = rootStyle.setProperty.bind(rootStyle);
+  rootStyle.setProperty = (name, value) => {
+    if (name === '--level' || name === '--heat') return;
+    return origRootSet(name, value);
+  };
+  if (skipFast || plant) {
+    mc.style.setProperty = (name, value) => {
+      if (name !== '--level-fast') return origSet(name, value);
+      if (skipFast) return;
+      origSet(name, value);
+      // The plant: a consumer that reads the bus and resizes
+      // document.body off it, forcing a full-document layout -- see
+      // test_level_fast_budget_gate_fails_on_a_deliberately_expensive_mount.
+      document.body.style.width = (99.5 + parseFloat(value) * 0.5) + '%';
+      void document.body.offsetHeight;
+    };
+  }
+  let i = 0;
+  return new Promise((resolve) => {
+    function frame() {
+      const peak = Math.abs(Math.sin(i * 0.73)) * 0.9 + 0.05;
+      pushWaveform(peak);
+      i += 1;
+      if (i < frames) requestAnimationFrame(frame);
+      else {
+        mc.style.setProperty = origSet;
+        rootStyle.setProperty = origRootSet;
+        document.body.style.width = '';
+        resolve(null);
+      }
+    }
+    requestAnimationFrame(frame);
+  });
+}
+"""
+
+
+def _level_fast_ratios(browser, static_server, plant=False):
+    """Alternates control (no --level-fast write) and real (with it, plus
+    the plant if asked) legs in one page -- control, real, control, real,
+    control -- and returns the mean real leg's recalc/layout cost as ratios
+    over the mean control leg. Interleaving puts drift on both sides;
+    averaging two real legs halves the variance a single leg had."""
     server = StubControlServer()
     server.start()
     ctx, page, errors, console_errors = _new_page(browser, static_server, server)
     page.wait_for_timeout(60)
-
     cdp = ctx.new_cdp_session(page)
     cdp.send("Performance.enable")
 
-    js = """
-    async ({ frames, skipFast }) => {
-      smoothedLevel = 0;
-      lastLevelStr = null;
-      heat = 0;
-      nextHeatWriteMs = 0;
-      nextLevelFastWriteMs = 0;
-      const mc = document.getElementById('meterChrome');
-      const origSet = mc.style.setProperty.bind(mc.style);
-      if (skipFast) {
-        mc.style.setProperty = (name, value) => {
-          if (name === '--level-fast') return;
-          return origSet(name, value);
-        };
-      }
-      let i = 0;
-      return new Promise((resolve) => {
-        function frame() {
-          const peak = Math.abs(Math.sin(i * 0.73)) * 0.9 + 0.05;
-          pushWaveform(peak);
-          i += 1;
-          if (i < frames) requestAnimationFrame(frame);
-          else { mc.style.setProperty = origSet; resolve(null); }
-        }
-        requestAnimationFrame(frame);
-      });
-    }
-    """
-
-    def drive(skip_fast):
+    def drive(skip_fast, frames=LEVEL_BUS_BURST_FRAMES):
         before = _cdp_perf_snapshot(cdp)
-        page.evaluate(js, {"frames": LEVEL_BUS_BURST_FRAMES, "skipFast": skip_fast})
+        page.evaluate(LEVEL_FAST_BURST_JS, {"frames": frames, "skipFast": skip_fast, "plant": plant})
         after = _cdp_perf_snapshot(cdp)
         return {
             "recalc_ms": (after["RecalcStyleDuration"] - before["RecalcStyleDuration"]) * 1000,
             "layout_ms": (after["LayoutDuration"] - before["LayoutDuration"]) * 1000,
         }
 
-    page.evaluate(js, {"frames": 30, "skipFast": False})  # warm-up, unmeasured
-    with_fast = drive(skip_fast=False)
-    without_fast = drive(skip_fast=True)
-
-    per_frame_recalc = max(0.0, (with_fast["recalc_ms"] - without_fast["recalc_ms"]) / LEVEL_BUS_BURST_FRAMES)
-    per_frame_layout = max(0.0, (with_fast["layout_ms"] - without_fast["layout_ms"]) / LEVEL_BUS_BURST_FRAMES)
-    print("\n-- --level-fast frame budget (isolated from --level/--heat) --")
-    print(f"  with --level-fast:    {with_fast['recalc_ms']:.3f}ms recalc, {with_fast['layout_ms']:.3f}ms layout "
-          f"over {LEVEL_BUS_BURST_FRAMES} frames")
-    print(f"  without --level-fast: {without_fast['recalc_ms']:.3f}ms recalc, {without_fast['layout_ms']:.3f}ms "
-          f"layout over {LEVEL_BUS_BURST_FRAMES} frames")
-    print(f"  isolated --level-fast cost: {per_frame_recalc:.4f}ms/frame recalc, "
-          f"{per_frame_layout:.4f}ms/frame layout")
-
+    drive(skip_fast=False, frames=30)  # warm-up, unmeasured
+    drive(skip_fast=True, frames=30)  # warm-up, unmeasured
+    legs = [drive(skip_fast=(i % 2 == 0)) for i in range(5)]
     ctx.close()
     server.stop()
     assert not errors, f"uncaught page errors: {errors}"
-    assert per_frame_recalc < LEVEL_FAST_RECALC_BUDGET_MS_PER_FRAME, (
-        f"--level-fast recalc cost {per_frame_recalc:.4f}ms/frame exceeds the "
-        f"{LEVEL_FAST_RECALC_BUDGET_MS_PER_FRAME}ms/frame budget")
-    assert per_frame_layout < LEVEL_FAST_LAYOUT_BUDGET_MS_PER_FRAME, (
-        f"--level-fast layout cost {per_frame_layout:.4f}ms/frame exceeds the "
-        f"{LEVEL_FAST_LAYOUT_BUDGET_MS_PER_FRAME}ms/frame budget")
+
+    control = {k: sum(leg[k] for leg in legs[0::2]) / 3 for k in ("recalc_ms", "layout_ms")}
+    real = {k: sum(leg[k] for leg in legs[1::2]) / 2 for k in ("recalc_ms", "layout_ms")}
+    assert control["recalc_ms"] > 0 and control["layout_ms"] > 0, \
+        f"control burst measured no recalc/layout ({control}) -- the harness isn't driving the page"
+    recalc_ratio = real["recalc_ms"] / control["recalc_ms"]
+    layout_ratio = real["layout_ms"] / control["layout_ms"]
+    label = "deliberately expensive #meterChrome consumer" if plant else "--level-fast"
+    print(f"\n-- {label}: frame cost vs the same burst without --level-fast --")
+    print(f"  with:    {real['recalc_ms'] / LEVEL_BUS_BURST_FRAMES:.4f}ms/frame recalc, "
+          f"{real['layout_ms'] / LEVEL_BUS_BURST_FRAMES:.4f}ms/frame layout")
+    print(f"  without: {control['recalc_ms'] / LEVEL_BUS_BURST_FRAMES:.4f}ms/frame recalc, "
+          f"{control['layout_ms'] / LEVEL_BUS_BURST_FRAMES:.4f}ms/frame layout")
+    print(f"  ratios: recalc {recalc_ratio:.3f}x [ceiling {LEVEL_FAST_RECALC_RATIO_CEILING}], "
+          f"layout {layout_ratio:.3f}x [ceiling {LEVEL_FAST_LAYOUT_RATIO_CEILING}]")
+    return recalc_ratio, layout_ratio
+
+
+def test_level_fast_bus_frame_budget(browser, static_server):
+    """Extends the S4a frame-budget gate to --level-fast: drives the real
+    pushWaveform() on a rAF loop with a varying peak, and gates what the
+    --level-fast write adds as a RATIO over the same burst with only that
+    write suppressed (same --level/--heat writes on both legs), measured
+    in the same page on both sides of the real leg. A conforming
+    element-scoped write barely moves either number; one that (re)couples
+    the bus to a page-wide write roughly doubles recalc."""
+    recalc_ratio, layout_ratio = _level_fast_ratios(browser, static_server)
+    assert recalc_ratio < LEVEL_FAST_RECALC_RATIO_CEILING, (
+        f"--level-fast raises recalc to {recalc_ratio:.3f}x the same burst without it "
+        f"(ceiling {LEVEL_FAST_RECALC_RATIO_CEILING}x)")
+    assert layout_ratio < LEVEL_FAST_LAYOUT_RATIO_CEILING, (
+        f"--level-fast raises layout to {layout_ratio:.3f}x the same burst without it "
+        f"(ceiling {LEVEL_FAST_LAYOUT_RATIO_CEILING}x)")
 
 
 def test_level_fast_budget_gate_fails_on_a_deliberately_expensive_mount(browser, static_server):
-    """Negative control: the extended budget must be provably able to
-    fail, not just always pass. Drives a synthetic burst that writes
-    --level-fast on #meterChrome every frame AND -- standing in for a rig
-    author who reads the bus then violates the transform/opacity-only rule
-    by resizing document.body off it every frame, forcing a full-document
-    layout instead of a confined, compositor-only reaction -- must exceed
-    LEVEL_FAST_RECALC_BUDGET_MS_PER_FRAME.
+    """Negative control: the level-fast gate must be provably able to
+    fail, not just always pass. Runs the SAME harness as
+    test_level_fast_bus_frame_budget with one change -- a consumer hung
+    off the --level-fast write that, standing in for a rig author who
+    reads the bus then violates the transform/opacity-only rule, resizes
+    document.body every frame, forcing a full-document layout instead of
+    a confined, compositor-only reaction -- and requires the gate's
+    ceilings to catch it on at least one axis.
 
     Why a full-document layout and not a filter/box-shadow rule on
     #meterChrome itself (S4a's own consumer-injection style): tried that
@@ -1504,67 +1553,11 @@ def test_level_fast_budget_gate_fails_on_a_deliberately_expensive_mount(browser,
     strawman -- do not "simplify" this back to a filter/box-shadow rule
     on the mount; that version measured well under budget and this
     control's whole point is being able to fail."""
-    server = StubControlServer()
-    server.start()
-    ctx, page, errors, console_errors = _new_page(browser, static_server, server)
-    page.wait_for_timeout(60)
-
-    cdp = ctx.new_cdp_session(page)
-    cdp.send("Performance.enable")
-
-    js = """
-    async ({ frames }) => {
-      const mc = document.getElementById('meterChrome');
-      let i = 0;
-      return new Promise((resolve) => {
-        function frame() {
-          const v = Math.abs(Math.sin(i * 0.73)) * 0.9 + 0.05;
-          mc.style.setProperty('--level-fast', v.toFixed(3));
-          // Deliberately expensive: unlike production (a plain custom-
-          // property write, confined to #meterChrome by inherits:false),
-          // this consumer reacts by resizing document.body every frame --
-          // a width change forces a full-document layout, the same
-          // full-page-layout cost S4a measured on an inherited :root
-          // write (~1.8ms/frame), regardless of --level-fast's own
-          // non-inherited scoping.
-          document.body.style.width = (99.5 + v * 0.5) + '%';
-          void document.body.offsetHeight;
-          i += 1;
-          if (i < frames) requestAnimationFrame(frame);
-          else { document.body.style.width = ''; resolve(null); }
-        }
-        requestAnimationFrame(frame);
-      });
-    }
-    """
-    page.evaluate(js, {"frames": 30})  # warm-up, unmeasured
-    before = _cdp_perf_snapshot(cdp)
-    page.evaluate(js, {"frames": LEVEL_BUS_BURST_FRAMES})
-    after = _cdp_perf_snapshot(cdp)
-    recalc_ms = (after["RecalcStyleDuration"] - before["RecalcStyleDuration"]) * 1000
-    layout_ms = (after["LayoutDuration"] - before["LayoutDuration"]) * 1000
-    per_frame_recalc = recalc_ms / LEVEL_BUS_BURST_FRAMES
-    per_frame_layout = layout_ms / LEVEL_BUS_BURST_FRAMES
-    print(f"\n-- deliberately expensive #meterChrome consumer -- {recalc_ms:.3f}ms recalc / "
-          f"{layout_ms:.3f}ms layout over {LEVEL_BUS_BURST_FRAMES} frames "
-          f"({per_frame_recalc:.4f}ms/frame recalc [budget {LEVEL_FAST_RECALC_BUDGET_MS_PER_FRAME}], "
-          f"{per_frame_layout:.4f}ms/frame layout [budget {LEVEL_FAST_LAYOUT_BUDGET_MS_PER_FRAME}])")
-
-    ctx.close()
-    server.stop()
-    assert not errors, f"uncaught page errors: {errors}"
-    # A body-width resize every frame stays under the (already tight)
-    # recalc budget but blows through the layout one -- the full-document
-    # layout it forces is exactly what --level-fast's element-scoping and
-    # inherits:false are supposed to make impossible for a *conforming*
-    # consumer to trigger; a non-conforming one (this test) still can, and
-    # the gate must catch it on at least one axis.
-    assert per_frame_recalc > LEVEL_FAST_RECALC_BUDGET_MS_PER_FRAME or \
-        per_frame_layout > LEVEL_FAST_LAYOUT_BUDGET_MS_PER_FRAME, (
-        f"deliberately expensive #meterChrome consumer only cost {per_frame_recalc:.4f}ms/frame recalc / "
-        f"{per_frame_layout:.4f}ms/frame layout -- at or under BOTH budgets "
-        f"({LEVEL_FAST_RECALC_BUDGET_MS_PER_FRAME}/{LEVEL_FAST_LAYOUT_BUDGET_MS_PER_FRAME}), so this gate "
-        "cannot actually catch a regression")
+    recalc_ratio, layout_ratio = _level_fast_ratios(browser, static_server, plant=True)
+    assert recalc_ratio > LEVEL_FAST_RECALC_RATIO_CEILING or layout_ratio > LEVEL_FAST_LAYOUT_RATIO_CEILING, (
+        f"deliberately expensive #meterChrome consumer only reached {recalc_ratio:.3f}x recalc / "
+        f"{layout_ratio:.3f}x layout -- under BOTH ceilings ({LEVEL_FAST_RECALC_RATIO_CEILING}x/"
+        f"{LEVEL_FAST_LAYOUT_RATIO_CEILING}x), so this gate cannot actually catch a regression")
 
 
 def test_arm_switch_mirrors_wake_toggle(client):
@@ -3433,6 +3426,38 @@ def test_models_endpoint_supports_head(serve_py_server):
     assert resp.getheader("Content-Length") not in (None, "0")
 
 
+def test_serve_py_binds_loopback_by_default():
+    """Run as the unit/README run it: no --host means this machine only.
+    Read off the kernel's own listen table, not just the printed line."""
+    import socket
+    import sys
+
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    port = probe.getsockname()[1]
+    probe.close()
+    proc = subprocess.Popen([sys.executable, os.path.join(HERE, "serve.py"), "--port", str(port)],
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    try:
+        line = proc.stdout.readline().strip()
+        assert line == f"Serving {HERE} on http://127.0.0.1:{port}", line
+        with open("/proc/net/tcp") as f:
+            listening = [ln.split()[1] for ln in f.readlines()[1:]
+                         if ln.split()[1].endswith(":%04X" % port) and ln.split()[3] == "0A"]
+        assert listening == ["0100007F:%04X" % port], listening
+    finally:
+        proc.terminate()
+        proc.wait(timeout=10)
+
+
+def test_webclient_unit_template_keeps_lan_access_explicitly():
+    """The default moved to loopback underneath existing installs; a unit
+    re-rendered from the template must keep serving the LAN it served before."""
+    with open(os.path.join(HERE, "..", "systemd", "voice-webclient.service.template")) as f:
+        exec_start = [ln for ln in f if ln.startswith("ExecStart=")]
+    assert len(exec_start) == 1 and "--host 0.0.0.0" in exec_start[0], exec_start
+
+
 # ── check-hooks.py gate (Terminal skin rebuild) ─────────────────────────
 # check-theme.py only verifies scoping; it says nothing about whether a
 # selector's id/class still exists post-port. check-hooks.py closes that
@@ -5098,6 +5123,153 @@ def test_legend_arm_line_hides_when_wake_word_is_unsupported(client):
     assert page.eval_on_selector(
         "#legendArmLine", "el => el.offsetParent === null"
     ), "ARM line is still laid out on the plate after wake_word went unsupported"
+
+
+# ── wake word with no detector on the server ─────────────────────────────
+
+_WAKE_UNAVAILABLE_REASON = (
+    "openwakeword is not installed in the pipeline's venv "
+    "(pip install openwakeword onnxruntime, then restart the pipeline)")
+
+
+def _wake_config_sent(server):
+    return [m for m in server.text_msgs if m.get("type") == "config_set" and "wake_word" in m]
+
+
+def test_wake_word_unavailable_greys_out_arming_and_says_why(client):
+    """Observed live: with openwakeword missing the toggle still armed, the
+    screen said to say the wake phrase, and the gate failed open -- every
+    utterance reached the brain. The block stays visible (so the reason can
+    be read), but neither the checkbox nor the ARM switch can arm it."""
+    page, server = client
+    server.send(dict(CONFIG_STATE, wake_word={
+        "enabled": False, "state": "off", "phrase": "hey jarvis",
+        "model": "hey_jarvis", "models": ["hey_jarvis"],
+        "available": False, "unavailable_reason": _WAKE_UNAVAILABLE_REASON}))
+    page.wait_for_function(
+        "() => !document.getElementById('wakeWordBlock').hidden", timeout=10000)
+    _open_settings(page)
+    page.click("#inputGroup summary")
+    page.wait_for_function("() => document.getElementById('inputGroup').open", timeout=10000)
+
+    state = page.evaluate("""() => ({
+        toggleDisabled: document.getElementById('wakeToggle').disabled,
+        toggleAria: document.getElementById('wakeToggle').getAttribute('aria-disabled'),
+        armAria: document.getElementById('armSwitch').getAttribute('aria-disabled'),
+        hintVisible: document.getElementById('wakeUnavailableHint')?.checkVisibility() ?? false,
+        hintText: document.getElementById('wakeUnavailableHint')?.textContent ?? null,
+        legendDisplay: getComputedStyle(document.getElementById('legendArmLine')).display,
+    })""")
+    assert state["toggleDisabled"] is True and state["toggleAria"] == "true", state
+    assert state["armAria"] == "true", state
+    assert state["hintVisible"] is True and state["hintText"] == _WAKE_UNAVAILABLE_REASON, state
+    assert state["legendDisplay"] == "none", state
+
+    # The click paths themselves: a real cursor on the settings switch, and the ARM throw.
+    box = page.locator("#wakeWordBlock .switch-track-h").bounding_box()
+    page.mouse.click(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    page.evaluate("() => document.getElementById('armSwitch').click()")
+    page.wait_for_timeout(200)
+    assert page.evaluate("() => document.getElementById('wakeToggle').checked") is False
+    assert _wake_config_sent(server) == [], "an unavailable wake word still sent config_set"
+
+
+def test_wake_word_without_available_key_arms_as_before(client):
+    """Mixed-version guard: an older server sends no `available` key at all,
+    and that must read as available -- nothing greyed out, ARM still arms."""
+    page, server = client
+    server.send(dict(CONFIG_STATE, wake_word={
+        "enabled": False, "state": "off", "phrase": "hey jarvis",
+        "model": "hey_jarvis", "models": ["hey_jarvis"]}))
+    page.wait_for_function(
+        "() => !document.getElementById('wakeWordBlock').hidden", timeout=10000)
+
+    state = page.evaluate("""() => ({
+        toggleDisabled: document.getElementById('wakeToggle').disabled,
+        toggleAria: document.getElementById('wakeToggle').getAttribute('aria-disabled'),
+        armAria: document.getElementById('armSwitch').getAttribute('aria-disabled'),
+        hintHidden: document.getElementById('wakeUnavailableHint')?.hidden ?? true,
+        legendDisplay: getComputedStyle(document.getElementById('legendArmLine')).display,
+    })""")
+    assert state["toggleDisabled"] is False and state["toggleAria"] is None, state
+    assert state["armAria"] == "false", state
+    assert state["hintHidden"] is True, state
+    assert state["legendDisplay"] != "none", state
+
+    page.evaluate("() => document.getElementById('armSwitch').click()")
+    page.wait_for_function(
+        "() => document.getElementById('wakeToggle').checked === true", timeout=10000)
+    assert _wake_config_sent(server)[-1]["wake_word"] is True
+
+
+# ── push-to-talk "processing…" ends with the turn ────────────────────────
+
+_STATUS = """() => ({
+    text: document.getElementById('statusText').textContent,
+    shimmer: document.getElementById('statusText').classList.contains('shimmer'),
+})"""
+
+
+def _ptt_turn_to_processing(page):
+    """A real hold-and-release, so the status is set by stopCapture() itself."""
+    _hold(page, "#ptt")
+    page.wait_for_function(
+        "() => typeof capturing !== 'undefined' && capturing && micNode !== null", timeout=10000)
+    page.mouse.up()
+    page.wait_for_function(
+        "() => document.getElementById('statusText').textContent === 'processing…'", timeout=10000)
+
+
+def test_ptt_processing_ends_with_the_answer_not_the_tool_frame(client):
+    """Observed: after every push-to-talk turn the status sat at
+    "processing…" (THINK lamp lit) forever. The tool-only frame is NOT the
+    end -- the real answer still follows it."""
+    page, server = client
+    _ptt_turn_to_processing(page)
+
+    server.send({"type": "transcription_completed", "transcript": "what's the weather"})
+    server.send({"type": "assistant_text", "text": "",
+                 "tools": [{"name": "get_weather", "arguments": "{}"}]})
+    page.wait_for_timeout(200)
+    assert page.evaluate(_STATUS) == {"text": "processing…", "shimmer": True}, \
+        "the tool-only frame ended the turn before the answer arrived"
+
+    server.send({"type": "assistant_text", "text": "Sunny and 21 degrees.", "tools": []})
+    page.wait_for_function(
+        "() => !document.getElementById('statusText').classList.contains('shimmer')", timeout=10000)
+    assert page.evaluate(_STATUS) == {"text": "connected", "shimmer": False}
+
+
+def test_ptt_processing_ends_when_nothing_was_heard(client):
+    """An empty transcript never reaches the brain, so no assistant_text follows."""
+    page, server = client
+    _ptt_turn_to_processing(page)
+    server.send({"type": "transcription_completed", "transcript": ""})
+    page.wait_for_function(
+        "() => !document.getElementById('statusText').classList.contains('shimmer')", timeout=10000)
+    assert page.evaluate(_STATUS) == {"text": "connected", "shimmer": False}
+
+
+def test_ptt_processing_ends_when_the_response_fails(client):
+    page, server = client
+    _ptt_turn_to_processing(page)
+    server.send({"type": "transcription_completed", "transcript": "hello"})
+    server.send({"type": "response_failed", "message": "invalid input"})
+    page.wait_for_function(
+        "() => !document.getElementById('statusText').classList.contains('shimmer')", timeout=10000)
+    assert page.evaluate(_STATUS) == {"text": "connected", "shimmer": False}
+
+
+def test_answer_leaves_the_wake_status_line_alone(client):
+    """Only "processing…" is cleared: the open-mic asleep line is its own
+    state and an answer arriving must not overwrite it."""
+    page, server = client
+    server.send({"type": "wakeword_state", "state": "asleep", "phrase": "hey jarvis"})
+    page.wait_for_function(
+        "() => document.getElementById('statusText').textContent.startsWith('zzz')", timeout=10000)
+    server.send({"type": "assistant_text", "text": "Hello.", "tools": []})
+    page.wait_for_timeout(200)
+    assert page.evaluate(_STATUS)["text"].startswith("zzz")
 
 
 def test_legend_plate_lists_armed_tools_from_config_state(client):

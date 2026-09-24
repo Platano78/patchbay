@@ -854,7 +854,7 @@ class BrainControl:
         if self.streamer is None:
             return None
         gate = self.streamer.wakeword_gate
-        return {
+        state: dict[str, Any] = {
             "enabled": gate.enabled,
             "state": gate.state(),
             "phrase": gate.phrase,
@@ -863,7 +863,13 @@ class BrainControl:
             # mark the active model. See WakewordGate.model_name.
             "model": gate.model_name,
             "models": gate.available_models(),
+            # No detector installed: the panel greys the toggle out and says why,
+            # rather than letting the user arm a gate that would only fail open.
+            "available": gate.available,
         }
+        if not gate.available:
+            state["unavailable_reason"] = gate.UNAVAILABLE_REASON
+        return state
 
     def _record_probe(self, name: str, ok: bool, error: str, models: Optional[list[str]] = None) -> bool:
         """Atomically record the outcome of an actual reachability probe for
@@ -1085,6 +1091,11 @@ class BrainControl:
                     return {"type": "config_ack", "ok": False, "error": "wake word control unavailable"}
                 gate = self.streamer.wakeword_gate
                 if msg["wake_word"]:
+                    # Arming with no detector would fail open on the first frame
+                    # -- every utterance reaching the brain while the screen says
+                    # it is waiting for the wake phrase. Refuse, gate stays off.
+                    if not gate.available:
+                        return {"type": "config_ack", "ok": False, "error": gate.UNAVAILABLE_REASON}
                     gate.enabled = True
                     gate.rearm()
                 else:

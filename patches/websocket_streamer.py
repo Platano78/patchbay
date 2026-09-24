@@ -342,7 +342,15 @@ class WebSocketStreamer:
                         was_awake = self.wakeword_gate.awake
                         score = await asyncio.to_thread(self.wakeword_gate.feed, message)
                         if self.wakeword_gate.awake and not was_awake:
-                            logger.info(f"Client {client_id}: wake word detected (score={score})")
+                            if score is None:
+                                # No frame was scored: the detector failed to load and
+                                # the gate failed open, not a wake phrase being heard.
+                                logger.warning(
+                                    f"Client {client_id}: wake gate failed open (detector unavailable) "
+                                    "— listening without a wake phrase"
+                                )
+                            else:
+                                logger.info(f"Client {client_id}: wake word detected (score={score})")
                             await asyncio.gather(
                                 *[
                                     self._send_or_drop(

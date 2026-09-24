@@ -176,6 +176,7 @@ class _FakeWakewordGate:
     # is always one of `available_models()`, even when the raw arg is a custom path.
     model_name = "my_wake"
     _model_arg = "/opt/models/my_wake_v1.0.onnx"
+    available = True
 
     def state(self):
         return "off"
@@ -287,6 +288,73 @@ def test_wake_word_state_model_is_one_of_the_offered_models(tmp_path):
 
 def test_wake_word_state_none_without_a_streamer(tmp_path):
     assert _make_brain_control(tmp_path)._wake_word_state() is None
+
+
+# ── wake word with no detector installed (the REAL gate) ─────────────────
+
+
+class _WakeStreamer(_FakeStreamer):
+    def __init__(self, gate):
+        super().__init__()
+        self.wakeword_gate = gate
+        self.wake_broadcasts = 0
+
+    def broadcast_wakeword_state(self):
+        self.wake_broadcasts += 1
+
+
+def _real_gate(monkeypatch, installed):
+    from patches import wakeword_gate
+
+    monkeypatch.delenv("VOICE_WAKE_WORD", raising=False)
+    monkeypatch.setattr(wakeword_gate, "_openwakeword_installed", lambda: installed)
+    return wakeword_gate.WakewordGate()
+
+
+def test_config_state_says_wake_word_unavailable_and_why(tmp_path, monkeypatch):
+    gate = _real_gate(monkeypatch, installed=False)
+    bc = _make_brain_control(tmp_path, streamer=_WakeStreamer(gate))
+
+    wake = bc.handle({"type": "config_get"})["wake_word"]
+
+    assert wake["available"] is False
+    assert wake["unavailable_reason"] == gate.UNAVAILABLE_REASON
+    assert "pip install openwakeword onnxruntime" in wake["unavailable_reason"]
+
+
+def test_config_set_wake_word_on_refused_without_a_detector(tmp_path, monkeypatch):
+    """Observed live: the ack said ok, the screen said "say hey jarvis to
+    wake", and the gate failed open on the first frame -- every utterance
+    reached the brain while the user believed it was wake-gated."""
+    gate = _real_gate(monkeypatch, installed=False)
+    streamer = _WakeStreamer(gate)
+    bc = _make_brain_control(tmp_path, streamer=streamer)
+
+    ack = bc.handle({"type": "config_set", "wake_word": True})
+
+    assert ack == {"type": "config_ack", "ok": False, "error": gate.UNAVAILABLE_REASON}
+    assert gate.enabled is False
+    assert gate.state() == "off"
+
+    # Turning it off is always allowed.
+    ack = bc.handle({"type": "config_set", "wake_word": False})
+    assert ack["ok"] is True
+    assert gate.enabled is False
+
+
+def test_config_set_wake_word_on_still_arms_with_a_detector(tmp_path, monkeypatch):
+    gate = _real_gate(monkeypatch, installed=True)
+    streamer = _WakeStreamer(gate)
+    bc = _make_brain_control(tmp_path, streamer=streamer)
+
+    ack = bc.handle({"type": "config_set", "wake_word": True})
+
+    assert ack["ok"] is True
+    assert ack["wake_word"]["available"] is True
+    assert "unavailable_reason" not in ack["wake_word"]
+    assert gate.enabled is True
+    assert gate.state() == "asleep"
+    assert streamer.wake_broadcasts == 1
 
 
 # ── parrot mode live toggle (B6 UI slice) ────────────────────────────────

@@ -299,13 +299,88 @@ def test_unknown_domain_rejected():
 
 
 def test_oversized_body_rejected():
-    h = FakeHandler(headers={"Content-Length": str(ha_deck._MAX_BODY_BYTES + 1)})
+    h = FakeHandler(headers={"Content-Type": "application/json",
+                             "Content-Length": str(ha_deck._MAX_BODY_BYTES + 1)})
     ha_deck._deck = object()  # any non-None sentinel -- handle_intent must not touch it
     ha_deck.handle_intent(h)
     assert h.status == 413
     assert h.close_connection is True
     # And it must never have read that (fake, absent) body at all.
     assert h.rfile.tell() == 0
+
+
+# ---------------------------------------------------------------------------
+# Cross-site request forgery -- through the REAL serve.py, over a socket
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def intent_server(stub_ha, deck, monkeypatch):
+    """serve.py's own Handler on an ephemeral port with the deck enabled, so
+    a request crosses the same do_POST -> handle_intent path a browser's does."""
+    import http.client
+
+    import serve
+
+    monkeypatch.setenv("HA_URL", stub_ha.ha_url)
+    monkeypatch.setenv("HA_TOKEN", stub_ha.token)
+    stub_ha.states["lock.front_door"] = {
+        "entity_id": "lock.front_door", "state": "locked", "attributes": {}, "last_changed": _now_iso(),
+    }
+    ha_deck._deck = deck
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    def post(headers):
+        body = json.dumps({"intents": [{"entity_id": "lock.front_door", "service": "unlock"}]}).encode()
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.request("POST", "/ha/intent", body=body, headers={"Content-Length": str(len(body)), **headers})
+        resp = conn.getresponse()
+        payload = json.loads(resp.read() or b"{}")
+        conn.close()
+        return resp.status, payload
+
+    yield port, post
+    srv.shutdown()
+
+
+def _unlock_calls(stub_ha):
+    return [c for c in stub_ha.calls if c[:2] == ("lock", "unlock")]
+
+
+def test_intent_refuses_text_plain_simple_request(stub_ha, intent_server):
+    """The attack shape: a cross-site page's fetch/form with a text/plain
+    body is a CORS "simple request" -- the browser sends it without asking.
+    It must never reach HA."""
+    _port, post = intent_server
+    status, body = post({"Content-Type": "text/plain", "Origin": "http://evil.example"})
+    assert status == 415, body
+    assert "error" in body
+    status, _ = post({"Content-Type": "text/plain"})  # no Origin changes nothing
+    assert status == 415
+    assert _unlock_calls(stub_ha) == []
+
+
+def test_intent_refuses_json_from_another_host(stub_ha, intent_server):
+    port, post = intent_server
+    status, body = post({"Content-Type": "application/json", "Origin": "http://evil.example",
+                         "Host": f"127.0.0.1:{port}"})
+    assert status == 403, body
+    assert "error" in body
+    assert _unlock_calls(stub_ha) == []
+
+
+def test_intent_allows_same_host_origin_and_native_clients(stub_ha, intent_server):
+    """The cockpit's own page (same host, any port) and a no-Origin client
+    (curl, a script) still work -- and a charset parameter is still JSON."""
+    port, post = intent_server
+    status, body = post({"Content-Type": "application/json", "Origin": f"http://127.0.0.1:{port}",
+                         "Host": f"127.0.0.1:{port}"})
+    assert status == 200, body
+    status, body = post({"Content-Type": "application/json; charset=utf-8"})
+    assert status == 200, body
+    assert len(_unlock_calls(stub_ha)) == 2
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +499,7 @@ def test_token_never_in_responses(stub_ha, deck):
 
     stub_ha.service_status[("light", "turn_on")] = 500
     body = json.dumps({"intents": [{"entity_id": "light.kitchen", "service": "turn_on"}]}).encode()
-    h2 = FakeHandler(headers={"Content-Length": str(len(body))}, body=body)
+    h2 = FakeHandler(headers={"Content-Type": "application/json", "Content-Length": str(len(body))}, body=body)
     ha_deck.handle_intent(h2)
     assert TOKEN not in h2.body_text()
 
@@ -436,7 +511,7 @@ def test_batch_size_capped():
     ha_deck._deck = object()
     intents = [{"entity_id": "light.x", "service": "turn_on"}] * (ha_deck._MAX_BATCH_SIZE + 1)
     body = json.dumps({"intents": intents}).encode()
-    h = FakeHandler(headers={"Content-Length": str(len(body))}, body=body)
+    h = FakeHandler(headers={"Content-Type": "application/json", "Content-Length": str(len(body))}, body=body)
     ha_deck.handle_intent(h)
     assert h.status == 400
 

@@ -18,7 +18,13 @@ Type=simple
 User=${RUN_USER}
 Environment=HOME=${HOME_DIR}
 WorkingDirectory=${WEBCLIENT_DIR}
-ExecStart=/usr/bin/python3 ${WEBCLIENT_DIR}/serve.py --port ${HTTP_PORT}
+# --host 0.0.0.0 binds EVERY interface, including your LAN: anything that can
+# reach ${HTTP_PORT} gets the cockpit page (and the HA deck, if configured).
+# serve.py itself defaults to 127.0.0.1; it is spelled out here so a unit
+# re-rendered from this template keeps the LAN access it had before that
+# default changed. Bind 127.0.0.1 (or a VPN address) instead to narrow it --
+# see "Who can connect" in the README.
+ExecStart=/usr/bin/python3 ${WEBCLIENT_DIR}/serve.py --host 0.0.0.0 --port ${HTTP_PORT}
 Restart=on-failure
 RestartSec=5
 # For HTTPS (required for mic access from non-localhost devices), add

@@ -3146,6 +3146,7 @@
         </span>
         <label for="wakeToggle">Listen only after wake phrase</label>
       </div>
+      <div class="hint" id="wakeUnavailableHint" hidden></div>
       <select id="wakeModelSelect"></select>
     </div>
     <div id="phoneContextBlock">
@@ -3630,6 +3631,7 @@ const els = {
   wsUrlStatus: document.getElementById("wsUrlStatus"),
   parrotToggle: document.getElementById("parrotToggle"),
   wakeWordBlock: document.getElementById("wakeWordBlock"),
+  wakeUnavailableHint: document.getElementById("wakeUnavailableHint"),
   wakeToggle: document.getElementById("wakeToggle"),
   wakeModelSelect: document.getElementById("wakeModelSelect"),
   phoneContextToggle: document.getElementById("phoneContextToggle"),
@@ -3758,6 +3760,13 @@ function log(msg) {
   const t = new Date().toLocaleTimeString();
   els.log.textContent = `[${t}] ${msg}\n` + els.log.textContent;
 }
+// Push-to-talk's stopCapture() leaves the status at "processing…" (the THINK
+// lamp and needle read its shimmer); the frames that end that turn call this.
+// Only ever clears that one state, so open-mic/wake status lines are untouched.
+function endProcessingStatus() {
+  if (els.statusText.classList.contains("shimmer")) setStatus("connected", "connected");
+}
+
 function setStatus(state, text) {
   els.dot.className = state;          // "", connecting, connected, error
   els.statusText.textContent = text;
@@ -5550,9 +5559,21 @@ function renderConfigState(ev) {
   if ("wake_word" in ev) {
     const wakeWord = ev.wake_word;
     const hasWakeWord = !!wakeWord;
+    // `available: false` = no detector installed on the server, where arming would
+    // only fail open (every utterance reaching the brain under a "say the wake word"
+    // screen) -- the server refuses it, so grey the controls out and say why. Absent
+    // is available: an older server never sends the key.
+    const wakeAvailable = !hasWakeWord || wakeWord.available !== false;
     els.wakeWordBlock.hidden = !hasWakeWord;
-    if (legendArmLineEl) legendArmLineEl.hidden = !hasWakeWord;
-    armSwitchEl?.setAttribute("aria-disabled", String(!hasWakeWord));
+    if (legendArmLineEl) legendArmLineEl.hidden = !hasWakeWord || !wakeAvailable;
+    armSwitchEl?.setAttribute("aria-disabled", String(!hasWakeWord || !wakeAvailable));
+    // `disabled` is what blocks the click path: the ARM switch toggles by calling
+    // wakeToggle.click(), which a disabled checkbox ignores.
+    els.wakeToggle.disabled = !wakeAvailable;
+    if (wakeAvailable) els.wakeToggle.removeAttribute("aria-disabled");
+    else els.wakeToggle.setAttribute("aria-disabled", "true");
+    els.wakeUnavailableHint.hidden = wakeAvailable;
+    els.wakeUnavailableHint.textContent = wakeAvailable ? "" : (wakeWord.unavailable_reason || "");
     if (hasWakeWord && document.activeElement !== els.wakeToggle && document.activeElement !== els.wakeModelSelect) {
       els.wakeToggle.checked = !!wakeWord.enabled;
       syncArmSwitch();
@@ -6438,6 +6459,7 @@ function handleEvent(text) {
       }
       pendingHistoryEntry = { time: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }), user: ev.transcript || "—", assistant: null };
       if (ev.transcript) stallWatchdog.arm(); // turn is committed — start the gap-fill timer
+      else endProcessingStatus(); // nothing heard: the server never asks the brain, no reply follows
       break;
     case "assistant_text": {
       stallWatchdog.disarm();
@@ -6448,6 +6470,7 @@ function handleEvent(text) {
       // real answer — skip the history push for that frame so it doesn't log
       // a bare "—" entry; the follow-up frame with actual text fills it in.
       const isToolOnlyFrame = !text && Array.isArray(ev.tools) && ev.tools.length > 0;
+      if (!isToolOnlyFrame) endProcessingStatus(); // not on the tool-only frame: the answer is still coming
       if (!isToolOnlyFrame && pendingHistoryEntry && pendingHistoryEntry.assistant === null) {
         pendingHistoryEntry.assistant = text || "—";
         pushHistoryEntry(pendingHistoryEntry);
@@ -6455,6 +6478,13 @@ function handleEvent(text) {
       }
       break;
     }
+    case "response_failed":
+      // The brain couldn't answer: this replaces the assistant_text that would
+      // otherwise end the turn.
+      stallWatchdog.disarm();
+      log("response failed" + (ev.message ? ": " + ev.message : ""));
+      endProcessingStatus();
+      break;
     case "history_replay":
       // A WS reconnect WITHOUT a page reload keeps conversationHistory alive in JS —
       // the client already has these turns, so only apply on a truly empty rail

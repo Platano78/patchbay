@@ -489,15 +489,66 @@ def test_state_off_when_disabled(monkeypatch):
 
 def test_state_asleep_when_enabled_not_awake(monkeypatch):
     monkeypatch.setenv("VOICE_WAKE_WORD", "1")
+    monkeypatch.setattr(wg, "_openwakeword_installed", lambda: True)
     gate = wg.WakewordGate()
     assert gate.state() == "asleep"
 
 
 def test_state_awake_when_enabled_and_awake(monkeypatch):
     monkeypatch.setenv("VOICE_WAKE_WORD", "1")
+    monkeypatch.setattr(wg, "_openwakeword_installed", lambda: True)
     gate = wg.WakewordGate()
     gate._awake = True
     assert gate.state() == "awake"
+
+
+# ── availability: never arm a gate that can only fail open ────────────────
+
+
+@pytest.fixture()
+def _fresh_availability_cache():
+    wg._openwakeword_installed.cache_clear()
+    yield
+    wg._openwakeword_installed.cache_clear()
+
+
+def test_available_is_a_find_spec_probe_not_an_import(monkeypatch, _fresh_availability_cache):
+    asked = []
+
+    def fake_find_spec(name, *a, **kw):
+        asked.append(name)
+        return None
+
+    monkeypatch.setattr(wg.importlib.util, "find_spec", fake_find_spec)
+    monkeypatch.delitem(sys.modules, "openwakeword", raising=False)
+    gate = wg.WakewordGate()
+    assert gate.available is False
+    assert gate.available is False  # cached: one probe, however often it's read
+    assert asked == ["openwakeword"]
+    assert "openwakeword" not in sys.modules
+
+
+def test_boot_enable_without_openwakeword_warns_once_and_stays_off(monkeypatch, caplog):
+    """VOICE_WAKE_WORD=1 on a box without the detector: one warning naming
+    the fix, and the gate stays off -- not armed-and-about-to-fail-open."""
+    monkeypatch.setenv("VOICE_WAKE_WORD", "1")
+    monkeypatch.setattr(wg, "_openwakeword_installed", lambda: False)
+    with caplog.at_level("WARNING", logger=wg.logger.name):
+        gate = wg.WakewordGate()
+    assert gate.enabled is False
+    assert gate.state() == "off"
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert wg.WakewordGate.UNAVAILABLE_REASON in warnings[0].getMessage()
+
+
+def test_boot_enable_with_openwakeword_arms(monkeypatch, caplog):
+    monkeypatch.setenv("VOICE_WAKE_WORD", "1")
+    monkeypatch.setattr(wg, "_openwakeword_installed", lambda: True)
+    with caplog.at_level("WARNING", logger=wg.logger.name):
+        gate = wg.WakewordGate()
+    assert gate.enabled is True
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
 # ── _lock: feed() vs rearm()/set_model() from another thread ─────────────

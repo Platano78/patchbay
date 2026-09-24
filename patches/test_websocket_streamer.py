@@ -297,6 +297,50 @@ def test_gate_on_drops_scored_echo_and_passes_the_rest():
     assert queued[:2] == [chunks[1], chunks[3]]
 
 
+# ── wake gate fail-open is logged as what it is ─────────────────────────
+
+
+def _real_armed_wake_gate(monkeypatch, load_model):
+    from patches import wakeword_gate
+
+    monkeypatch.setattr(wakeword_gate, "_openwakeword_installed", lambda: True)
+    gate = wakeword_gate.WakewordGate()
+    gate.enabled = True
+    monkeypatch.setattr(gate, "_load_model", load_model)
+    return gate
+
+
+def test_wake_gate_fail_open_is_not_logged_as_a_detection(monkeypatch, caplog):
+    def broken():
+        raise RuntimeError("model file missing")
+
+    streamer = _make_streamer()
+    streamer.wakeword_gate = _real_armed_wake_gate(monkeypatch, broken)
+
+    with caplog.at_level("INFO"):
+        asyncio.run(streamer._handle_client(_FakeClient([b"\x00\x00" * 1280])))
+
+    messages = [r.getMessage() for r in caplog.records if r.name == websocket_streamer.logger.name]
+    assert any("wake gate failed open (detector unavailable)" in m for m in messages), messages
+    assert not any("wake word detected" in m for m in messages), messages
+
+
+def test_wake_gate_real_detection_still_logs_its_score(monkeypatch, caplog):
+    class _Hit:
+        def predict(self, frame):
+            return {"hey_jarvis": 0.9}
+
+    streamer = _make_streamer()
+    streamer.wakeword_gate = _real_armed_wake_gate(monkeypatch, lambda: _Hit())
+
+    with caplog.at_level("INFO"):
+        asyncio.run(streamer._handle_client(_FakeClient([b"\x00\x00" * 1280])))
+
+    messages = [r.getMessage() for r in caplog.records if r.name == websocket_streamer.logger.name]
+    assert any("wake word detected (score=0.9)" in m for m in messages), messages
+    assert not any("failed open" in m for m in messages), messages
+
+
 def test_note_playback_receives_exactly_the_bytes_sent():
     streamer = _make_streamer()
     streamer.echo_gate = _RecordingGate()
