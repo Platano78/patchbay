@@ -456,15 +456,22 @@ measured **~2.1s** cost on that one utterance; pass
 `--remote_speech_fallback_preload` to preload them at startup instead, if
 that first-fallback latency matters more to you than the extra idle memory.
 
-```bash
-.venv/bin/pip install -e ".[pocket,websocket]"   # remote-speech's fallback still needs pocket
+SETUP.md step 4's command with only the TTS flags changed (`setup.sh`
+already installed the `pocket` extra the fallback needs):
 
-.venv/bin/speech-to-speech \
-  ... \
+```bash
+BRAINS_JSON=$PWD/brains.json \
+~/speech-to-speech-main/.venv/bin/speech-to-speech \
+  --mode websocket --ws_host 127.0.0.1 --ws_port 8765 \
+  --stt parakeet-tdt --parakeet_tdt_device cpu \
   --tts remote-speech \
   --remote_speech_base_url http://<your-tts-server>:<port> \
   --pocket_tts_voice jean --pocket_tts_device cpu \
-  ...
+  --llm_backend chat-completions \
+  --responses_api_base_url <your-base-url> \
+  --responses_api_api_key dummy \
+  --model_name <your-model-name> \
+  --responses_api_stream
 ```
 
 **The expression/prosody handle.** `remote-speech`'s `instructions` field is
@@ -540,12 +547,12 @@ working regardless):
 1. Accept the terms at <https://huggingface.co/kyutai/pocket-tts>
    (any HF account; approval is automatic).
 2. On the box that runs the pipeline, log that account in as the service
-   user: `hf auth login` (or place a token at `~/.cache/huggingface/token`).
+   user: `~/speech-to-speech-main/.venv/bin/hf auth login` (or place a token at `~/.cache/huggingface/token`).
 3. Restart the pipeline service — it re-downloads the model weights with
    cloning enabled (~220 MB, one time).
 
 `soundfile` must be installed in the pipeline's venv for non-WAV uploads and
-recording normalization: `pip install soundfile`.
+recording normalization: `~/speech-to-speech-main/.venv/bin/pip install soundfile`.
 
 **Consent notice**: pocket-tts's license prohibits "voice impersonation or
 cloning without explicit and lawful consent." Clone only voices you have the
@@ -564,14 +571,24 @@ The settings panel has a **Phone context** toggle, **off by default**: "Share
 location & phone state". When you turn it on, the browser streams your
 approximate location (via the W3C Geolocation API), timezone, and battery
 level/charging state to your own voice server over the same WebSocket the
-rest of the cockpit already uses — no new endpoint, no third-party service.
-This lets tools like `get_weather` and the LLM's sense of "now"/"here" work
-without you naming a place every time.
+rest of the cockpit already uses — no new endpoint. This lets tools like
+`get_weather` and the LLM's sense of "now"/"here" work without you naming a
+place every time.
 
-It's sent only to your voice server, but the ambient line it produces reaches
-whichever brain is currently active — including a remote/cloud brain, if
-that's what you've selected in the Brain panel. If that matters to you,
-switch to a local brain before enabling it, or leave it off.
+**Where your location goes from there — read this before turning it on:**
+
+- **OpenStreetMap's Nominatim service.** To turn coordinates into a place
+  name, the voice server sends them to
+  `https://nominatim.openstreetmap.org/reverse` (`patches/phone_context.py`).
+- **Open-Meteo**, when `get_weather` runs without a place named: the stored
+  coordinates go to `https://api.open-meteo.com/v1/forecast`.
+- **The active brain.** Every request carries an ambient line with the
+  resolved place name and local time, to whichever brain is currently
+  active — including a remote/cloud brain, if that's what you've selected
+  in the Brain panel.
+
+If that matters to you, leave it off, or set `VOICE_PHONE_CONTEXT=off` on
+the server.
 
 Location updates are throttled client-side (moved >100m or 5+ minutes since
 the last send) and expire server-side after 30 minutes of staleness. Denying

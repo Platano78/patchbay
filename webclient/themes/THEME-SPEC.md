@@ -93,13 +93,16 @@ needs must already be sitting on the visitor's machine or expressible in CSS.
 - `swatch` — exactly two hex colors used to paint the picker's split-circle swatch
   (background color, then accent color, is the usual choice).
 
-## Local overlay (private skins that never ship)
+## Local overlay (untracked skins that never ship)
 
 `webclient/themes/local/` is an entirely gitignored directory - nothing placed
 inside it is ever tracked, so it survives `git status` clean and never ends up
-in a commit. Use it for a skin that's
-private, or built on encumbered assets you can't redistribute (a licensed
-font, someone else's artwork), without keeping it off `main` by hand.
+in a commit. Use it for a skin you don't want in the repository, or one built
+on assets you can't redistribute (a licensed font, someone else's artwork).
+
+**Untracked is not private.** `serve.py` serves every file under `webclient/`,
+this directory included, to anyone who can reach its port — so anything you
+put here can be downloaded by every device that can open the cockpit.
 
 - `webclient/themes/local/themes.json` - same JSON array schema as the tracked
   `themes/themes.json` above (`id`, `name`, `swatch`, optional `avatar`).
@@ -171,7 +174,7 @@ lean on the faceplate's own component styling rather than replace it.
 | `--text` | Primary text color |
 | `--text-muted` | Secondary text — labels, captions, meta, placeholder-ish text |
 | `--accent` | Primary interactive color — PTT idle glow, focus rings, links, assistant reply text color |
-| `--accent-2` | **Reserved.** Defined by all three built-in themes but not currently consumed by any core rule in `index.html` — overriding it has no visible effect unless you also write your own `[data-theme="<id>"]` rules that reference it. Safe to use freely in your own theme's custom rules (a second highlight tone, a hover color, whatever fits); just don't expect it to "do" anything on its own. |
+| `--accent-2` | **Reserved.** Defined by the one built-in theme (`instrument`, in `index.html`) and by the shipped `hacker` skin, but not currently consumed by any core rule in `index.html` — overriding it has no visible effect unless you also write your own `[data-theme="<id>"]` rules that reference it. Safe to use freely in your own theme's custom rules (a second highlight tone, a hover color, whatever fits); just don't expect it to "do" anything on its own. |
 | `--rec` | Recording / danger color — PTT active state, recording pulse ring |
 | `--ok` | Connected / success status dot |
 | `--warn` | Connecting / in-progress status dot |
@@ -185,27 +188,15 @@ lean on the faceplate's own component styling rather than replace it.
 | `--shadow-card` | box-shadow value applied to `.card`, `#historyRail`, `#sessionRail` — use `none` for a flat look, or a real shadow recipe for depth |
 | `--ptt-shadow-idle` | box-shadow for the PTT button at rest |
 | `--ptt-shadow-rec` | box-shadow for the PTT button while recording (usually a glow keyed off `--rec`) |
-| `--ptt-size` | PTT button diameter/side-length in px. Live since 2026-08-16 - see the note below. |
-| `--ptt-radius` | PTT button border-radius - `50%` for a circular orb/knob, a px value (e.g. `20px`) for a squarish "key" shape. Live since 2026-08-16 - see the note below. |
+| `--ptt-size` | PTT button diameter/side-length in px. Sizes the button's rendered box - see the note below. |
+| `--ptt-radius` | PTT button border-radius - `50%` for a circular orb/knob, a px value (e.g. `20px`) for a squarish "key" shape. |
 
-> **FIXED 2026-08-16. Both tokens are live.** They were dead from the instrument port
-> until now: `index.html` declares `#ptt` twice, and the second rule — unscoped, so it
-> applied to *every* theme — hardcoded `width: 78px; height: 78px; border-radius: var(--r)`.
-> Same selector, same specificity, later in source order, so the literals won. It stayed
-> invisible because every shipped skin declared `--ptt-size: 78px`, agreeing with the
-> hardcode by coincidence; a theme declaring anything else silently got 78px.
->
-> The later rule now reads `width: var(--ptt-size); height: var(--ptt-size);
-> border-radius: var(--ptt-radius)`. Since the base declares exactly the previous
-> literals, no existing theme changed by a pixel — `test_ptt_size_token_actually_sizes_the_button`
-> pins both halves of that: a theme declaring `--ptt-size: 120px` measures 120, and the
-> base still measures exactly 78.
->
-> **You may now compute layout from `--ptt-size`** — it describes the button's real
-> rendered box again. Historical note worth keeping, because it is why this mattered: a
-> `.statCol` placement once broke by positioning columns with a `calc()` against
-> `--ptt-size` while the token was dead, and the columns ended up hanging off the edge of
-> the chassis.
+> **`--ptt-size` and `--ptt-radius` drive the button directly.** The base styles
+> are `width: var(--ptt-size); height: var(--ptt-size); border-radius: var(--ptt-radius)`,
+> with a base `--ptt-size` of `78px`, so a theme that doesn't set them gets a 78px
+> button. You may compute layout from `--ptt-size` — it is the button's real rendered
+> size. `test_ptt_size_token_actually_sizes_the_button` in `webclient/test_webclient.py`
+> pins this: a theme declaring `--ptt-size: 120px` measures 120, and the base measures 78.
 
 Anything your theme needs beyond color/font/shape (paper grain, brushed-metal
 sheen, scanlines, a VU-meter needle glow, etc.) is exactly the kind of thing that

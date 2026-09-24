@@ -69,9 +69,13 @@ front of it.
   (`VOICE_CAMERA_FRAME`, `VOICE_SCREEN_FRAME`) with the process's default
   file permissions — world-readable under the usual `022` umask — and stays
   there until it is overwritten or the machine reboots.
-- **Phone context reaches the active brain.** If a browser turns on *Phone
-  context*, its approximate location, timezone and battery state go into
-  the prompt of whichever brain is active — including a hosted one.
+- **Phone context leaves the machine.** If a browser turns on *Phone
+  context*, it sends its location, timezone and battery state to the voice
+  server. The server sends the coordinates to OpenStreetMap's Nominatim
+  (`https://nominatim.openstreetmap.org/reverse`) for a place name, and to
+  Open-Meteo (`https://api.open-meteo.com/v1/forecast`) when `get_weather`
+  runs without a place; the resolved place name and local time go into the
+  prompt of whichever brain is active — including a hosted one.
   `VOICE_PHONE_CONTEXT=off` disables it server-side.
 - **Voice cloning needs consent.** pocket-tts's licence prohibits voice
   impersonation or cloning without explicit and lawful consent. Clone only

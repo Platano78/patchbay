@@ -281,7 +281,8 @@ SMOKE OK
 The answer's wording and the byte count depend on your model; `SMOKE OK`
 and exit code `0` are the pass condition. Otherwise it prints one sentence
 naming what did not arrive — no connection, no transcript, no answer from
-the brain, or no reply audio — and exits `1`. It changes no configuration,
+the brain, no reply audio, or a connection that dropped mid-turn — and exits
+`1`. It changes no configuration,
 but the session is shared: an open cockpit hears this turn too. `--ws URL`
 and `--text "..."` override the defaults.
 
@@ -500,14 +501,25 @@ word stays off: ...` warning in the pipeline log.
 ### Phone context
 
 Location/timezone/battery ambient info: opt-in per browser via the settings
-panel's "Phone context" toggle — no server config needed. Verify: after
-enabling it, `config_get` over the WebSocket control channel reports a
-non-null `phone_context` block.
+panel's "Phone context" toggle — no server config needed. Before turning it
+on: the voice server sends the coordinates to OpenStreetMap's Nominatim
+(`https://nominatim.openstreetmap.org/reverse`) to get a place name, to
+Open-Meteo when you ask for the weather without naming a place, and the
+resolved place and local time go into every request to the active brain,
+remote ones included (README *Phone context*).
+
+Verify: after the browser's location prompt, the toggle stays on and the
+line under it reads `sharing location & phone state` (denying the prompt
+turns the toggle back off and shows `location permission denied`). Then
+ask "What's the weather?" without naming a place: the answer is for your
+location (without phone context the weather tool has no location and
+returns `I need a place name for the weather.`). The pipeline writes no log line when a location arrives.
 
 ### Custom voice cloning
 
-Accept the terms at <https://huggingface.co/kyutai/pocket-tts>, then `hf
-auth login` as the service user, then restart the pipeline. Verify: the
+Accept the terms at <https://huggingface.co/kyutai/pocket-tts>, then run
+`~/speech-to-speech-main/.venv/bin/hf auth login` as the service user, then
+restart the pipeline. Verify: the
 settings panel's "Advanced - custom voice" section stops showing a
 terms-gate error and lets you record/upload a sample. Clone only voices you
 have the right to (README *Custom voices*).

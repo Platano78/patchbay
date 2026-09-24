@@ -23,7 +23,7 @@ webclient/themes/assets/**/*.png
 webclient/themes/assets/**/*.jpg
 webclient/themes/assets/**/*.webp
 
-# Local-only overlay: your private skins and avatar modules (see
+# Local-only overlay: your own untracked skins and avatar modules (see
 # webclient/themes/THEME-SPEC.md "Local overlay"). Never tracked.
 webclient/themes/local/
 webclient/avatar/local/

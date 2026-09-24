@@ -54,6 +54,7 @@ def synthesize(text: str) -> bytes:
 
 async def run(ws_url: str, text: str) -> int:
     import websockets
+    from websockets.exceptions import ConnectionClosed
 
     deadline = time.monotonic() + TIMEOUT_S
     try:
@@ -67,57 +68,69 @@ async def run(ws_url: str, text: str) -> int:
     failure = ""
     audio_bytes = 0
     sent_turn = False
+    closed = ""  # why the connection dropped, if it did
 
     async def listen() -> None:
-        nonlocal heard, answer, failure, audio_bytes
-        async for msg in ws:
-            if isinstance(msg, bytes):
-                if sent_turn:
-                    audio_bytes += len(msg)
-                continue
-            try:
-                ev = json.loads(msg)
-            except ValueError:
-                continue
-            kind = ev.get("type")
-            if kind == "transcription_completed" and sent_turn and heard is None:
-                heard = ev.get("transcript") or ""
-            elif kind == "assistant_text" and sent_turn and ev.get("text") and not answer:
-                answer = ev["text"]
-            elif kind == "response_failed" and sent_turn:
-                failure = ev.get("message") or "no reason given"
-
-    async with ws:
-        listener = asyncio.create_task(listen())
-        await ws.send(json.dumps({"type": "config_get"}))
-
-        note(f"connected to {ws_url}; synthesizing the question with pocket-tts ({VOICE})...")
+        nonlocal heard, answer, failure, audio_bytes, closed
         try:
-            pcm = await asyncio.to_thread(synthesize, text)
-        except Exception as e:
+            async for msg in ws:
+                if isinstance(msg, bytes):
+                    if sent_turn:
+                        audio_bytes += len(msg)
+                    continue
+                try:
+                    ev = json.loads(msg)
+                except ValueError:
+                    continue
+                kind = ev.get("type")
+                if kind == "transcription_completed" and sent_turn and heard is None:
+                    heard = ev.get("transcript") or ""
+                elif kind == "assistant_text" and sent_turn and ev.get("text") and not answer:
+                    answer = ev["text"]
+                elif kind == "response_failed" and sent_turn:
+                    failure = ev.get("message") or "no reason given"
+            closed = "the server closed it"
+        except (ConnectionClosed, OSError) as e:
+            closed = f"{type(e).__name__}: {e}"
+
+    try:
+        async with ws:
+            listener = asyncio.create_task(listen())
+            await ws.send(json.dumps({"type": "config_get"}))
+
+            note(f"connected to {ws_url}; synthesizing the question with pocket-tts ({VOICE})...")
+            try:
+                pcm = await asyncio.to_thread(synthesize, text)
+            except Exception as e:
+                listener.cancel()
+                print(f"Could not synthesize the question with pocket-tts ({type(e).__name__}: {e}).")
+                return 1
+
+            note(f"streaming {len(pcm)} bytes of speech plus {TAIL_SILENCE_S:.0f}s of silence...")
+            sent_turn = True
+            pcm += bytes(int(TARGET_RATE * TAIL_SILENCE_S) * 2)
+            frame_s = FRAME_BYTES / 2 / TARGET_RATE
+            for i in range(0, len(pcm), FRAME_BYTES):
+                await ws.send(pcm[i:i + FRAME_BYTES])
+                await asyncio.sleep(frame_s)  # real-time pace, like a microphone
+
+            note("waiting for transcript, answer and reply audio...")
+            while time.monotonic() < deadline:
+                if listener.done() or failure or heard == "":
+                    break
+                if heard and answer and audio_bytes > 0:
+                    # A little longer so the byte count covers more than the first chunk.
+                    await asyncio.sleep(2.0)
+                    break
+                await asyncio.sleep(0.25)
             listener.cancel()
-            print(f"Could not synthesize the question with pocket-tts ({type(e).__name__}: {e}).")
-            return 1
+    except (ConnectionClosed, OSError) as e:
+        closed = f"{type(e).__name__}: {e}"
 
-        note(f"streaming {len(pcm)} bytes of speech plus {TAIL_SILENCE_S:.0f}s of silence...")
-        sent_turn = True
-        pcm += bytes(int(TARGET_RATE * TAIL_SILENCE_S) * 2)
-        frame_s = FRAME_BYTES / 2 / TARGET_RATE
-        for i in range(0, len(pcm), FRAME_BYTES):
-            await ws.send(pcm[i:i + FRAME_BYTES])
-            await asyncio.sleep(frame_s)  # real-time pace, like a microphone
-
-        note("waiting for transcript, answer and reply audio...")
-        while time.monotonic() < deadline:
-            if listener.done() or failure or heard == "":
-                break
-            if heard and answer and audio_bytes > 0:
-                # A little longer so the byte count covers more than the first chunk.
-                await asyncio.sleep(2.0)
-                break
-            await asyncio.sleep(0.25)
-        listener.cancel()
-
+    complete = heard and answer and audio_bytes > 0
+    if closed and not complete and not failure and heard != "":
+        print(f"The pipeline closed the connection before the turn finished ({closed}); check the pipeline log.")
+        return 1
     if heard is None:
         print(f"No transcript arrived within {TIMEOUT_S:.0f}s: the pipeline did not hear the question.")
         return 1
