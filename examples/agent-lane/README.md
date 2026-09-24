@@ -13,7 +13,9 @@ python3 verify_contract.py --shim-url http://localhost:8087/v1/chat/completions 
 
 It replays the exact requests the shipped cockpit code makes (the
 `tools/list` arming probe, delegation, and all four MCP tools) and reports
-PASS/FAIL/WARN per check with exit code 0 only when every check passes.
+PASS/FAIL/WARN per check. The exit code is 0 when no check FAILs — a WARN
+(for example, a delegation slower than this checker waits for) does not
+change it — and 1 otherwise.
 Point it at your own server before wiring it into the cockpit at all — it
 catches the same failures the pipeline would, without needing a pipeline.
 

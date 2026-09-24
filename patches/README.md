@@ -11,19 +11,21 @@ shared by both OpenAI-style handlers) instead of `responses-api`.
 
 ## Install
 
-- Repo: `$INSTALL_DIR` (default `$HOME/speech-to-speech-main`) — editable install,
-  `.venv` there, python3.10, CPU-only torch/torchaudio 2.11.0 — no CUDA on this
-  box; the LLM runs on an external model server instead.
-- `faster-qwen3-tts[ggml]` is a base (non-Darwin) dependency and its
-  `qwentts-cpp-python` PyPI wheel is CUDA-only; the CPU wheel had to be
-  fetched by hand from
-  `https://huggingface.co/datasets/andito/qwentts-cpp-python-wheels/resolve/main/whl/cpu/qwentts_cpp_python-0.3.0+cpu-py3-none-manylinux_2_34_x86_64.manylinux_2_35_x86_64.whl`
-  and installed before `pip install -e ".[kokoro]"` would resolve. We don't
-  use qwen3 TTS (we run `pocket`), but the base dependency still has to
-  import cleanly.
-- Extras installed: `.[kokoro]` (base install command) + `.[pocket,websocket]`
-  (pocket TTS + the websocket-mode extra) — `nano-parakeet` (STT) was
-  already a base dependency.
+`setup.sh` (repo root) does all of this; see `SETUP.md` for the runbook.
+
+- Clones the framework into `$INSTALL_DIR` (default
+  `$HOME/speech-to-speech-main`), checks out the pinned commit above, and
+  creates a venv at `$INSTALL_DIR/.venv` with the system `python3`.
+- Installs CPU-only `torch`/`torchaudio` from
+  `https://download.pytorch.org/whl/cpu` first (unpinned — whatever is
+  current there), so the framework's own dependency resolve doesn't pull the
+  CUDA build.
+- Installs the framework editable, with the `kokoro` extra on Python below
+  3.13 (kokoro doesn't support newer Pythons; setup prints a skip line
+  there) and the `pocket` and `websocket` extras on every version.
+  `nano-parakeet` (STT) is a base dependency.
+- Runs `patches/apply.sh` to copy this pack into the install, and copies
+  `brains.json.example` to `brains.json` if there isn't one.
 
 ## Files
 
@@ -247,9 +249,8 @@ shared by both OpenAI-style handlers) instead of `responses-api`.
   and the special value `off` disables the filler entirely.
 
 - `wakeword_gate.py` (new) — `speech_to_speech/wakeword_gate.py`. Defines
-  `WakewordGate`, an optional join-deaf gate (borrowed from
-  `ShayneP/local-voice-ai`, see
-  `knowledge-base/research-notes/shaynep-local-voice-ai-2026-07-12.md`).
+  `WakewordGate`, an optional join-deaf gate (the pattern is borrowed from
+  <https://github.com/ShayneP/local-voice-ai>).
   Env-driven, off by default: `VOICE_WAKE_WORD=1` (truthy: `1`/`true`/`yes`/`on`)
   arms it; `VOICE_WAKE_WORD_MODEL` (default `hey_jarvis`, any openWakeWord
   pretrained model name or a path to a custom `.onnx`) selects the model;
@@ -268,14 +269,22 @@ shared by both OpenAI-style handlers) instead of `responses-api`.
   wake — a broken detector must never brick the assistant. The module
   itself never imports `openwakeword` at module scope (lazy import inside
   `_load_model`), so it stays importable/testable with the dependency
-  absent.
+  absent. Failing open is only for a detector that breaks: if
+  `openwakeword` isn't installed at all (`WakewordGate.available` is
+  false), the gate stays disabled instead — `VOICE_WAKE_WORD=1` is ignored
+  with one warning at boot, `config_set {wake_word: true}` is refused with
+  `WakewordGate.UNAVAILABLE_REASON`, and `config_state.wake_word` carries
+  `available: false` plus that `unavailable_reason`, which the panel shows
+  next to a greyed-out toggle.
 
-  Deploy prerequisite (only if `VOICE_WAKE_WORD=1` is actually used):
+  Deploy prerequisite (only if the wake word is actually used):
   `pip install openwakeword onnxruntime` into `$INSTALL_DIR/.venv`, then
   one-time model download:
   `$INSTALL_DIR/.venv/bin/python3 -c "import openwakeword.utils; openwakeword.utils.download_models()"`
   (openwakeword >=0.5 ships no models in the wheel; older 0.4.x bundles the
-  pretrained onnx models already and this step is a no-op). Client-side,
+  pretrained onnx models already and this step is a no-op). openWakeWord's
+  code is Apache-2.0, but those pre-trained models, `hey_jarvis` included,
+  are CC BY-NC-SA 4.0 — non-commercial use only. Client-side,
   the webclient shows a `zzz — say "<phrase>" to wake` status while asleep
   and a status-bar flip + short two-tone chime on `wakeword_state: awake`.
 
@@ -456,14 +465,20 @@ shared by both OpenAI-style handlers) instead of `responses-api`.
 
 ## Why there is no shared helper module
 
-Modules in this pack do not import each other, and there is deliberately no
-`_utils.py` / `_env.py` for the small things several of them do alike. Three
-reasons, in order of how expensive it is to learn them the hard way:
+Modules in this pack do import each other, but only by their installed
+name — `from speech_to_speech import brain_lanes`, `from
+speech_to_speech.think_filter import ThinkTagFilter` — never relatively and
+never from `patches`. `patches/test_apply_pack.py` enforces that every such
+sibling import names a module `apply.sh` actually ships, and that no shipped
+module imports the `patches` package. What there deliberately is not is a
+`_utils.py` / `_env.py` for the small things several of them do alike.
+Three reasons, in order of how expensive it is to learn them the hard way:
 
 1. **The pack does not deploy to one place.** `apply.sh` copies these files
-   into three different packages — `$PKG/`, `$PKG/connections/` and
-   `$PKG/LLM/`. No relative import spans those. The only import that would is
-   `from speech_to_speech import ...`, which brings us to:
+   into five different packages — `$PKG/`, `$PKG/connections/`, `$PKG/LLM/`,
+   `$PKG/TTS/` and `$PKG/arguments_classes/`. No relative import spans those.
+   The only import that would is `from speech_to_speech import ...`, which
+   brings us to:
 2. **Several modules are deliberately dependency-light** — no
    `speech_to_speech` import at all, so the module and its tests can be
    imported standalone (the tests do exactly that, via `from patches import
@@ -534,9 +549,12 @@ another device on your LAN (by IP or hostname) will silently fail to get mic
 permission. Both halves of the stack — the static webclient and the pipeline's
 WebSocket — need to run over TLS to fix this.
 
-1. **Generate a certificate.** [mkcert](https://github.com/FiloSottile/mkcert)
-   is the easiest path and avoids browser warnings on any device that trusts
-   its local CA:
+1. **Get a certificate the devices trust.** Browsers match the address you
+   type against the certificate's *Subject Alternative Name* (SAN), not its
+   CN, so the cert must list the exact LAN IP or hostname you will open.
+   Either use a certificate from a reverse proxy you already run (step 5),
+   or [mkcert](https://github.com/FiloSottile/mkcert), which writes the SAN
+   for you and creates a local CA:
 
    ```bash
    mkcert -install
@@ -544,23 +562,39 @@ WebSocket — need to run over TLS to fix this.
    ```
 
    This produces a `<name>.pem` (cert) and `<name>-key.pem` (key) in the
-   current directory. If you'd rather not install mkcert, a self-signed cert
-   with `openssl` works too (browsers will show a one-time warning to click
-   through, on each device):
+   current directory. Install mkcert's CA (`mkcert -CAROOT` shows where it
+   is) on each phone or tablet that will connect — without that, the device
+   sees an untrusted certificate.
+
+   A self-signed `openssl` cert also works for a desktop browser, as long as
+   it carries a SAN:
 
    ```bash
    openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
-     -keyout key.pem -out cert.pem -subj "/CN=<lan-ip-or-hostname>"
+     -keyout key.pem -out cert.pem -subj "/CN=<lan-ip-or-hostname>" \
+     -addext "subjectAltName=IP:<lan-ip>"   # or DNS:<hostname>
    ```
 
-2. **Serve the webclient over HTTPS** using the cert pair:
+   Clicking through a certificate warning is not a reliable way to get a
+   secure context: browsers won't offer PWA install behind one (README
+   *Install as an app*), the WebSocket on the second port needs its own
+   click-through, and phones are the least forgiving. Prefer a trusted cert.
+
+   Keep the key outside `webclient/` — `serve.py` serves every file in that
+   directory.
+
+2. **Serve the webclient over HTTPS** using the cert pair, bound beyond
+   loopback so other devices can reach it (`serve.py` defaults to
+   `127.0.0.1`; read README *Who can connect* first):
 
    ```bash
-   python3 webclient/serve.py --certfile cert.pem --keyfile key.pem
+   python3 webclient/serve.py --host 0.0.0.0 --certfile cert.pem --keyfile key.pem
    ```
 
 3. **Point the pipeline's WebSocket at the same cert pair** via env vars
-   before starting the `speech-to-speech` service:
+   before starting the `speech-to-speech` service (which must also be
+   started with `--ws_host 0.0.0.0` or a LAN address — the TLS listener
+   binds the same host as the plain one):
 
    ```bash
    export VOICE_WS_CERTFILE=/path/to/cert.pem
@@ -648,14 +682,19 @@ WebSocket — need to run over TLS to fix this.
 
 ```bash
 bash <patchbay-repo>/patches/apply.sh
-sudo systemctl restart voice-agent
+sudo systemctl restart patchbay
+systemctl is-active patchbay     # prints: active
 ```
+
+(With the user units from `SETUP.md` step 6, use `systemctl --user` instead
+of `sudo systemctl` here and below.)
 
 `apply.sh` locates the current `speech_to_speech` package directory via the
 active venv's Python (`import speech_to_speech; ... __file__`) — since
 `$INSTALL_DIR` is an editable install, this resolves
 straight to the repo's `src/speech_to_speech`, so a `pip install` of new deps
-never wipes these edits (only a `git checkout` of those three files would).
+never wipes these edits (only a `git checkout` of the files `apply.sh`
+manages would).
 Safe to re-run any number of times.
 
 **A plain run deploys.** Because that resolution lands on the live source
@@ -665,7 +704,10 @@ that out the hard way:
 
 ```bash
 bash patches/apply.sh --dry-run              # preview; writes nothing
-bash patches/apply.sh --dest /tmp/staging    # write somewhere else entirely
+
+# write somewhere else entirely -- the package subdirectories must exist first
+mkdir -p /tmp/staging/connections /tmp/staging/LLM /tmp/staging/TTS /tmp/staging/arguments_classes
+bash patches/apply.sh --dest /tmp/staging
 ```
 
 `--dry-run` prints one line per file marked `new`, `unchanged`, or
@@ -691,7 +733,7 @@ checkout restores that older state:
 cd <patchbay-repo>
 git checkout <previous-tag-or-commit>   # whatever you deployed last
 bash patches/apply.sh
-sudo systemctl restart voice-agent
+sudo systemctl restart patchbay
 ```
 
 To go further and return the framework itself to pristine upstream, discard the overlay
@@ -700,7 +742,7 @@ in the install tree (`$INSTALL_DIR` is an editable checkout, so this is a plain 
 ```bash
 cd "$INSTALL_DIR"                       # default ~/speech-to-speech-main
 git checkout -- src/speech_to_speech
-sudo systemctl restart voice-agent
+sudo systemctl restart patchbay
 ```
 
 Before a risky deploy, snapshot the two trees that a deploy actually touches, so you can
@@ -715,7 +757,7 @@ To restore one of those snapshots, extract it back over the same tree and restar
 
 ```bash
 tar xzf /tmp/pipeline-backup-<stamp>.tar.gz -C "$INSTALL_DIR"
-sudo systemctl restart voice-agent
+sudo systemctl restart patchbay
 
 tar xzf /tmp/webclient-backup-<stamp>.tar.gz -C <patchbay-repo>
 sudo systemctl restart voice-webclient    # only if you serve it as a unit

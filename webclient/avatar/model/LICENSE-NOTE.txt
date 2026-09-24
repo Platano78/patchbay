@@ -11,13 +11,12 @@ section "Licenses, attributions and notes related to the index.html web app asse
   The avatar is free to all developers for non-commercial use under the
   CC BY-NC 4.0 DEED (https://creativecommons.org/licenses/by-nc/4.0/).
 
-This is a placeholder/personal-use asset. Per the vendor-staging slice ruling, the user may
-swap in their own Ready Player Me (or other) GLB later for any non-personal use.
+This is a placeholder/personal-use asset. For any non-personal use, swap in your own
+Ready Player Me (or other) GLB that you have rights to.
 
 ---
 
-Avatar: avatarsdk.glb (Tier 1 avatar-theming proof: distinct per-theme model,
-assigned to the "chainsawman" custom theme in themes/themes.json)
+Avatar: avatarsdk.glb (offered in the avatar dropdown)
 
 Source: https://github.com/met4citizen/TalkingHead
 Fetched: https://raw.githubusercontent.com/met4citizen/TalkingHead/main/avatars/avatarsdk.glb
@@ -73,8 +72,8 @@ young-man.glb, elder-woman.glb (6 additional 3D heads, added to the avatar dropd
 as the "Forge" entries)
 
 Source: generated in-house 2026-07-05 by this project's own parametric forge
-(forge.py, headless Blender 4.5.11 LTS + MPFB 2.0.16); spec files live in the
-avatar-forge workspace.
+(forge.py, headless Blender 4.5.11 LTS + MPFB 2.0.16); the forge and its spec
+files are not part of this repository.
 Generated date: 2026-07-05
 
 Mesh, morph targets, textures, and all fitted assets come from three official

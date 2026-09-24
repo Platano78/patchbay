@@ -23,15 +23,13 @@ webclient/themes/assets/**/*.png
 webclient/themes/assets/**/*.jpg
 webclient/themes/assets/**/*.webp
 
-# Local-only overlay: private/encumbered skins and avatar modules. Never tracked,
-# therefore never exported (the public export copies via `git ls-files`).
+# Local-only overlay: your private skins and avatar modules (see
+# webclient/themes/THEME-SPEC.md "Local overlay"). Never tracked.
 webclient/themes/local/
 webclient/avatar/local/
 
-# Tests that name an encumbered local-overlay theme directly must themselves
-# stay untracked — scripts/export-public.sh's banned-string gate bans that
-# theme's own identifier, and test_webclient.py ships. See
-# webclient/test_local_themes.py's own docstring for the full rationale.
+# Local tests for your own local-overlay themes. Kept untracked alongside
+# the themes they test.
 webclient/test_local_themes.py
 
 # Working notes and local research (scout/borrow write-ups, session scratch) —
@@ -43,8 +41,7 @@ docs/pronunciation-smoke-test.md
 # Local benchmark audio (large, and voice recordings are not distributable)
 bench-wavs/
 
-# TTS Arena audition instrument — rendered audio + verdict log are outputs,
-# not source; the code (arena/*.py, arena/*.html, arena/configs.json) is tracked.
+# Local TTS listening-test outputs (rendered audio + verdict log).
 arena/renders/
 arena/verdicts.jsonl
 

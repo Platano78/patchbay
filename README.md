@@ -26,8 +26,20 @@ like, then hit Apply.
 
 This repo is a **skeleton**: the custom cockpit UI and the patch pack that
 wires persona/brain switching into `speech-to-speech` are here, but the
-framework itself, your model endpoints, and any avatar assets are supplied by
-you at install time.
+framework itself is fetched at install time and your model endpoints are
+yours. Example 3D avatar heads ship with it (see *Bundled assets*); the
+optional 2D still-image avatar is an image you supply.
+
+## Who this is for
+
+People who self-host: you already run (or can reach) an OpenAI-compatible
+chat-completions model server — llama.cpp, Ollama, vLLM, LM Studio, or a
+hosted API — and want to talk to it by voice from a browser. It runs on
+Linux; speech-to-text and text-to-speech run on the CPU, so no GPU is
+needed on this side. It is not a hosted product: there are no accounts and
+no authentication, and it is meant to run on your own machine or network.
+Start with [SETUP.md](SETUP.md); agents acting for you start with
+[AGENTS.md](AGENTS.md).
 
 ## Architecture
 
@@ -40,16 +52,19 @@ you at install time.
    ├─ LLM   — OpenAI-compatible chat-completions endpoint ("brain")
    └─ TTS   — pocket (default; remote-speech opt-in, see *TTS backends*)
         ▲
-        │  HTTP :8770 (static files)
+        │  HTTP :8770 (static files, /models, /ha/* when configured)
  webclient/serve.py
 ```
 
 - The browser cockpit connects to the pipeline over a single WebSocket
   (`ws://<hostname>:8765`) for audio in/out plus JSON control messages
   (`config_get`/`config_set` — brain selection, persona text, chat reset).
-- `webclient/serve.py` serves the cockpit's own static files on `:8770`
-  (nothing else — no other client-side endpoints beyond the WS and a relative
-  `fetch("themes/themes.json")`).
+- `webclient/serve.py` (stdlib only) serves, on `:8770`: the cockpit's own
+  static files; `/models` and `/v1/models`, a small JSON status reporting
+  whether the pipeline's WebSocket port is listening; and — only when both
+  `HA_URL` and `HA_TOKEN` are set in its environment — the Home Assistant
+  deck routes `/ha/states`, `/ha/stream` and `/ha/intent` (see *Optional
+  integrations*). It binds `127.0.0.1` unless you pass `--host`.
 - The LLM ("brain") is any OpenAI-compatible `chat-completions` endpoint —
   local (llama.cpp, vLLM, Ollama, etc.) or hosted. `patches/brain_control.py`
   lets you register several brains in `brains.json` and hot-swap between them
@@ -181,8 +196,12 @@ reach the WebSocket port becomes a full screen — it receives the live audio an
 transcript of every conversation, and it can rewrite the persona, switch the
 active brain, change the model, and reset the chat.
 
-The quick-start above binds `--ws_host 0.0.0.0`, which is every interface,
-including your LAN. Two things follow:
+The first run in [SETUP.md](SETUP.md) binds both processes to `127.0.0.1`
+(the pipeline via `--ws_host 127.0.0.1`, and `serve.py`, which defaults to
+it), so only this machine can connect. The systemd templates bind
+`0.0.0.0` — every interface, including your LAN — and so does any command
+you change to `--ws_host 0.0.0.0` / `--host 0.0.0.0` for LAN or phone
+access. Once you do, two things follow:
 
 - **A VPN is not a boundary while you bind `0.0.0.0`.** Tailscale (or similar)
   adds a path; it does not remove the LAN one. Bind `127.0.0.1` or your
@@ -206,18 +225,21 @@ The `-` entry means "also allow clients that send no `Origin` header at all",
 which is every non-browser client — scripts, health probes, `websocat`. Leave
 it out and you will lock those out.
 
-**Unset (the default) is no longer "no restriction" as of this release.** It
-now accepts (a) clients that send no `Origin` header at all — every
+**Unset (the default) is not "no restriction", since v2.0.0.** It
+accepts (a) clients that send no `Origin` header at all — every
 non-browser client, same as the `-` entry above — and (b) pages whose Origin
 hostname matches the Host header the connection came in on, i.e. the same box
 the socket itself is reachable on (any port, a LAN IP, `localhost`, or a
 tailnet name). Anything else is rejected, and the rejection is logged once per
-connection naming `VOICE_WS_ORIGINS`. This is a behavior change from earlier
-versions, where unset meant no restriction at all — if your setup relies on a
+connection naming `VOICE_WS_ORIGINS`. This is a behavior change from versions
+before v2.0.0, where unset meant no restriction at all — if your setup relies on a
 page served from a genuinely different host opening this socket, set
 `VOICE_WS_ORIGINS` explicitly (above) to keep that working. Setting the env
 var at all — to any value, including just `-` — fully overrides this default
-and keeps the exact allowlist semantics described above.
+and keeps the exact allowlist semantics described above. The same-host rule
+compares hostnames only, so it does not stop DNS rebinding (a hostile name
+that resolves to your box sends a matching Origin and Host) — see
+[SECURITY.md](SECURITY.md).
 
 If you want genuinely separate conversations per device, don't look for a
 toggle — run a **second pipeline instance** on another port (`--ws_port 8766`
@@ -229,26 +251,43 @@ is not planned.
 
 ## Setup
 
-Self-hosting this requires an OpenAI-compatible chat-completions LLM
-endpoint (local or remote), Python 3.10+, and `git`. STT (`parakeet-tdt`)
-and TTS (`pocket`, the default) both run CPU-only — a GPU only helps the LLM
-you point it at.
+Self-hosting this requires Linux, an OpenAI-compatible chat-completions LLM
+endpoint (local or remote), Python with its `venv` module (tested on 3.10,
+3.12 and 3.14), `git`, `curl`, and about 6 GB of disk for the framework,
+its venv and the downloaded model weights. STT (`parakeet-tdt`) and TTS
+(`pocket`, the default) both run CPU-only — a GPU only helps the LLM you
+point it at. SETUP.md step 0 lists every download with its size and
+licence.
 
 **Full step-by-step runbook: [SETUP.md](SETUP.md).** It's written to be
 followed exactly — one command per step, an expected output to check
 against, and a fallback for when it doesn't match — including `./setup.sh
---check` to verify an existing install, configuring `brains.json`, the
+--check` to verify an existing install, configuring `brains.json`, a
+no-microphone check that a whole turn works (`examples/smoke_turn.py`), the
 `patches/README.md` reference for what the patch pack changes, and
-`systemd/*.template` for running both processes as services.
+`systemd/*.template` for running both processes as services (system units
+with sudo, or user units without).
 
 ## Bundled assets & what you supply
 
-**Bundled:** six ready avatar heads in `webclient/avatar/model/` (mirrored from
-the [TalkingHead](https://github.com/met4citizen/TalkingHead) repo's own public
-distribution) — per-file licensing in `webclient/avatar/model/LICENSE-NOTE.txt`
-(`mpfb.glb` is CC0; the rest are non-commercial/personal-use). The HeadAudio
-viseme model (`model-en-mixed.bin`) and vendored three.js/TalkingHead/HeadAudio
-libraries are included (MIT).
+**Bundled:** twelve example 3D avatar heads (GLB) in `webclient/avatar/model/`.
+They are **not uniformly licensed** — per-file terms are in
+`webclient/avatar/model/LICENSE-NOTE.txt`:
+
+- Six are mirrored from the [TalkingHead](https://github.com/met4citizen/TalkingHead)
+  repo's own public distribution. `mpfb.glb` is CC0. `brunette.glb` and
+  `brunette-t.glb` (Ready Player Me) are CC BY-NC 4.0. `avatarsdk.glb`
+  (AvatarSDK), `avaturn.glb` (Avaturn) and `vroid.glb` (VRoid Studio) are for
+  non-commercial use.
+- Six (`old-man`, `young-woman`, `heavyset-neutral`, `professional-woman`,
+  `young-man`, `elder-woman`) were generated for this project from MakeHuman
+  Community CC0 asset packs; the mesh, morph and texture content is CC0, and
+  the embedded rig derives from TalkingHead's MIT-licensed MPFB rig.
+
+The MIT `LICENSE` covers Patchbay's own code; it does not relicense these
+assets. For any non-personal use, check each head's terms or replace it with
+one you have rights to. The HeadAudio viseme model (`model-en-mixed.bin`)
+and vendored three.js/TalkingHead/HeadAudio libraries are included (MIT).
 
 **You supply:** a still image at `webclient/avatar/refs/<name>.png` (gitignored)
 if you want the 2D still-image avatar — it's lip-synced by
@@ -267,7 +306,7 @@ them.
 | Env var | Default | Purpose |
 |---|---|---|
 | `BRAINS_JSON` | `~/speech-to-speech/brains.json` | path to your brain registry |
-| `HERMES_SHIM_URL` | `http://localhost:8087/v1/chat/completions` | optional Hermes "shim" brain endpoint — see *Hermes (optional)* below |
+| `HERMES_SHIM_URL` | `http://localhost:8087/v1/chat/completions` | optional Hermes "shim" brain endpoint — see *Agent lane (optional)* below |
 | `HERMES_SHIM_TOKEN_FILE` | `~/.hermes/shim.env` | optional Hermes shim token file |
 | `HERMES_MCP_URL` | `http://localhost:8088/mcp` | optional Hermes MCP endpoint (cockpit brain) |
 | `HERMES_TARGET` | *(unset — required for `send_to_hermes`)* | Hermes message target, `platform:chat_id` per Hermes `channels_list` |
@@ -281,6 +320,7 @@ them.
 | `VOICE_PHONE_CONTEXT` | *(unset)* | set to `off` to disable phone context server-side, even if a client has it toggled on |
 | `GENESIS_API_URL` | `http://localhost:8080` | optional Agent-Genesis endpoint; adds a conversation-history lane to `knowledge_lookup`. Probed at startup — if nothing answers, the lane is silently dropped |
 | `FAULKNER_API_URL` | `http://localhost:8086` | optional Faulkner-DB endpoint backing `decision_lookup`. Same probe-or-drop behaviour |
+| `HA_URL` / `HA_TOKEN` | *(unset — deck off)* | read by **`webclient/serve.py`**, not the pipeline: when both are set (HA's base URL, e.g. `http://homeassistant.local:8123`, and a long-lived access token), `serve.py` holds a connection to Home Assistant and serves the cockpit's control deck at `/ha/states`, `/ha/stream` and `/ha/intent`; with either unset those routes don't exist. The token never leaves `serve.py`. Only a fixed list of domains and services is forwarded (lights, switches, fans, covers, climate, scenes, **locks — including unlock**, and `homeassistant` on/off/toggle). `/ha/intent` only accepts a `Content-Type: application/json` POST (else `415`) whose `Origin`, if the browser sent one, has the same hostname as the `Host` it was sent to (else `403`). There is still no authentication: anyone who can reach `serve.py` can operate those devices, so with HA configured keep `serve.py` on `127.0.0.1` or put your own authentication in front of it (see [SECURITY.md](SECURITY.md)). The `home_assistant` example tool reads the same two variables in the *pipeline's* environment |
 
 ### Agent lane (optional)
 
@@ -301,9 +341,13 @@ Hermes is the maintainer's own implementation of this contract — **a
 separate, self-hosted agent service**, not part of Patchbay, not bundled,
 and not required. It's the backing service for the three `*_hermes` voice
 tools below. Most self-hosters will never set this up, and that's the
-normal case, not a missing feature: without `HERMES_SHIM_URL` /
-`HERMES_MCP_URL` answering, the Hermes tools simply stay unarmed and the
-rest of the voice agent works exactly the same. If you do run something
+normal case, not a missing feature: when nothing answers at
+`HERMES_MCP_URL`, the Hermes tools simply stay unarmed and the rest of the
+voice agent works exactly the same. Arming is decided by that MCP probe
+alone — a missing or unreachable shim (`HERMES_SHIM_URL`) or token file
+does not disarm anything: `delegate_to_hermes` still hands the task off,
+and the delegation then ends in an error on the cockpit's delegation card
+(spoken too, unless `VOICE_HERMES_ANNOUNCE=off`). If you do run something
 that speaks the same shim/MCP surface — Hermes or your own — point the
 `HERMES_*` env vars above at it; those names stay as shipped API regardless
 of what implements the other end.
@@ -331,7 +375,7 @@ the behaviour described.
 | `VOICE_AFFECT` | *(unset — off)* | per-turn delivery conditioning. The brain prefixes each reply with a short note — `[affect: what this moment is - how it should sound]` — which is stripped before the text is spoken or shown, and sent to the TTS server as that one request's `instructions` field. `on` enables the note; `words` additionally asks the brain to write the reply in the register its own note names. Needs a TTS backend that accepts `instructions` (a `remote-speech` server that does not declare `accepts_instructions: false`); an operator-set speech style always takes precedence over it. Off by default and byte-identical to absent when off. Measured effect is delivery — pacing and register — not laughter or other paralinguistic events |
 | `VOICE_PERSONA_FILE` | `~/speech-to-speech/persona.json` | where personas set from the panel are stored (config sidecar, survives a framework reinstall) |
 | `VOICE_TOOL_FILLERS` | *(seven built-ins)* | pipe-separated (`\|`) list of spoken fillers, since a phrase may contain a comma. `off` disables |
-| `VOICE_WAKE_WORD` | *(unset — off)* | boot default for the join-deaf wake-word gate. The settings panel can toggle it live without a restart |
+| `VOICE_WAKE_WORD` | *(unset — off)* | boot default for the join-deaf wake-word gate. The settings panel can toggle it live without a restart. Needs `openwakeword` + `onnxruntime` in the pipeline's venv (SETUP.md step 6 — its pre-trained models, `hey_jarvis` included, are CC BY-NC-SA 4.0, non-commercial); without them the setting is ignored with a warning and the panel's toggle is greyed out with the reason |
 | `VOICE_WAKE_WORD_MODEL` | `hey_jarvis` | openWakeWord model name, or a path to a custom `.onnx`. Drop a trained model into openWakeWord's models directory and it appears in the panel's dropdown |
 | `VOICE_WAKE_WORD_THRESHOLD` | `0.5` | detection score gate. Near-misses at or above `0.25` log at INFO so a real attempt that fell short still leaves evidence to calibrate against |
 | `VOICE_WS_CERTFILE` / `VOICE_WS_KEYFILE` | *(unset)* | when both are set, the pipeline starts a second TLS listener alongside the plain one. See *Remote access / HTTPS* in `patches/README.md` — and note the client must dial the port the server listens on |
@@ -359,9 +403,9 @@ The voice agent's LLM can call a small set of server-side tools (defined in
 | `hermes_status` *(optional)* | Report Hermes' status (summary, last result, recent steps, or pending approvals) | Hermes MCP (`HERMES_MCP_URL`) |
 | `send_to_hermes` *(optional)* | Send a quick free-form message / follow-up to Hermes | Hermes MCP (`messages_send` → `HERMES_TARGET`) |
 
-Hermes is a separate, self-hosted service (see *Hermes (optional)* above) —
-most installs never run it, and these three tools simply stay unarmed until
-you do.
+Hermes is a separate, self-hosted service (see *Agent lane (optional)*
+above) — most installs never run it, and these three tools simply stay
+unarmed until something answers at `HERMES_MCP_URL`.
 
 **Approving a Hermes request is deliberately not a voice tool.** Hermes asks
 for approval precisely because an action needs a human, so the approval lives
@@ -387,7 +431,7 @@ clickable **Links card** in the cockpit.
 
 Set `VOICE_TOOLS_DIR=/path/to/dir` to drop in extra tools without editing repo
 files — one `.py` per tool exposing a `TOOL_DEF` dict and a `run()` callable
-(see `examples/tools/` for six ready-to-copy tools (clock, model-server status, service health, GPU status, news headlines, camera vision — the last needs a multimodal endpoint) — edit each file's EDIT-ME constants for your own endpoints). This **executes your Python on your
+(see `examples/tools/` for seven ready-to-copy tools: `current_time` (clock), `model_server_status`, `service_health`, `gpu_status`, `news_headlines`, `home_assistant` (needs `HA_URL`/`HA_TOKEN` in the pipeline's environment) and `look` (camera vision — needs a multimodal endpoint); where a file has EDIT-ME constants, set them for your own endpoints). This **executes your Python on your
 box**, so treat the directory with the same trust as editing config. Drop-ins
 arm unconditionally when the directory is set (unless `VOICE_TOOLS` pins the
 list); a broken file is skipped with a logged warning rather than crashing the
@@ -397,7 +441,7 @@ pipeline. No restart needed to pick up changes — the settings panel's
 
 ## TTS backends
 
-`pocket` is the default and requires nothing beyond what *Prerequisites*
+`pocket` is the default and requires nothing beyond what SETUP.md step 0
 already lists — nothing here changes if you never touch `--tts`.
 
 `remote-speech` is an **opt-in** backend for any server implementing OpenAI's
@@ -588,26 +632,35 @@ live connection.
 
 ## Tests
 
+Run the suite in the framework's venv — the patch modules import its
+packages (`httpx`, `numpy`, `openai`, `pydantic`), so the system `python3`
+cannot collect them. From the repo root:
+
 ```bash
-python3 -m pytest patches/ examples/ webclient/ -q
+~/speech-to-speech-main/.venv/bin/pip install pytest
+~/speech-to-speech-main/.venv/bin/python3 -m pytest patches/ examples/ webclient/ -q
 ```
 
-`patches/` and `examples/` are plain unit tests and need nothing beyond
-`pytest`. `webclient/test_webclient.py` is different: it drives the real
-`index.html` in a headless Chromium with a fake microphone, against a stub
-control websocket, to cover client behaviour no unit test can reach — the
-wake-word mic handoff, the permission gate, the settings dialog's focus trap.
-It needs a browser:
+`webclient/test_webclient.py` drives the real `index.html` in a headless
+Chromium with a fake microphone, against a stub control websocket, to cover
+client behaviour no unit test can reach — the wake-word mic handoff, the
+permission gate, the settings dialog's focus trap. It needs a browser, also
+in the venv:
 
 ```bash
-pip install playwright websockets && python3 -m playwright install chromium
+~/speech-to-speech-main/.venv/bin/pip install playwright websockets
+~/speech-to-speech-main/.venv/bin/python3 -m playwright install chromium
 ```
 
 Without those it skips rather than fails, so the suite still passes on a
 machine that only runs the pipeline — but then the client is untested, so
-check for `s` in the pytest output before trusting a green run. Both of its
-servers bind ephemeral ports on localhost, so it is safe to run on the same
-box as a live agent.
+check the skip count in the pytest summary before trusting a green run.
+Some skips are expected even with everything installed — measured with the
+browser suite installed: 22, which are the echo-gate tests that need benchmark
+recordings (not shipped), one wake-word test that needs `openwakeword`,
+four that need the maintainer's release tooling (not shipped), and one that
+needs `node`. Both of the browser suite's servers bind ephemeral ports on
+localhost, so it is safe to run on the same box as a live agent.
 
 ## Attribution & acknowledgments
 

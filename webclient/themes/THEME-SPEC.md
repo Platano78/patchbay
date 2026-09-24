@@ -31,8 +31,11 @@ custom-property overrides plus ordinary rules scoped under a
 a `<div>`, rename a class, or add an inline `style=` attribute in the HTML — stop.
 The token set below is deliberately complete enough that you shouldn't need to.
 
-A skin cannot break the app: a scoped rule that doesn't match is inert. That safety
-is the whole reason the constraint exists, and it still holds.
+Scoping is what keeps skins apart: a rule under another theme's
+`[data-theme]` doesn't match, so it is inert, and your skin cannot leak into anyone
+else's. It does not make a skin harmless — while it is the active theme, its CSS
+controls how the whole cockpit looks, and CSS can hide controls, cover them, or make
+text unreadable. Install third-party skins only from sources you trust.
 
 ### Rigs — a theme that ships code
 
@@ -41,18 +44,18 @@ A **rig** is a theme that additionally ships `themes/<your-id>.mjs` and declares
 context, physics, and its own DOM *inside the mount points listed below* — but still
 not one line of `index.html`.
 
-**A rig can break the app, and a skin cannot.** That is the entire difference, and it
+**A rig runs code; a skin only styles.** That is the entire difference, and it
 is why a rig carries obligations a skin doesn't: a required `destroy()`, a teardown
 contract, and gates that prove it leaks nothing. **Installing a third-party rig runs
 its JavaScript in your cockpit.** No sandboxing is attempted. The host-side reaper
 defends against *incompetence* — a rig that forgets to clean up — not against malice.
 
-Do not write a rig from this document alone. The authoring guide, the host API, the
-lifecycle contract and the gates you must pass live in **`themes/AGENTS.md`**; this
-file remains the deep reference for tokens, mounts and primitives, which both tiers
-share. Until that guide exists, the working contract is the code: `setTheme()` and
-`mountRigForTheme()` in `index.html`, and the teardown/reaper gates in
-`webclient/test_webclient.py`.
+Do not write a rig from this document alone. There is no separate rig authoring
+guide; this file is the reference for tokens, mounts and primitives, which both tiers
+share, and the rest of the contract is the code: read `webclient/avatar/avatar.mjs`
+(the avatar pane's render and lifecycle glue — the reference for how a WebGL module
+here starts, pauses and tears down), `setTheme()` and `mountRigForTheme()` in
+`index.html`, and the teardown/reaper gates in `webclient/test_webclient.py`.
 
 **Pick a skin unless you actually need code.** Most themes shouldn't be rigs.
 
@@ -93,9 +96,8 @@ needs must already be sitting on the visitor's machine or expressible in CSS.
 ## Local overlay (private skins that never ship)
 
 `webclient/themes/local/` is an entirely gitignored directory - nothing placed
-inside it is ever tracked, so it survives `git status` clean and is never part
-of the public export (`scripts/export-public.sh` exports via `git ls-files`,
-and untracked files are invisible to that command). Use it for a skin that's
+inside it is ever tracked, so it survives `git status` clean and never ends up
+in a commit. Use it for a skin that's
 private, or built on encumbered assets you can't redistribute (a licensed
 font, someone else's artwork), without keeping it off `main` by hand.
 

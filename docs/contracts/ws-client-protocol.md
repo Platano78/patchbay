@@ -102,9 +102,43 @@ Only `config_get` is needed for a minimal client. The rest are optional capabili
 | `screen_frame` | `data`: base64 JPEG | Same, for screen share. |
 | `voice_clone_begin` / `voice_clone_chunk` / `voice_clone_end` | see `webclient/index.html` | Custom voice upload. Skip unless you need it. |
 
-`config_set` keys in use: `brain`, `brain_model`, `persona`, `persona_scope`, `persona_mode`,
-`voice`, `wake_word`, `wake_word_model`, `reset_chat`, `reload_tools`, `voice_delete`,
-`permission_respond`. Each is answered with a `config_ack`.
+`config_set` keys, as handled by `_config_set` in `patches/brain_control.py`:
+
+| Key | Value | Effect |
+|---|---|---|
+| `brain` | brain name from `brains.json` | switch the active brain (probed first); resets chat if it changed |
+| `brain_model` | `{"brain": name, "model": id}` | per-brain model override; empty `model` clears it |
+| `voice` | voice name | switch TTS voice |
+| `voice_audition` | bool, with `voice` | `false` suppresses the spoken sample after a switch |
+| `speech_style` | string | delivery instructions for a `remote-speech` TTS; an error on backends without that handle |
+| `voice_delete` | custom voice name | delete a cloned voice |
+| `persona` | text | persona text for the scope below |
+| `persona_scope` | `"global"` (default) or `"brain"` | which tier `persona` writes |
+| `persona_mode` | `"custom"`, `"preset"` or `"inherit"` | with brain scope: which tier the active brain uses |
+| `wake_word` | bool | enable/disable the wake-word gate; `true` is refused when no detector is installed |
+| `wake_word_model` | model name or `.onnx`/`.tflite` path | pick the wake phrase |
+| `parrot` | bool | arm/disarm parrot mode (every turn spoken back verbatim, no LLM) |
+| `discover_brains` | `true` | loopback scan for model servers; the ack carries `discovered_brains` |
+| `reset_chat` | `true` | drop the chat history |
+| `reload_tools` | `true` | re-probe and re-arm voice tools, including `VOICE_TOOLS_DIR` drop-ins |
+| `permission_respond` | `{"id": ..., "approve": bool}` | answer an agent-lane approval request; handled on its own, other keys in the same frame are ignored |
+
+Several keys may share one frame. `permission_respond` is checked first and, if present, is the
+only key handled. Otherwise keys are applied in the order above; the first one that fails ends
+processing with `ok: false`, and keys applied before it stay applied.
+
+**Who hears about a change.** The requester always gets the `config_ack` (a full snapshot on
+success). Other connected clients only learn of a change the server *broadcasts*:
+
+- `brain_model`, `parrot`, `voice_delete`, and a finished voice clone broadcast a fresh
+  `config_state` to every client.
+- `wake_word` and `wake_word_model` broadcast a `wakeword_state` frame to every client.
+- `brain`, `voice`, `speech_style`, `persona*`, `reset_chat`, `reload_tools`,
+  `discover_brains` and `permission_respond` answer the requester only. Another screen sees
+  those on its next `config_get`.
+- A `config_get` also starts a background reachability probe of the configured brains, which
+  broadcasts a `config_state` if a brain's reachability changed, and (when the agent lane is
+  wired) pushes a fresh `cockpit_state` to every client.
 
 ## Server → client text frames
 
@@ -117,7 +151,7 @@ clients are expected to keep working; the reference client logs and drops them.
 | `partial_transcription` | `delta` | Incremental transcript text. Append, don't replace. |
 | `assistant_text` | `text`, `tools` | The reply. **A tool-calling turn emits an empty-`text` frame carrying `tools` first**, then a second frame with the real answer — don't render the first as an empty reply. |
 | `wakeword_state` | `state` (`awake`/`asleep`/`off`), `phrase`, `score` | Wake-gate state. |
-| `config_state` | full config snapshot | Answer to `config_get`; also broadcast on change. |
+| `config_state` | full config snapshot | Answer to `config_get`; also broadcast on some changes (above). Its `wake_word` block (or `null` when the server has no gate) carries `enabled`, `state`, `phrase`, `model`, `models`, and `available`; when `available` is `false` — no detector installed — it also carries `unavailable_reason`, a sentence to show the user, and `config_set {wake_word: true}` will be refused. |
 | `config_ack` | `ok`, `error`, plus a full snapshot on success | Answer to `config_set`. On `ok`, treat as `config_state`. May carry `chat_reset: true` — the server dropped its history, so mirror that. |
 | `history_replay` | `entries[]` with `ts`, `user`, `assistant` | Prior turns, sent on connect. Apply only to empty local state; a reconnect without a client restart already has them. |
 | `token_usage` | `input_tokens`, `output_tokens` | Diagnostics. |

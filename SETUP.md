@@ -4,11 +4,22 @@ Executable steps for a human, an agentic model, or an agent (e.g. Hermes).
 Each step is one exact command, its expected output, and what to do if the
 output doesn't match. Run the steps in order; do not skip ahead.
 
+The path below runs everything on **one machine**, bound to `127.0.0.1`, and
+you open the cockpit at `http://localhost:8770` on that same machine. Reaching
+it from a phone or another computer is a later, explicit step (step 6, *Remote
+access over HTTPS*) — read README's *Who can connect* before you do it.
+
 ## 0. What you need
 
-- `python3` 3.10 or newer, and `git`.
-- ~3 GB free disk (framework checkout + venv + downloaded model weights).
-- A microphone and a browser (Chrome/Edge/Firefox — any recent build).
+- Linux, with `python3` (tested on 3.10, 3.12 and 3.14) including its `venv`
+  module, `git`, and `curl`.
+- About **6 GB free disk**, measured on a fresh install (Python 3.12): the
+  framework's venv ~2.6 GB (torch alone ~770 MB), pip's download cache in
+  `~/.cache/pip` ~0.85 GB, and ~2.7 GB of model weights fetched on the first
+  pipeline start. The table below itemises it.
+- A microphone and a browser (Chrome/Edge/Firefox — any recent build) on the
+  same machine. Not needed to verify the install: step 4 has a no-microphone
+  check.
 - An **OpenAI-compatible chat-completions LLM endpoint**, reachable from this
   box — local (llama.cpp, vLLM, Ollama, an LLM router) or remote. It does not
   matter which; you supply the URL in step 3.
@@ -19,24 +30,60 @@ output doesn't match. Run the steps in order; do not skip ahead.
   in after setup finishes (`pip install torch torchaudio --index-url
   https://download.pytorch.org/whl/cuXXX` in the venv).
 
-**Don't have an LLM endpoint yet?** The cheapest local path is
-[Ollama](https://ollama.com): install it, `ollama pull llama3.2` (or any
-small model), then it serves an OpenAI-compatible API at
+Verify the prerequisites:
+
+```bash
+python3 --version && python3 -c 'import venv, ensurepip' && git --version && curl --version | head -1
+```
+
+Expected output: three lines — `Python 3.x.y`, `git version x.y.z`, and
+`curl x.y.z (...)` — and no traceback. (`python3 -m venv --help` is not a
+substitute check: on Debian/Ubuntu it succeeds even when the package that
+lets venv actually create environments is missing.)
+
+What if it didn't: a `ModuleNotFoundError: No module named 'ensurepip'`, or
+`git`/`curl` not found. On Debian/Ubuntu:
+
+```bash
+sudo apt install python3-venv git curl
+```
+
+**Don't have an LLM endpoint yet?** One local path is
+[Ollama](https://ollama.com): install it, pull a small model (e.g. `ollama
+pull llama3.2` — not tested by us; Llama 3.2 is under Meta's Llama 3.2
+Community License), and it serves an OpenAI-compatible API at
 `http://localhost:11434/v1` — check it with the same `curl .../models`
 command step 3 teaches. If you'd rather rent a model than run one, a hosted
 provider works too — see `python3 patches/brain_lanes.py show openrouter`
 (or `show nvidia-nim`, `show anthropic`) for what each needs and a
 paste-ready `brains.json` entry. Either way, step 3 is where it plugs in.
 
-Verify the prerequisites:
+### What gets downloaded, and under which licence
 
-```bash
-python3 --version && git --version
-```
+Decide here, before step 1. Nothing below is redistributed by this repo;
+each is fetched from its own source onto your machine.
 
-Expected output: two lines, `Python 3.10.x` (or higher) and `git version
-x.y.z`. If `python3` reports below 3.10, install a newer Python before
-continuing — the framework's install step will fail obscurely otherwise.
+| What | Approx. size | Licence | Where it lands | When |
+|---|---|---|---|---|
+| `huggingface/speech-to-speech` framework, pinned commit | ~8 MB checkout | Apache-2.0 | `~/speech-to-speech-main` | `./setup.sh` |
+| torch + torchaudio, CPU wheels | ~770 MB installed (196 MB torch wheel) | BSD-3-Clause | the venv | `./setup.sh` |
+| The framework's other Python dependencies | rest of the ~2.6 GB venv | various (per package) | the venv, plus `~/.cache/pip` | `./setup.sh` |
+| `nvidia/parakeet-tdt-0.6b-v3` (speech-to-text) | 2.4 GB | CC-BY-4.0 | `~/.cache/huggingface/hub` | first pipeline start |
+| `kyutai/pocket-tts-without-voice-cloning` (text-to-speech) | ~221 MB | CC-BY-4.0 | `~/.cache/huggingface/hub` | first pipeline start |
+| `snakers4/silero-vad` (voice activity detection) | ~36 MB | MIT | `~/.cache/torch/hub` | first pipeline start |
+| NLTK `punkt_tab` + `averaged_perceptron_tagger_eng` data | ~22 MB | per NLTK data package (not checked by us) | `~/nltk_data` | first pipeline start |
+
+Optional, only if you turn the feature on:
+
+| What | Licence | When |
+|---|---|---|
+| `kyutai/pocket-tts` (clone-capable TTS weights, gated — accept terms on Hugging Face) | CC-BY-4.0 | *Custom voice cloning*, step 6 |
+| `openwakeword` + `onnxruntime` packages | Apache-2.0 (openWakeWord code) | *Wake word*, step 6 |
+| openWakeWord pre-trained models, including `hey_jarvis` | **CC BY-NC-SA 4.0 — non-commercial** | *Wake word*, step 6 |
+
+On Python 3.10–3.12, `setup.sh` also installs the framework's optional
+`kokoro` TTS extra (not used unless you pass `--tts kokoro`); on 3.13 and
+newer it skips it (step 1).
 
 ## 1. Clone and install
 
@@ -48,25 +95,32 @@ cd patchbay
 ```
 
 This clones `huggingface/speech-to-speech` pinned at the commit the patch
-pack was built against, creates a venv, installs the framework plus the
-`pocket`/`kokoro`/`websocket` extras, and applies the cockpit's patch pack
-on top.
+pack was built against into `~/speech-to-speech-main`, creates a venv there,
+installs CPU torch, the framework, and its `pocket`/`websocket` extras (plus
+`kokoro` on Python below 3.13), applies the cockpit's patch pack on top, and
+copies `brains.json.example` to `brains.json` if you don't have one yet.
 
 Expected output: the last line printed is exactly `SETUP OK`.
 
 What if it didn't say that: the script uses `set -euo pipefail`, so it
 stopped at the first failing command and printed that command's own error
-above. Common causes and fixes:
+above. Its own sentences, and what they mean:
 
-- `pip install` failure (network, or a missing build toolchain for a native
-  extension) — read the pip error above `SETUP OK`'s absence, fix it
-  (e.g. `apt install build-essential python3-dev` on Debian/Ubuntu), then
-  re-run `./setup.sh`. It is not idempotent on a partial clone: if
-  `INSTALL_DIR` (default `~/speech-to-speech-main`) already exists from a
-  failed attempt, either `rm -rf ~/speech-to-speech-main` first or set
-  `INSTALL_DIR=/fresh/path ./setup.sh`.
-- `INSTALL_DIR already exists` — same fix: remove it or point `INSTALL_DIR`
-  elsewhere.
+- `python3 cannot create virtual environments on this system (the venv module is missing). On Debian/Ubuntu: sudo apt install python3-venv   then re-run ./setup.sh`
+  — step 0's prerequisite. Nothing was created yet; install it and re-run.
+- `git is not installed. On Debian/Ubuntu: sudo apt install git   then re-run ./setup.sh`
+  — same.
+- `INSTALL_DIR already exists: <path>` followed by `Remove it or set
+  INSTALL_DIR to a fresh path, then re-run.` — an earlier attempt got past
+  the clone. `setup.sh` never installs over an existing directory: remove it
+  (`rm -rf ~/speech-to-speech-main`, if it is the one from that attempt) or
+  run `INSTALL_DIR=/fresh/path ./setup.sh`.
+- `Skipping the optional kokoro TTS extra: it does not support Python 3.14 yet (pocket, the default TTS, is unaffected).`
+  (with your Python version) — **not an error**; setup continues.
+- A `pip install` failure (network, or a missing build toolchain for a
+  native extension) — read the pip error, fix it (e.g. `sudo apt install
+  build-essential python3-dev` on Debian/Ubuntu), remove the partial
+  `INSTALL_DIR` as above, and re-run.
 
 ## 2. Verify the install
 
@@ -77,30 +131,40 @@ above. Common causes and fixes:
 If you set `INSTALL_DIR` in step 1, pass the same value here:
 `INSTALL_DIR=/custom/path ./setup.sh --check`.
 
-Expected output: four lines, each starting `CHECK <name>: PASS ...`, and the
-command exits `0`. `CHECK playwright` is optional and does not affect the
-exit code either way.
+Expected output: four lines, and the command exits `0`:
 
-What if a required check FAILs (exit code non-zero, one or more of `venv`,
-`package-import`, `patches-applied` say `FAIL`): the FAIL line names the
-reason and the fix inline. Re-run `./setup.sh` (safe to re-run once the
-underlying issue — usually a partial `INSTALL_DIR` from step 1 — is
-resolved), then `./setup.sh --check` again. This command is read-only: it
-never installs, clones, or writes anything, so loop on it freely.
+```
+CHECK venv: PASS venv found at <install-dir>/.venv
+CHECK package-import: PASS speech_to_speech's patched entry points import cleanly from the venv
+CHECK patches-applied: PASS all patch files present and unchanged (idempotent re-run confirmed)
+CHECK playwright (optional): FAIL not installed in the venv (<install-dir>/.venv, where the tests run) — webclient browser tests will skip, rest of the suite still runs
+```
+
+The three required checks must say `PASS`. The `playwright` line is
+optional: on a fresh install it says `FAIL`, which only means the browser
+test suite would skip (README *Tests* installs it); it never affects the
+exit code.
+
+What if a required check FAILs (exit code non-zero): the FAIL line names the
+reason and the fix inline — `run ./setup.sh first, or set INSTALL_DIR to
+where it lives` for a missing venv, `run: bash patches/apply.sh` for a patch
+pack that is missing or out of date. This command is read-only: it never
+installs, clones, or writes anything, so loop on it freely.
 
 ## 3. Configure the brain
 
 ```bash
-cp brains.json.example brains.json
+test -e brains.json || cp brains.json.example brains.json
 ```
 
-`setup.sh` already ran this copy for you in step 1 if `brains.json` didn't
-exist yet, so this command is a no-op unless you deleted it — either way,
-edit `brains.json` (setup.sh created it from the example) next.
+`setup.sh` already made this copy in step 1 if `brains.json` didn't exist;
+the `test -e` guard means this command never overwrites one you have
+edited. `brains.json` is gitignored — it can name your API key files, so
+never commit it.
 
-**Not sure what to put in it?** `setup.sh` also runs a loopback-only scan for
-a local model server already running on your box and prints what it finds,
-right after it copies the example. Missed it, or want to check again later:
+**Not sure what to put in it?** `setup.sh` also ran a loopback-only scan for
+a local model server already running on your box and printed what it found.
+Missed it, or want to check again later:
 
 ```bash
 ~/speech-to-speech-main/.venv/bin/python3 patches/brain_discovery.py
@@ -152,7 +216,8 @@ model id — e.g. `{"object":"list","data":[{"id":"your-model-name",...}]}`.
 What if it didn't: `curl` prints nothing and exits non-zero, or the JSON has
 no `data` array. The endpoint is unreachable, wrong URL/port, or not
 OpenAI-compatible at `/models`. Fix the URL/port or start the LLM server
-before continuing — everything past this point depends on it answering.
+before continuing — the pipeline calls this endpoint while it starts and
+exits if it can't reach it.
 
 ## 4. First run (foreground)
 
@@ -162,7 +227,7 @@ Start the pipeline, pointing it at the endpoint you just verified
 ```bash
 BRAINS_JSON=$PWD/brains.json \
 ~/speech-to-speech-main/.venv/bin/speech-to-speech \
-  --mode websocket --ws_host 0.0.0.0 --ws_port 8765 \
+  --mode websocket --ws_host 127.0.0.1 --ws_port 8765 \
   --stt parakeet-tdt --parakeet_tdt_device cpu \
   --tts pocket --pocket_tts_voice jean --pocket_tts_device cpu \
   --llm_backend chat-completions \
@@ -172,36 +237,81 @@ BRAINS_JSON=$PWD/brains.json \
   --responses_api_stream
 ```
 
-Watch the log for the port-bind line (first-run model downloads can take a
-minute or two before this appears):
+Watch the log for the port-bind line (the first start downloads ~2.7 GB of
+model weights, so it can take a few minutes before this appears):
 
 ```
 WebSocket server ready, waiting for connections...
 ```
 
-What if it didn't appear: an exception was printed instead — read it. The
-two most common: a missing STT/TTS dependency (re-run `./setup.sh --check`
-in another terminal — `package-import` or `patches-applied` FAILing means
-the venv is incomplete) or a bad `--responses_api_base_url` value (recheck
-step 3's `curl`).
+What if it didn't appear: an exception was printed instead — read it.
 
-In a second terminal, serve the cockpit:
+- `openai.APIConnectionError: Connection error.` at the end of a traceback —
+  the LLM endpoint is unreachable. The pipeline sends the model a warm-up
+  request while it starts and exits when that fails. Recheck step 3's
+  `curl` against the exact `--responses_api_base_url` you passed.
+- An import error or missing module — re-run `./setup.sh --check` in another
+  terminal; `package-import` or `patches-applied` FAILing means the venv is
+  incomplete.
+
+`BrainControl: no brains.json at <path> -- brain switching is off.` in the
+log is a warning, not a failure: the pipeline still serves the brain on its
+command line; point `BRAINS_JSON` at the file to get the panel's brain
+switcher.
+
+### Check it answers, without a microphone
+
+With the pipeline running, in a second terminal:
+
+```bash
+~/speech-to-speech-main/.venv/bin/python3 examples/smoke_turn.py
+```
+
+It synthesizes "What is the capital of France?" with pocket-tts, streams it
+to `ws://127.0.0.1:8765` exactly as the cockpit streams a microphone, and
+waits up to 120 s. Progress notes go to stderr; the expected result is:
+
+```
+heard: What is the capital of France?
+answer: The capital of France is Paris.
+reply audio: 74752 bytes
+SMOKE OK
+```
+
+The answer's wording and the byte count depend on your model; `SMOKE OK`
+and exit code `0` are the pass condition. Otherwise it prints one sentence
+naming what did not arrive — no connection, no transcript, no answer from
+the brain, or no reply audio — and exits `1`. It changes no configuration,
+but the session is shared: an open cockpit hears this turn too. `--ws URL`
+and `--text "..."` override the defaults.
+
+### Open the cockpit
+
+In another terminal, serve the cockpit:
 
 ```bash
 python3 webclient/serve.py --port 8770
 ```
 
-Expected output: `Serving <path> on http://0.0.0.0:8770`.
+Expected output: `Serving <path> on http://127.0.0.1:8770`.
 
-Open `http://localhost:8770` in a browser. A one-time **FIRST CALIBRATION**
-overlay appears with a status lamp under "CONNECT TO INSTRUMENT SERVER":
+Open `http://localhost:8770` in a browser on the same machine. A one-time
+**FIRST CALIBRATION** overlay appears with a status lamp under "CONNECT TO
+INSTRUMENT SERVER":
 
 - `NOT TESTED` (lamp off) — before the page has tried to connect.
 - `TESTING LINK` (amber, pulsing) — connection attempt in progress.
 - `LINK OK` (green) — the WebSocket handshake with `:8765` succeeded. This is
   the pass condition for this step.
-- `FAULT` (red) — connection failed; see step 5's LLM-endpoint-unreachable
-  branch below.
+- `FAULT` (red) — the browser could not open the WebSocket. This is about
+  the socket (URL, port, TLS, or an Origin the pipeline rejected), **not**
+  the LLM; see step 5.
+
+**Using the cockpit from another device** (phone, tablet, another computer)
+needs both processes bound beyond loopback (`--ws_host 0.0.0.0` on the
+pipeline, `--host 0.0.0.0` on `serve.py`) **and** HTTPS, because browsers
+only allow the microphone on `https://` or `http://localhost`. Read README's
+*Who can connect* first, then step 6's *Remote access over HTTPS*.
 
 ## 5. Talk to it
 
@@ -209,12 +319,13 @@ Hold the push-to-talk button, speak, release. Expected: a live transcript of
 your speech appears, then a spoken reply plays back within a couple of
 seconds.
 
-Three likely first-run failures, each with its own check:
+Likely first-run failures, each with its own check:
 
-**No mic permission prompt, or a blocked-mic error.** Browsers only allow
-`getUserMedia` on a secure context (`https://` or `http://localhost`).
-Loading the cockpit by LAN IP or hostname over plain `http://` will silently
-fail to get mic permission.
+**No mic permission prompt, or the status reads `mic denied`.** Browsers
+only allow `getUserMedia` on a secure context (`https://` or
+`http://localhost`), and `mic denied` also appears when you (or a browser
+setting) refused the permission prompt. Loading the cockpit by LAN IP or
+hostname over plain `http://` will fail to get mic permission.
 
 ```bash
 curl -s http://localhost:8770 -o /dev/null -w '%{http_code}\n'
@@ -223,8 +334,19 @@ curl -s http://localhost:8770 -o /dev/null -w '%{http_code}\n'
 Expected: `200`, and you are viewing the page via `localhost` (not a LAN
 IP/hostname) unless you've set up HTTPS — see step 6.
 
-**Calibration lamp shows FAULT, or `config_get`/no transcript ever arrives.**
-The LLM endpoint from step 3 is unreachable or stopped answering.
+**Calibration lamp shows FAULT, or the status reads `can't reach ws://…`.**
+The browser could not open the WebSocket. Check, in order: the pipeline is
+still running and its log showed `WebSocket server ready`; the page is
+dialling the port the pipeline listens on (the settings panel's "Server
+socket URL" field shows the URL and why it failed); an `https://` page needs
+a `wss://` socket; and the pipeline log for `WebSocket connection rejected:
+Origin ... doesn't match Host ...`, which means the page was served from a
+different host than the socket (see README *Who can connect*,
+`VOICE_WS_ORIGINS`).
+
+**LINK OK, your transcript appears, but no answer comes back.** The brain
+isn't answering. Read the pipeline's terminal log for the error, and check
+the endpoint still answers:
 
 ```bash
 curl -sf <your-base-url>/models
@@ -234,24 +356,43 @@ Expected: same JSON shape as step 3. If it fails now but passed in step 3,
 the LLM server stopped — restart it, then reopen the settings panel (gear
 icon) to re-probe.
 
-**Transcript appears but no audio plays back.** TTS failed to load or
-produce audio.
+**Transcript and answer appear but no audio plays back.** TTS failed to load
+or produce audio.
 
 ```bash
 ~/speech-to-speech-main/.venv/bin/python3 -c "import pocket_tts"
 ```
 
 Expected: no output, exit code `0`. A traceback means the `pocket` extra
-didn't install — re-run `./setup.sh --check`; `package-import` should have
-caught this, so also check the pipeline's own terminal log for a TTS
-exception near startup.
+didn't install — re-run `./setup.sh --check`, and check the pipeline's own
+terminal log for a TTS exception near startup.
 
 ## 6. Optional
 
 Each of these is independent; skip any you don't need.
 
-**Run as systemd services** (keeps the pipeline and webclient running across
-reboots/crashes):
+### Run as systemd services
+
+Keeps the pipeline and webclient running across reboots and crashes. Both
+templates bind **every interface** (`--ws_host 0.0.0.0` in the pipeline
+unit, `--host 0.0.0.0` in the webclient unit), because a service is
+usually there so other devices can reach it. If it is for this machine
+only, add these two lines to both `sed` commands below:
+
+```bash
+  -e "s|--ws_host 0.0.0.0|--ws_host 127.0.0.1|" \
+  -e "s|--host 0.0.0.0|--host 127.0.0.1|" \
+```
+
+The pipeline unit also passes `--speculative_reopen_ms=-1
+--unanswered_reopen_ms=-1`, which the foreground command in step 4 does
+not. They turn off the framework's speculative turn reopening: by default a
+turn that ended on a pause stays reopenable for 1 s (7 s while the
+assistant hasn't answered yet), so speech that resumes inside that window is
+merged back into the same turn. At `-1` no turn is ever reopened — every
+end of speech is final, and speech after it starts a new turn.
+
+**System units (needs sudo):**
 
 ```bash
 sed \
@@ -278,37 +419,116 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now patchbay voice-webclient
 ```
 
-Verify: `systemctl is-active patchbay voice-webclient` both print `active`.
+Verify: `systemctl is-active patchbay voice-webclient` prints `active`
+twice.
 
-**Wake word** (hands-free "hey jarvis" activation instead of push-to-talk):
-set `VOICE_WAKE_WORD=1` in the unit's `Environment=` (or export it before a
-foreground run) after `pip install openwakeword onnxruntime` into the venv.
-Verify: the settings panel's "Wake word" checkbox is enabled (not greyed
-out) after a restart.
+**User units (no sudo):** the same templates, rendered into your own
+systemd user directory. A user unit must not carry `User=`, and it hangs
+off `default.target` instead of `multi-user.target`:
 
-**Phone context** (location/timezone/battery ambient info): opt-in per
-browser via the settings panel's "Phone context" toggle — no server config
-needed. Verify: after enabling it, `config_get` over the WebSocket control
-channel reports a non-null `phone_context` block.
+```bash
+mkdir -p ~/.config/systemd/user
 
-**Custom voice cloning**: accept the terms at
-<https://huggingface.co/kyutai/pocket-tts>, then `hf auth login` as the
-service user, then restart the pipeline. Verify: the settings panel's
-"Advanced - custom voice" section stops showing a terms-gate error and lets
-you record/upload a sample.
+sed \
+  -e "/^User=/d" \
+  -e "s|^WantedBy=multi-user.target|WantedBy=default.target|" \
+  -e "s|\${RUN_USER}|$(whoami)|g" \
+  -e "s|\${HOME_DIR}|$HOME|g" \
+  -e "s|\${VENV_DIR}|$HOME/speech-to-speech-main/.venv|g" \
+  -e "s|\${WORKING_DIR}|$PWD|g" \
+  -e "s|\${WS_PORT}|8765|g" \
+  -e "s|\${STT_BACKEND}|parakeet-tdt|g" \
+  -e "s|\${TTS_BACKEND}|pocket|g" \
+  -e "s|\${TTS_VOICE}|jean|g" \
+  -e "s|\${LLM_BASE_URL}|<your-base-url>|g" \
+  -e "s|\${LLM_MODEL_NAME}|<your-model-name>|g" \
+  systemd/patchbay.service.template > ~/.config/systemd/user/patchbay.service
 
-**Remote access over HTTPS** (mic access from a non-localhost device): see
-`patches/README.md` "Remote access / HTTPS" — it is a full runbook of its
-own (cert generation, `VOICE_WS_CERTFILE`/`VOICE_WS_KEYFILE`, matching client
-port). Verify per that doc's own steps.
+sed \
+  -e "/^User=/d" \
+  -e "s|^WantedBy=multi-user.target|WantedBy=default.target|" \
+  -e "s|\${RUN_USER}|$(whoami)|g" \
+  -e "s|\${HOME_DIR}|$HOME|g" \
+  -e "s|\${WEBCLIENT_DIR}|$PWD/webclient|g" \
+  -e "s|\${HTTP_PORT}|8770|g" \
+  systemd/voice-webclient.service.template > ~/.config/systemd/user/voice-webclient.service
 
-**Optional integrations** (`HERMES_*`, `QMD_*`, `GENESIS_*`, `FAULKNER_*`
-env vars): every one of these is probed once at pipeline startup and
-silently dropped if nothing answers — the core voice agent (LLM brain + STT
-+ TTS) works with none of them set. Only set these if you're running the
-corresponding service; see `README.md`'s *Optional integrations* table for
-what each does. The systemd unit template from this step already sets
-`BRAINS_JSON` for you, so you don't need to add it yourself.
+grep -H '^User=\|^WantedBy=\|\${' ~/.config/systemd/user/patchbay.service ~/.config/systemd/user/voice-webclient.service
+
+systemctl --user daemon-reload
+systemctl --user enable --now patchbay voice-webclient
+loginctl enable-linger "$USER"
+```
+
+The `grep` must print only the two `WantedBy=default.target` lines — any
+`User=` line or leftover `${...}` means a substitution missed. Without
+`loginctl enable-linger`, your user services stop when you log out and
+don't start at boot. Verify: `systemctl --user is-active patchbay
+voice-webclient` prints `active` twice; logs are in `journalctl --user -u
+patchbay`.
+
+The rest of this repo's docs say `sudo systemctl ...`; with user units,
+read that as `systemctl --user ...`.
+
+### Wake word
+
+Hands-free "hey jarvis" activation instead of push-to-talk. Install the
+detector into the venv, then restart the pipeline:
+
+```bash
+~/speech-to-speech-main/.venv/bin/pip install openwakeword onnxruntime
+```
+
+openWakeWord's code is Apache-2.0, but its **pre-trained models, including
+`hey_jarvis`, are CC BY-NC-SA 4.0 — non-commercial use only**. With
+openwakeword ≥ 0.5 the models are not in the wheel; `patches/README.md`
+(`wakeword_gate.py`) has the one-time download command.
+
+Turn it on from the settings panel's "Wake word" checkbox, or set
+`VOICE_WAKE_WORD=1` in the unit's `Environment=` (or export it before a
+foreground run) to start with it on. Verify: after the restart, the
+checkbox is enabled. Without openwakeword installed the checkbox stays
+greyed out and the panel shows why:
+
+```
+openwakeword is not installed in the pipeline's venv (pip install openwakeword onnxruntime, then restart the pipeline)
+```
+
+— and `VOICE_WAKE_WORD=1` is ignored with a `VOICE_WAKE_WORD=1 ignored, wake
+word stays off: ...` warning in the pipeline log.
+
+### Phone context
+
+Location/timezone/battery ambient info: opt-in per browser via the settings
+panel's "Phone context" toggle — no server config needed. Verify: after
+enabling it, `config_get` over the WebSocket control channel reports a
+non-null `phone_context` block.
+
+### Custom voice cloning
+
+Accept the terms at <https://huggingface.co/kyutai/pocket-tts>, then `hf
+auth login` as the service user, then restart the pipeline. Verify: the
+settings panel's "Advanced - custom voice" section stops showing a
+terms-gate error and lets you record/upload a sample. Clone only voices you
+have the right to (README *Custom voices*).
+
+### Remote access over HTTPS
+
+Mic access from a non-localhost device: see `patches/README.md` "Remote
+access / HTTPS" — it is a full runbook of its own (certificate,
+`VOICE_WS_CERTFILE`/`VOICE_WS_KEYFILE`, matching client port). Both
+processes must also be bound beyond loopback (step 4). Verify per that doc's
+own steps.
+
+### Optional integrations
+
+`HERMES_*`, `QMD_*`, `GENESIS_*`, `FAULKNER_*` env vars: every one of these
+is probed once at pipeline startup and dropped if nothing answers — the core
+voice agent (LLM brain + STT + TTS) works with none of them set. Only set
+these if you're running the corresponding service; see `README.md`'s
+*Optional integrations* table for what each does. The systemd unit template
+from this step already sets `BRAINS_JSON` for you, so you don't need to add
+it yourself.
 
 **Agent lane** (background-agent delegation, `HERMES_*` above): this is a
 plain, documented contract — an OpenAI-compatible chat-completions endpoint

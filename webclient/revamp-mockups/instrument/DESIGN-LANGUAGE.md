@@ -1,6 +1,6 @@
 # Analog Studio Instrument - Design Language
 
-Reference direction for the eventual real-client port. Owner-approved on `main/index.html`
+Reference direction for the eventual real-client port. Chosen on `main/index.html`
 (2026-08-13). This document is the durable artifact; the mockups are throwaway HTML.
 
 ## Tokens
