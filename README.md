@@ -239,12 +239,16 @@ var at all — to any value, including just `-` — fully overrides this default
 and keeps the exact allowlist semantics described above.
 
 **DNS rebinding is stopped by a separate Host-header check** — in both
-processes (the pipeline's socket and `serve.py`) and in *every*
-configuration, including with `VOICE_WS_ORIGINS` set. Origin checks cannot
-see that attack (a rebinding page sends a matching Origin *and* Host, both
+processes (the pipeline's socket and `serve.py`), including with
+`VOICE_WS_ORIGINS` set. The check blocks rebinding through hostnames you
+have *not* allowed: any name you name in `VOICE_WS_ORIGINS` or
+`VOICE_ALLOWED_HOSTS` is trusted, and `VOICE_ALLOWED_HOSTS=*` turns the
+check off.
+Origin checks cannot see that attack (a rebinding page sends a matching Origin *and* Host, both
 naming the attacker), so the one reliable signal is checked: a request whose
 Host is not on the allowlist gets `403 host not allowed`, logged once per
-distinct name. Without any configuration the allowlist accepts: IP
+distinct `Host` header value. Without any configuration the allowlist
+accepts: IP
 addresses, `localhost` (and `*.localhost`), this machine's own names — its
 hostname, FQDN, `<hostname>.local`, and its Tailscale MagicDNS name when
 Tailscale is installed — and every hostname named in `VOICE_WS_ORIGINS`. A
@@ -381,7 +385,7 @@ the behaviour described.
 | `VOICE_CAMERA_FRAME` | `/dev/shm/voice_camera_frame.jpg` | where a client-pushed camera frame is written for the vision tool to read |
 | `VOICE_SCREEN_FRAME` | `/dev/shm/voice_screen_frame.jpg` | same, for a shared screen frame |
 | `VOICE_WS_ORIGINS` | *(unset — no-Origin clients + same-Host origins only)* | comma-separated allowlist of page origins permitted to open the WebSocket, fully overriding the default. The entry `-` also admits clients that send no `Origin` header (scripts, health probes). See *Who can connect* above — this is the control for cross-site WebSocket hijacking, which a VPN cannot stop |
-| `VOICE_ALLOWED_HOSTS` | *(unset — IP addresses, `localhost`, this machine's own names incl. its Tailscale name, and `VOICE_WS_ORIGINS` hostnames are allowed)* | comma-separated list of extra hostnames accepted in the `Host` header of both the pipeline's WebSocket and the cockpit's HTTP server — the DNS-rebinding guard, which runs in every configuration. The single value `*` disables the check entirely (any Host accepted). See *Who can connect* above |
+| `VOICE_ALLOWED_HOSTS` | *(unset — IP addresses, `localhost`, this machine's own names incl. its Tailscale name, and `VOICE_WS_ORIGINS` hostnames are allowed)* | comma-separated list of extra hostnames accepted in the `Host` header of both the pipeline's WebSocket and the cockpit's HTTP server — the DNS-rebinding guard. Hostnames named in `VOICE_WS_ORIGINS` or listed here are trusted; the single value `*` turns the check off entirely (any Host accepted). See *Who can connect* above |
 | `VOICE_SYSTEM_RULES` | *(built-in text)* | overrides the pipeline-level system instruction appended to every request for every brain. It is a pipeline invariant, not a persona — it exists because some models collapse answer length as history grows. `off` disables |
 | `VOICE_AFFECT` | *(unset — off)* | per-turn delivery conditioning. The brain prefixes each reply with a short note — `[affect: what this moment is - how it should sound]` — which is stripped before the text is spoken or shown, and sent to the TTS server as that one request's `instructions` field. `on` enables the note; `words` additionally asks the brain to write the reply in the register its own note names. Needs a TTS backend that accepts `instructions` (a `remote-speech` server that does not declare `accepts_instructions: false`); an operator-set speech style always takes precedence over it. Off by default and byte-identical to absent when off. Measured effect is delivery — pacing and register — not laughter or other paralinguistic events |
 | `VOICE_PERSONA_FILE` | `~/speech-to-speech/persona.json` | where personas set from the panel are stored (config sidecar, survives a framework reinstall) |

@@ -15,13 +15,20 @@ One WebSocket carries **both** binary and text frames. Default `ws://HOST:8765`.
 - **Text frames** are JSON objects with a `type` discriminator. The field is `type`, not
   `event_type`.
 
-There is **no authentication and no handshake**. The socket is live the moment it opens; the
-network is the entire perimeter. Do not expose this port outside a trusted network.
+There is **no application-level login and no post-open handshake**. The socket is live the
+moment it opens; the network is the entire perimeter. Do not expose this port outside a trusted
+network.
+
+The WebSocket **upgrade itself can be refused with HTTP 403** before the socket opens: a `Host`
+header that is not allowed gets body `host not allowed`, an `Origin` header that is not allowed
+gets body `origin not allowed`. Check both when a client cannot connect.
 
 Origin-based restriction (`VOICE_WS_ORIGINS`) exists but is a browser defence — it keys off the
 `Origin` header. A native client sends none, and is covered by the `-` allowlist entry. If an
 operator has set `VOICE_WS_ORIGINS` without including `-`, native clients are rejected — this is
-the first thing to check when a non-browser client cannot connect but the browser can.
+the first thing to check when a non-browser client cannot connect but the browser can. The Host
+allowlist (the DNS-rebinding guard; see README *Who can connect*) is separate and applies to
+every request.
 
 ## Turn-taking belongs to the server
 
