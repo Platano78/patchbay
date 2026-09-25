@@ -5561,9 +5561,30 @@ class DeckServer:
             self._httpd.shutdown()
 
     def push(self, entity):
-        """Broadcast one SSE state event to every open /ha/stream connection."""
-        with self._sub_lock:
-            subs = list(self._subscribers)
+        """Broadcast one SSE state event to every open /ha/stream connection.
+
+        The entity tile renders from the initial /ha/states fetch, so a test
+        can call push() before the page's /ha/stream EventSource has
+        subscribed; delivering then would silently drop the event and leave
+        the test waiting for a DOM change that can never arrive. Wait (up to
+        5 s, polling every 20 ms) for at least one subscriber, then fail
+        loudly so a real regression is visible instead of a timeout.
+        """
+        import time
+
+        deadline = time.monotonic() + 5.0
+        subs = []
+        while True:
+            with self._sub_lock:
+                subs = list(self._subscribers)
+            if subs or time.monotonic() >= deadline:
+                break
+            time.sleep(0.02)
+        if not subs:
+            raise AssertionError(
+                "DeckServer.push: no /ha/stream subscriber connected within "
+                "5s — the page never opened its EventSource"
+            )
         for q in subs:
             q.put(entity)
 
