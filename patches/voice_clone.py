@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Any, Callable, Iterable, Optional
 
@@ -43,11 +44,16 @@ DEFAULT_AUDITION_TEXT = "Hi, I'm {name}. This is how I sound."
 MAX_DECODED_SECONDS = 120
 
 # Ruling 7, verbatim.
+# The hint names the `hf` binary next to the running interpreter: the pipeline
+# lives in the framework venv, and a bare `hf` on PATH may be another install
+# or absent. Same reasoning as the soundfile hint in normalize_to_wav().
+HF_BIN = os.path.join(os.path.dirname(sys.executable), "hf")
+
 CLONING_UNAVAILABLE_MSG = (
     "This install can't build new voices yet: accept the terms at "
-    "https://huggingface.co/kyutai/pocket-tts, run `hf auth login` as the "
+    "https://huggingface.co/kyutai/pocket-tts, run `{hf} auth login` as the "
     "service user, then restart the service."
-)
+).format(hf=HF_BIN)
 
 # Distinct from CLONING_UNAVAILABLE_MSG above: that one means "pocket is the
 # backend but hasn't been set up for cloning yet" (an operator fix). This one
@@ -219,7 +225,13 @@ def normalize_to_wav(raw: bytes, ext: str) -> bytes:
     try:
         import soundfile as sf
     except ImportError as e:
-        raise VoiceCloneError("voice cloning uploads require soundfile: pip install soundfile") from e
+        # Name the running interpreter: a bare `pip` would hit the system
+        # Python, which the pipeline does not use (and is refused outright
+        # on PEP 668 distros).
+        raise VoiceCloneError(
+            f"voice cloning uploads require soundfile: "
+            f"{sys.executable} -m pip install soundfile"
+        ) from e
 
     import io
     import tempfile

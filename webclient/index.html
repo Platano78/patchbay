@@ -3767,6 +3767,30 @@ function endProcessingStatus() {
   if (els.statusText.classList.contains("shimmer")) setStatus("connected", "connected");
 }
 
+// Silent push-to-talk: the server's VAD only ends a turn when it hears
+// something, so holding TALK and saying nothing sends no frames back at all —
+// "processing…" and the THINK lamp would stick forever. This watchdog is the
+// last resort; every real sign of life (a partial, a transcript, an answer,
+// assistant audio, a failure, a new hold, or the socket closing) cancels it.
+// It never touches the network, and it is NOT stallWatchdog (which covers the
+// LLM gap AFTER a transcript).
+const NOTHING_HEARD_MS = 10000;
+let nothingHeardTimer = null;
+function armNothingHeardWatchdog() {
+  cancelNothingHeardWatchdog(); // one pending watchdog, never two
+  // Same test-override shape as window.__vaConnectTimeoutMs (ws connect).
+  const ms = (Number.isFinite(window.__vaNothingHeardMs) && window.__vaNothingHeardMs > 0)
+    ? window.__vaNothingHeardMs : NOTHING_HEARD_MS;
+  nothingHeardTimer = setTimeout(() => {
+    nothingHeardTimer = null;
+    endProcessingStatus();
+    log("nothing heard");
+  }, ms);
+}
+function cancelNothingHeardWatchdog() {
+  if (nothingHeardTimer !== null) { clearTimeout(nothingHeardTimer); nothingHeardTimer = null; }
+}
+
 function setStatus(state, text) {
   els.dot.className = state;          // "", connecting, connected, error
   els.statusText.textContent = text;
@@ -6219,6 +6243,7 @@ function connect() {
     }
     releaseWakeLock();
     stallWatchdog.disarm();
+    cancelNothingHeardWatchdog(); // socket gone: never reset a future turn's status from a dead one
     // Stop any live open-mic streaming and reset the mode flag itself (not just the
     // graph) so the next config_state after reconnect sees a real off→on transition
     // and re-arms cleanly, instead of no-op'ing against a stale "already on" flag.
@@ -6233,6 +6258,7 @@ function connect() {
     } else {
       // ArrayBuffer (binaryType='arraybuffer'). Int16 16k mono PCM.
       stallWatchdog.disarm(); // real assistant audio has arrived — stop filling the gap
+      cancelNothingHeardWatchdog(); // audio arriving proves the server heard the turn
       enqueuePlayback(ev.data);
     }
   };
@@ -6451,6 +6477,7 @@ function handleEvent(text) {
   // NOTE: server discriminator field is `type` (not `event_type`).
   switch (ev.type) {
     case "transcription_completed":
+      cancelNothingHeardWatchdog(); // the server heard (or definitively didn't) — it owns the ending now
       els.transcript.textContent = ev.transcript || "—";
       if (pendingHistoryEntry) {
         // Barge-in: a new turn started before the previous one got its reply — don't lose it.
@@ -6463,6 +6490,7 @@ function handleEvent(text) {
       break;
     case "assistant_text": {
       stallWatchdog.disarm();
+      cancelNothingHeardWatchdog();
       const text = ev.text || "";
       els.assistant.textContent = text || "—";
       applyMoodFromTools(ev.tools);
@@ -6482,6 +6510,7 @@ function handleEvent(text) {
       // The brain couldn't answer: this replaces the assistant_text that would
       // otherwise end the turn.
       stallWatchdog.disarm();
+      cancelNothingHeardWatchdog();
       log("response failed" + (ev.message ? ": " + ev.message : ""));
       endProcessingStatus();
       break;
@@ -6503,6 +6532,7 @@ function handleEvent(text) {
       }
       break;
     case "partial_transcription":
+      cancelNothingHeardWatchdog(); // a partial means the server heard something
       // live partials: show in transcript as it grows
       if (ev.delta) els.transcript.textContent = (els.transcript.textContent === "—" ? "" : els.transcript.textContent) + ev.delta;
       break;
@@ -7034,6 +7064,7 @@ async function startCapture(isOpenMic) {
   if (capturing) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) { log("not connected"); return; }
   capturing = true;
+  cancelNothingHeardWatchdog(); // a new recording supersedes any pending silent turn
 
   if (!isOpenMic) {
     // barge-in: kill any assistant audio the moment the user starts talking
@@ -7141,6 +7172,7 @@ async function stopCapture() {
   // flush and no turn to end — just make sure the device is released.
   if (!capturing) { teardownMic(); return; }
   setStatus("connected", "processing…");
+  armNothingHeardWatchdog(); // a silent hold produces no server frames at all — end the state ourselves
 
   // Send ~1s of int16 zeros to trip the server-side Silero VAD end-of-turn.
   // Server rebuffers into 512-sample chunks, so our frame size is irrelevant —

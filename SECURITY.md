@@ -19,7 +19,7 @@ what that means in practice.
 
 | Port | Process | What it is | Bound to |
 |---|---|---|---|
-| 8765 | pipeline | the WebSocket: audio in and out, transcripts, and every control message | `--ws_host`. SETUP.md's first run passes `127.0.0.1`; the systemd template passes `0.0.0.0`; if you omit the flag, the upstream framework's default is `0.0.0.0` |
+| 8765 | pipeline | the WebSocket: audio in and out, transcripts, and every control message | `--ws_host`. SETUP.md's first run passes `127.0.0.1`; the systemd template passes `0.0.0.0`; if you omit the flag, the patched default is `127.0.0.1` — `0.0.0.0` only when you pass it explicitly |
 | 8443 | pipeline | optional TLS copy of the same WebSocket, only when `VOICE_WS_CERTFILE` and `VOICE_WS_KEYFILE` are both set (`VOICE_WSS_PORT` moves it) | same host as 8765 |
 | 8770 | `webclient/serve.py` | HTTP (or HTTPS with `--certfile`/`--keyfile`): the cockpit's files, `/models` + `/v1/models` (reports whether 8765 is listening), and `/ha/states`, `/ha/stream`, `/ha/intent` only when `HA_URL` and `HA_TOKEN` are set | `--host`, default `127.0.0.1`; the systemd template passes `0.0.0.0` |
 
@@ -42,8 +42,19 @@ sends no `Origin` at all; the default admits it, as does any allowlist that
 includes `-`. It is not a login.
 
 The same-host rule compares the `Origin`'s hostname with the `Host` header's
-hostname. It does **not** stop DNS rebinding: a hostile hostname that
-resolves to your machine produces a page whose `Origin` and `Host` match.
+hostname — which alone could not stop DNS rebinding (a hostile hostname that
+resolves to your machine produces a page whose `Origin` and `Host` match).
+That case is covered by a separate **Host-header allowlist**, enforced on
+both the pipeline's WebSocket and `serve.py`, in every configuration
+including `VOICE_WS_ORIGINS` set: a rebinding request always carries the
+attacker's hostname, so any Host that is not an IP literal, `localhost`
+(or `*.localhost`), one of this machine's own names — hostname, FQDN,
+`<hostname>.local`, and its Tailscale MagicDNS name when installed — a
+hostname named in `VOICE_WS_ORIGINS`, or an entry of `VOICE_ALLOWED_HOSTS`,
+is answered with `403`. Its remaining limit: a hostname you allow yourself
+(`VOICE_ALLOWED_HOSTS`, or one named in `VOICE_WS_ORIGINS`) is trusted as
+fully as a same-machine page can be, and `VOICE_ALLOWED_HOSTS=*` disables
+the check altogether.
 
 ### The Home Assistant deck
 
@@ -52,9 +63,10 @@ With `HA_URL` and `HA_TOKEN` set, `serve.py` forwards write requests from
 that includes `lock.unlock`. The token stays inside `serve.py`. A write must
 be a `Content-Type: application/json` POST (else `415`), and if it carries an
 `Origin`, that Origin's hostname must match the `Host` header (else `403`).
-That blocks a cross-site form or `text/plain` POST from a page you visit. It
-does not stop DNS rebinding (above), and it does not stop anything that can
-reach port 8770 directly — `curl` sends no `Origin`. With Home Assistant
+That blocks a cross-site form or `text/plain` POST from a page you visit,
+and the Host allowlist (above) now stops a rebinding page from reaching this
+route at all. It does not stop anything that can reach port 8770 directly —
+`curl` sends no `Origin`. With Home Assistant
 configured, keep `serve.py` on `127.0.0.1`, or put real authentication in
 front of it.
 

@@ -29,6 +29,11 @@ try:
 except Exception:
     ha_deck = None
 
+# DNS-rebinding guard, unlike ha_deck a hard dependency: stdlib-only and
+# shipped beside this file, so there is no degradation path worth keeping --
+# if it can't import, something is broken and the server should say so.
+import host_guard
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 VOICE_AGENT_PORT = 8765
 TCP_LISTEN_STATE = "0A"
@@ -40,7 +45,31 @@ class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=HERE, **kwargs)
 
+    _rejected_hosts: set = set()  # distinct Host values already logged (class-level: once per process)
+
+    def _reject_host(self):
+        """DNS rebinding: a page whose hostile name now resolves to this box
+        sends Origin/Host = the attacker's name, which no same-origin check
+        can see. The Host header is the one reliable signal -- reject anything
+        that is not an IP literal, localhost, this machine's own names, or a
+        name the operator allowed. Returns True when the request was answered
+        with 403 and must not be routed further."""
+        host = self.headers.get("Host")
+        if host_guard.host_allowed(host):
+            return False
+        if host not in Handler._rejected_hosts:
+            Handler._rejected_hosts.add(host)
+            print(
+                f"HTTP request rejected: Host '{host}' is not this machine. "
+                "Set VOICE_ALLOWED_HOSTS to allow it (see README).",
+                flush=True,
+            )
+        self.send_error(403, "host not allowed")
+        return True
+
     def do_GET(self):
+        if self._reject_host():
+            return
         path = urlsplit(self.path).path
         if path in MODEL_PATHS:
             self._serve_models()
@@ -58,12 +87,16 @@ class Handler(SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_HEAD(self):
+        if self._reject_host():
+            return
         if urlsplit(self.path).path in MODEL_PATHS:
             self._serve_models(head=True)
             return
         super().do_HEAD()
 
     def do_POST(self):
+        if self._reject_host():
+            return
         path = urlsplit(self.path).path
         if ha_deck is not None and ha_deck.enabled() and path == "/ha/intent":
             ha_deck.handle_intent(self)

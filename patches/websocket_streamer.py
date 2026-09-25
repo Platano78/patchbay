@@ -1,13 +1,17 @@
 import asyncio
 import base64
+import ipaddress
 import json
 import logging
 import os
+import socket
 import ssl
+import subprocess
 import time
 from queue import Empty, Queue
 from threading import Event
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 import numpy as np
 from websockets.asyncio.server import ServerConnection
@@ -127,6 +131,140 @@ def _parse_ws_origins(raw: str | None) -> list | None:
     return origins or None
 
 
+# ── Host-header allowlist (DNS rebinding) ───────────────────────────────────
+#
+# A page at http://evil.example:8770 whose DNS answer flips to 127.0.0.1 (or
+# this box's LAN IP) makes the browser treat the cockpit as SAME-ORIGIN with
+# evil.example. Origin checks cannot stop it -- Origin and Host both say
+# evil.example, so the same-host rule above passes. The only reliable signal
+# is the Host header: a rebinding request always carries the ATTACKER's
+# hostname. `webclient/host_guard.py` is the cockpit-side twin of everything
+# below; a new patches/*.py module is not an option here (apply.sh copies a
+# fixed file list), so this is a deliberate copy -- keep the two identical in
+# logic. Env reads happen at CHECK time (every call); the own-names set is
+# cached once per process because its Tailscale probe spawns a subprocess.
+
+_own_names: set | None = None
+
+
+def _hostname_from_host(host_header: str | None) -> str | None:
+    """Lowercase, dot-stripped hostname of a Host header value ("box:8770"
+    -> "box", "[::1]:8770" -> "::1"); None when there is nothing to parse."""
+    if host_header is None:
+        return None
+    try:
+        name = urlsplit(f"//{host_header.strip()}").hostname
+    except ValueError:
+        return None
+    # urlsplit lowercases but keeps a domain's trailing dot (only IP-shaped
+    # hosts get it stripped) -- drop the one FQDN-form trailing dot here.
+    if name and name.endswith("."):
+        return name[:-1]
+    return name
+
+
+def _tailscale_dns_name() -> str | None:
+    """This machine's Tailscale MagicDNS name, or None. Any failure (not
+    installed, tailscaled not running, timeout, bad JSON) returns None -- the
+    probe is best-effort and must never break a handshake."""
+    try:
+        proc = subprocess.run(
+            ["tailscale", "status", "--json"],
+            capture_output=True,
+            timeout=2,
+            text=True,
+            check=True,
+        )
+        dns_name = json.loads(proc.stdout)["Self"]["DNSName"]
+    except Exception:
+        return None
+    return str(dns_name).strip().rstrip(".").lower() or None
+
+
+def _machine_own_names() -> set:
+    """The machine's own names: bare hostname, FQDN, <hostname>.local, plus
+    the Tailscale MagicDNS name when Tailscale answers. Lowercase."""
+    names = set()
+    try:
+        host = socket.gethostname().strip().rstrip(".").lower()
+    except Exception:
+        host = ""
+    if host:
+        names.add(host)
+        names.add(f"{host}.local")
+    try:
+        fqdn = socket.getfqdn().strip().rstrip(".").lower()
+    except Exception:
+        fqdn = ""
+    if fqdn:
+        names.add(fqdn)
+    ts = _tailscale_dns_name()
+    if ts:
+        names.add(ts)
+    return names
+
+
+def _own_names_cached() -> set:
+    global _own_names
+    if _own_names is None:
+        _own_names = _machine_own_names()
+    return _own_names
+
+
+def host_allowed(host_header: str | None) -> bool:
+    """Is a request's Host header acceptable? Rules, in order:
+
+    1. No Host header (or a blank one) -> allowed (HTTP/1.0 / native
+       clients; rebinding needs a browser, and a browser always sends Host).
+    2. Hostname is an IP literal -> allowed (rebinding needs a hostname).
+    3. ``localhost`` or ``*.localhost`` -> allowed.
+    4. One of this machine's own names (hostname, FQDN, .local, Tailscale).
+    5. A hostname named in VOICE_WS_ORIGINS (a cockpit reached under a name
+       the operator already allowlisted keeps working).
+    6. An entry of VOICE_ALLOWED_HOSTS; the single value ``*`` disables the
+       check entirely.
+
+    Everything else -> rejected. A present-but-unparseable Host header fails
+    closed, same rule as `_origin_allowed_same_host`.
+    """
+    if host_header is None or not host_header.strip():
+        return True  # rule 1: header absent or blank
+    hostname = _hostname_from_host(host_header)
+    if not hostname:
+        return False  # present but unparseable (or parses to no hostname)
+
+    raw = (os.environ.get("VOICE_ALLOWED_HOSTS") or "").strip()
+    if raw == "*":
+        return True
+    if hostname in {e.strip().lower().rstrip(".") for e in raw.split(",") if e.strip()}:
+        return True
+
+    try:
+        ipaddress.ip_address(hostname)
+        return True  # rule 2
+    except ValueError:
+        pass
+
+    if hostname == "localhost" or hostname.endswith(".localhost"):
+        return True  # rule 3
+
+    if hostname in _own_names_cached():
+        return True  # rule 4
+
+    for entry in (os.environ.get("VOICE_WS_ORIGINS") or "").split(","):
+        entry = entry.strip()
+        if not entry or entry == "-":
+            continue
+        try:
+            origin_host = urlsplit(entry).hostname
+        except ValueError:
+            continue
+        if origin_host and origin_host.rstrip(".") == hostname:
+            return True  # rule 5
+
+    return False
+
+
 class WebSocketStreamer:
     """
     Handles bidirectional audio streaming over WebSocket.
@@ -161,6 +299,9 @@ class WebSocketStreamer:
         self.tls_server: Any = None
         self._last_cam_write = 0.0
         self._last_screen_write = 0.0
+        # Distinct Host header values already logged as rejected, so a
+        # rebinding page retrying can't spam the log (one line per name).
+        self._logged_rejected_hosts: set = set()
         self.wakeword_gate = WakewordGate()
         # Echo gate: scores incoming mic audio against the TTS we just sent so
         # barge-in can work. Default OFF -- with VOICE_ECHO_GATE unset this is
@@ -206,12 +347,13 @@ class WebSocketStreamer:
             logger.info("WebSocket Origin allowlist: %s", origins)
 
         # kwargs, not positional: `origins=None` and omitting the kwarg both
-        # mean "no `websockets`-side restriction" (the same-host check below
-        # runs instead via `process_request` when the env var is unset), but
-        # once the env var IS set its allowlist semantics must be untouched.
+        # mean "no `websockets`-side restriction", but once the env var IS set
+        # its allowlist semantics must be untouched. `process_request` is now
+        # ALWAYS installed: the Host allowlist (DNS rebinding) applies in
+        # every configuration, and the same-host Origin check it also runs
+        # switches itself off when `VOICE_WS_ORIGINS` provides the allowlist.
         serve_kwargs: dict[str, Any] = {} if origins is None else {"origins": origins}
-        if origins_raw is None:
-            serve_kwargs["process_request"] = self._check_same_host_origin
+        serve_kwargs["process_request"] = self._check_same_host_origin
 
         self.server = await websockets.serve(
             self._handle_client,
@@ -270,23 +412,36 @@ class WebSocketStreamer:
         logger.info("WebSocket server closed")
 
     async def _check_same_host_origin(self, connection: ServerConnection, request: Any) -> Any:
-        """`process_request` hook: applied only when `VOICE_WS_ORIGINS` is
-        unset (the `websockets`-native `origins=` allowlist handles the
-        explicit-override case and can't express a Host-relative check
-        itself). Rejects the handshake with 403 unless
-        `_origin_allowed_same_host` accepts it; logs the rejection once, here,
+        """`process_request` hook, always installed. First the Host-header
+        allowlist: a rebinding request carries the ATTACKER's hostname and
+        would sail through any Origin rule, so it is rejected (403) here in
+        EVERY configuration, including `VOICE_WS_ORIGINS` set -- that var
+        allowlists page Origins, it is not a statement that rebinding is
+        welcome. Then, only when `VOICE_WS_ORIGINS` is unset (the
+        `websockets`-native `origins=` allowlist owns the override case and
+        can't express a Host-relative check itself), the unchanged same-host
+        Origin check. Each rejection is logged once per distinct value, here,
         rather than per message."""
         origin = request.headers.get("Origin")
         host_header = request.headers.get("Host")
-        if _origin_allowed_same_host(origin, host_header):
-            return None
-        logger.warning(
-            "WebSocket connection rejected: Origin %r doesn't match Host %r. "
-            "Set VOICE_WS_ORIGINS to allow it explicitly (see README).",
-            origin,
-            host_header,
-        )
-        return connection.respond(403, "origin not allowed\n")
+        if not host_allowed(host_header):
+            if host_header not in self._logged_rejected_hosts:
+                self._logged_rejected_hosts.add(host_header)
+                logger.warning(
+                    "WebSocket connection rejected: Host '%s' is not this machine. "
+                    "Set VOICE_ALLOWED_HOSTS to allow it (see README).",
+                    host_header,
+                )
+            return connection.respond(403, "host not allowed\n")
+        if os.environ.get("VOICE_WS_ORIGINS") is None and not _origin_allowed_same_host(origin, host_header):
+            logger.warning(
+                "WebSocket connection rejected: Origin %r doesn't match Host %r. "
+                "Set VOICE_WS_ORIGINS to allow it explicitly (see README).",
+                origin,
+                host_header,
+            )
+            return connection.respond(403, "origin not allowed\n")
+        return None
 
     async def _handle_client(self, websocket: ServerConnection) -> None:
         """Handle a single WebSocket client connection."""

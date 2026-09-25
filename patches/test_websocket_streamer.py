@@ -101,7 +101,17 @@ def _install_stubs():
 _install_stubs()
 
 import patches.websocket_streamer as websocket_streamer  # noqa: E402
-from patches.websocket_streamer import WebSocketStreamer, _origin_allowed_same_host, _parse_ws_origins  # noqa: E402
+from patches.websocket_streamer import (  # noqa: E402
+    WebSocketStreamer,
+    _origin_allowed_same_host,
+    _parse_ws_origins,
+)
+
+# `host_allowed` is deliberately NOT imported here: the hook tests below
+# must also import and RUN against the original (pre-allowlist) streamer,
+# so the "evil Host is rejected with 403" expectation fails by ASSERTION
+# there -- a behavioural RED, not an ImportError. Tests that call
+# `host_allowed` directly import it inside the test body.
 
 
 def _make_streamer(control_callback=None):
@@ -536,6 +546,195 @@ def test_same_host_malformed_origin_is_rejected():
     assert _origin_allowed_same_host("http://[::1", "box:8765") is False
 
 
+# ── Host-header allowlist (DNS rebinding) ─────────────────────────────────
+#
+# A page at http://evil.example:8770 whose DNS flips to 127.0.0.1 sends an
+# Origin AND a Host that both say evil.example -- the same-host rule above
+# passes it. Only the Host header betrays it, so `host_allowed` rejects any
+# Host that is not an IP literal, localhost, one of this machine's own names
+# (incl. its Tailscale name), a VOICE_WS_ORIGINS hostname, or a
+# VOICE_ALLOWED_HOSTS entry; `*` disables. This is the pipeline-side twin of
+# `webclient/host_guard.py`; the webclient tests pin every rule in detail,
+# these pin the same rules for THIS copy plus the hook wiring.
+
+
+def _pin_host_env(monkeypatch, own=None):
+    """Hermetic: pin the own-names set and clear both env vars, so the box
+    running pytest cannot sway a verdict. `raising=False` so this also
+    works against a streamer without the allowlist internals (the hook
+    tests must run, not error, on the pre-allowlist code)."""
+    monkeypatch.setattr(websocket_streamer, "_own_names", None, raising=False)
+    monkeypatch.setattr(
+        websocket_streamer,
+        "_machine_own_names",
+        lambda: set(own) if own is not None else {"box", "box.local", "box.example.com"},
+        raising=False,
+    )
+    monkeypatch.delenv("VOICE_ALLOWED_HOSTS", raising=False)
+    monkeypatch.delenv("VOICE_WS_ORIGINS", raising=False)
+
+
+def test_host_no_host_header_is_allowed(monkeypatch):
+    """Native clients (HTTP/1.0, scripts, websocat) send no Host; rebinding
+    needs a browser, which always sends one."""
+    from patches.websocket_streamer import host_allowed
+
+    _pin_host_env(monkeypatch)
+    assert host_allowed(None) is True
+    assert host_allowed("") is True
+    assert host_allowed("   ") is True  # blank counts as absent
+
+
+def test_host_ip_literals_are_allowed(monkeypatch):
+    from patches.websocket_streamer import host_allowed
+
+    _pin_host_env(monkeypatch)
+    assert host_allowed("127.0.0.1:8765") is True
+    assert host_allowed("[::1]:8770") is True
+
+
+def test_host_localhost_and_own_names_are_allowed(monkeypatch):
+    from patches.websocket_streamer import host_allowed
+
+    _pin_host_env(monkeypatch)
+    assert host_allowed("LOCALHOST:8765") is True
+    assert host_allowed("box.local.") is True  # trailing dot stripped
+    assert host_allowed("box:8765") is True
+
+
+def test_host_evil_hostname_is_rejected(monkeypatch):
+    from patches.websocket_streamer import host_allowed
+
+    _pin_host_env(monkeypatch)
+    assert host_allowed("evil.example:8765") is False
+
+
+def test_host_unparseable_header_fails_closed(monkeypatch):
+    """A present-but-unparseable Host is a browser-shaped request with a
+    broken hostname -- reject it (fail closed), unlike the absent case."""
+    from patches.websocket_streamer import host_allowed
+
+    _pin_host_env(monkeypatch)
+    assert host_allowed("[evil") is False
+    assert host_allowed("[::1") is False  # unterminated IPv6 literal
+    assert host_allowed("::1") is False  # bare IPv6 is not a legal HTTP Host; no hostname -> fail closed
+
+
+def test_host_allowed_hosts_entry_and_star(monkeypatch):
+    from patches.websocket_streamer import host_allowed
+
+    _pin_host_env(monkeypatch)
+    monkeypatch.setenv("VOICE_ALLOWED_HOSTS", "vpn.example")
+    assert host_allowed("vpn.example:8765") is True
+    assert host_allowed("evil.example:8765") is False
+    monkeypatch.setenv("VOICE_ALLOWED_HOSTS", "*")
+    assert host_allowed("evil.example:8765") is True
+
+
+def test_host_voice_ws_origins_hostnames_are_allowed(monkeypatch):
+    from patches.websocket_streamer import host_allowed
+
+    _pin_host_env(monkeypatch)
+    monkeypatch.setenv("VOICE_WS_ORIGINS", "https://cockpit.example:8443,-")
+    assert host_allowed("cockpit.example:8765") is True
+    assert host_allowed("other.example:8765") is False
+
+
+class _FakeRespondConnection:
+    """Just enough of `ServerConnection` for the hook: capture `respond`.
+    Synchronous like the real `ServerConnection.respond(status, message) ->
+    Response`, which `process_request` returns unawaited."""
+
+    def __init__(self):
+        self.responded = None
+
+    def respond(self, status, message):
+        self.responded = (status, message)
+        return f"responded {status}"
+
+
+def _fake_handshake_request(headers):
+    return types.SimpleNamespace(headers=headers)
+
+
+def test_hook_rejects_evil_host_when_origins_unset(monkeypatch, caplog):
+    _pin_host_env(monkeypatch)
+    streamer = _make_streamer()
+    conn = _FakeRespondConnection()
+    req = _fake_handshake_request({"Origin": "http://evil.example:8770", "Host": "evil.example:8765"})
+    with caplog.at_level("WARNING"):
+        asyncio.run(streamer._check_same_host_origin(conn, req))
+    assert conn.responded == (403, "host not allowed\n")
+    messages = [r.getMessage() for r in caplog.records if r.name == websocket_streamer.logger.name]
+    assert any("VOICE_ALLOWED_HOSTS" in m and "evil.example:8765" in m for m in messages)
+
+
+def test_hook_rejects_evil_host_even_when_origins_is_set(monkeypatch):
+    """A configured VOICE_WS_ORIGINS allowlist does not switch the Host
+    check off: with the attacker's name absent from it, a rebinding
+    handshake is still 403 'host not allowed'. (Origins that DO name a host
+    allow that host by rule 5 -- the operator said so; that case is
+    `test_host_voice_ws_origins_hostnames_are_allowed`.)"""
+    _pin_host_env(monkeypatch)
+    monkeypatch.setenv("VOICE_WS_ORIGINS", "https://good.example,-")
+    streamer = _make_streamer()
+    conn = _FakeRespondConnection()
+    req = _fake_handshake_request({"Origin": "http://evil.example:8770", "Host": "evil.example:8765"})
+    asyncio.run(streamer._check_same_host_origin(conn, req))
+    assert conn.responded == (403, "host not allowed\n")
+
+
+def test_hook_allows_ip_host_native_and_same_host_browser(monkeypatch):
+    _pin_host_env(monkeypatch)
+    streamer = _make_streamer()
+    conn = _FakeRespondConnection()
+    # native client: no Origin, IP Host
+    req = _fake_handshake_request({"Host": "127.0.0.1:8765"})
+    assert asyncio.run(streamer._check_same_host_origin(conn, req)) is None
+    # cockpit over the LAN IP: same-host Origin, IP Host
+    req = _fake_handshake_request({"Origin": "http://127.0.0.1:8770", "Host": "127.0.0.1:8765"})
+    assert asyncio.run(streamer._check_same_host_origin(conn, req)) is None
+    assert conn.responded is None
+
+
+def test_hook_allowed_hosts_entry_restores_a_named_host(monkeypatch):
+    """The documented escape hatch: allow the name, and the rebinding-shaped
+    (but honest) request goes through -- host check passes, and with
+    VOICE_WS_ORIGINS unset the Origin is same-host with the allowed Host."""
+    _pin_host_env(monkeypatch)
+    monkeypatch.setenv("VOICE_ALLOWED_HOSTS", "evil.example")
+    streamer = _make_streamer()
+    conn = _FakeRespondConnection()
+    req = _fake_handshake_request({"Origin": "http://evil.example:8770", "Host": "evil.example:8765"})
+    assert asyncio.run(streamer._check_same_host_origin(conn, req)) is None
+
+
+def test_hook_star_disables_host_check(monkeypatch):
+    _pin_host_env(monkeypatch)
+    monkeypatch.setenv("VOICE_ALLOWED_HOSTS", "*")
+    streamer = _make_streamer()
+    conn = _FakeRespondConnection()
+    req = _fake_handshake_request({"Host": "evil.example:8765"})  # no Origin -> native-shaped
+    assert asyncio.run(streamer._check_same_host_origin(conn, req)) is None
+
+
+def test_hook_logs_rejection_once_per_distinct_hostname(monkeypatch, caplog):
+    _pin_host_env(monkeypatch)
+    streamer = _make_streamer()
+    with caplog.at_level("WARNING"):
+        for host in ("evil.example:8765", "evil.example:8765", "worse.example:8765"):
+            conn = _FakeRespondConnection()
+            req = _fake_handshake_request({"Origin": None, "Host": host})
+            req.headers.pop("Origin")  # absent, like a real native/rebinding header set would be handled
+            asyncio.run(streamer._check_same_host_origin(conn, req))
+            assert conn.responded == (403, "host not allowed\n")
+    messages = [
+        r.getMessage() for r in caplog.records
+        if r.name == websocket_streamer.logger.name and "VOICE_ALLOWED_HOSTS" in r.getMessage()
+    ]
+    assert len(messages) == 2  # evil once, worse once -- not three
+
+
 def _fake_serve_capturing(calls):
     async def fake_serve(handler, host, port, **kwargs):
         calls.append(kwargs)
@@ -574,7 +773,11 @@ def test_run_server_installs_same_host_process_request_when_unset(monkeypatch):
     assert calls[0]["process_request"].__func__ is WebSocketStreamer._check_same_host_origin
 
 
-def test_run_server_leaves_process_request_unset_when_origins_configured(monkeypatch):
+def test_run_server_still_passes_origins_and_installs_process_request_when_configured(monkeypatch):
+    """VOICE_WS_ORIGINS set: its `origins=` allowlist semantics stay
+    untouched -- but `process_request` is now installed too, because the Host
+    allowlist (DNS rebinding) applies in every configuration; the hook runs
+    the same-host Origin check only when the env var is unset."""
     monkeypatch.setenv("VOICE_WS_ORIGINS", "https://box.example")
     monkeypatch.delenv("VOICE_WS_CERTFILE", raising=False)
     monkeypatch.delenv("VOICE_WS_KEYFILE", raising=False)
@@ -588,7 +791,7 @@ def test_run_server_leaves_process_request_unset_when_origins_configured(monkeyp
     asyncio.run(streamer._run_server())
 
     assert calls[0]["origins"] == ["https://box.example"]
-    assert "process_request" not in calls[0]
+    assert calls[0]["process_request"].__func__ is WebSocketStreamer._check_same_host_origin
 
 
 # ── max_size (ruling #17) ──────────────────────────────────────────────

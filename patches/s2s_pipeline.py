@@ -175,7 +175,21 @@ def parse_arguments() -> ParsedArguments:
 
     if _is_json:
         parsed = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]), allow_extra_keys=True)
+        # Loopback default: upstream's ws_host default is 0.0.0.0 (every interface) and
+        # set_defaults() on the CLI path below is unreachable from here, so patch the
+        # JSON path directly.
+        # The systemd template and README pass 0.0.0.0 explicitly for LAN access.
+        with open(sys.argv[1]) as _f:
+            _json_config = json.load(_f)
+        if "ws_host" not in _json_config:
+            for _obj in parsed:
+                if isinstance(_obj, WebSocketStreamerArguments):
+                    _obj.ws_host = "127.0.0.1"
     else:
+        # Loopback default: upstream's ws_host default is 0.0.0.0 (every interface);
+        # an explicit --ws_host still wins. The systemd template and README pass
+        # 0.0.0.0 explicitly for LAN access.
+        parser.set_defaults(ws_host="127.0.0.1")
         parsed = parser.parse_args_into_dataclasses()
 
     # Build a {type: instance} lookup so field assignment is order-independent.

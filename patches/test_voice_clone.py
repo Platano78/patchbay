@@ -13,6 +13,7 @@ this dev box).
 from __future__ import annotations
 
 import importlib.util
+import sys
 
 import pytest
 
@@ -365,8 +366,10 @@ def test_normalize_without_soundfile_raises_friendly_error(monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    with pytest.raises(VoiceCloneError, match="pip install soundfile"):
+    with pytest.raises(VoiceCloneError, match="pip install soundfile") as excinfo:
         normalize_to_wav(b"irrelevant", ".wav")
+    # the hint must name the running interpreter (framework venv), not bare pip
+    assert sys.executable in str(excinfo.value)
 
 
 # ── audition text (ruling 8) ─────────────────────────────────────────────

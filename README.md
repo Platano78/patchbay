@@ -197,11 +197,11 @@ transcript of every conversation, and it can rewrite the persona, switch the
 active brain, change the model, and reset the chat.
 
 The first run in [SETUP.md](SETUP.md) binds both processes to `127.0.0.1`
-(the pipeline via `--ws_host 127.0.0.1`, and `serve.py`, which defaults to
-it), so only this machine can connect. The systemd templates bind
-`0.0.0.0` — every interface, including your LAN — and so does any command
-you change to `--ws_host 0.0.0.0` / `--host 0.0.0.0` for LAN or phone
-access. Once you do, two things follow:
+(the pipeline's `--ws_host` default is patched to `127.0.0.1`, and
+`serve.py` already defaults to it), so only this machine can connect. The
+systemd templates bind `0.0.0.0` — every interface, including your LAN — and
+so does any command you change to `--ws_host 0.0.0.0` / `--host 0.0.0.0` for
+LAN or phone access. Once you do, two things follow:
 
 - **A VPN is not a boundary while you bind `0.0.0.0`.** Tailscale (or similar)
   adds a path; it does not remove the LAN one. Bind `127.0.0.1` or your
@@ -236,10 +236,20 @@ before v2.0.0, where unset meant no restriction at all — if your setup relies 
 page served from a genuinely different host opening this socket, set
 `VOICE_WS_ORIGINS` explicitly (above) to keep that working. Setting the env
 var at all — to any value, including just `-` — fully overrides this default
-and keeps the exact allowlist semantics described above. The same-host rule
-compares hostnames only, so it does not stop DNS rebinding (a hostile name
-that resolves to your box sends a matching Origin and Host) — see
-[SECURITY.md](SECURITY.md).
+and keeps the exact allowlist semantics described above.
+
+**DNS rebinding is stopped by a separate Host-header check** — in both
+processes (the pipeline's socket and `serve.py`) and in *every*
+configuration, including with `VOICE_WS_ORIGINS` set. Origin checks cannot
+see that attack (a rebinding page sends a matching Origin *and* Host, both
+naming the attacker), so the one reliable signal is checked: a request whose
+Host is not on the allowlist gets `403 host not allowed`, logged once per
+distinct name. Without any configuration the allowlist accepts: IP
+addresses, `localhost` (and `*.localhost`), this machine's own names — its
+hostname, FQDN, `<hostname>.local`, and its Tailscale MagicDNS name when
+Tailscale is installed — and every hostname named in `VOICE_WS_ORIGINS`. A
+different name you legitimately reach the box under goes in
+`VOICE_ALLOWED_HOSTS` (below). See [SECURITY.md](SECURITY.md).
 
 If you want genuinely separate conversations per device, don't look for a
 toggle — run a **second pipeline instance** on another port (`--ws_port 8766`
@@ -371,6 +381,7 @@ the behaviour described.
 | `VOICE_CAMERA_FRAME` | `/dev/shm/voice_camera_frame.jpg` | where a client-pushed camera frame is written for the vision tool to read |
 | `VOICE_SCREEN_FRAME` | `/dev/shm/voice_screen_frame.jpg` | same, for a shared screen frame |
 | `VOICE_WS_ORIGINS` | *(unset — no-Origin clients + same-Host origins only)* | comma-separated allowlist of page origins permitted to open the WebSocket, fully overriding the default. The entry `-` also admits clients that send no `Origin` header (scripts, health probes). See *Who can connect* above — this is the control for cross-site WebSocket hijacking, which a VPN cannot stop |
+| `VOICE_ALLOWED_HOSTS` | *(unset — IP addresses, `localhost`, this machine's own names incl. its Tailscale name, and `VOICE_WS_ORIGINS` hostnames are allowed)* | comma-separated list of extra hostnames accepted in the `Host` header of both the pipeline's WebSocket and the cockpit's HTTP server — the DNS-rebinding guard, which runs in every configuration. The single value `*` disables the check entirely (any Host accepted). See *Who can connect* above |
 | `VOICE_SYSTEM_RULES` | *(built-in text)* | overrides the pipeline-level system instruction appended to every request for every brain. It is a pipeline invariant, not a persona — it exists because some models collapse answer length as history grows. `off` disables |
 | `VOICE_AFFECT` | *(unset — off)* | per-turn delivery conditioning. The brain prefixes each reply with a short note — `[affect: what this moment is - how it should sound]` — which is stripped before the text is spoken or shown, and sent to the TTS server as that one request's `instructions` field. `on` enables the note; `words` additionally asks the brain to write the reply in the register its own note names. Needs a TTS backend that accepts `instructions` (a `remote-speech` server that does not declare `accepts_instructions: false`); an operator-set speech style always takes precedence over it. Off by default and byte-identical to absent when off. Measured effect is delivery — pacing and register — not laughter or other paralinguistic events |
 | `VOICE_PERSONA_FILE` | `~/speech-to-speech/persona.json` | where personas set from the panel are stored (config sidecar, survives a framework reinstall) |

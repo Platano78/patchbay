@@ -29,6 +29,9 @@ disagree, SETUP.md wins; tell the user about the mismatch.
 - **Never commit `brains.json`.** It is gitignored because it can name API key files.
 - **Before `./setup.sh`, tell the user what it downloads** — the size and licence table in
   SETUP step 0 (about 6 GB of disk in total; the speech models are CC-BY-4.0) — and get a yes.
+- **Ask before installing it as a service.** Running it in the foreground (step 4) and passing
+  the smoke check (step 5) finishes the setup. Installing systemd units makes it start at every
+  boot — offer that, say what it changes, and only do it if the user says yes.
 - Don't run the test suite unless the user asks, or you changed code.
 - Don't delete anything you didn't create. `setup.sh` refuses to reuse an existing
   `INSTALL_DIR`; if one is left over from a failed attempt *you* started, removing it is fine —
@@ -132,7 +135,10 @@ configuration. The pipeline has one shared session, so an open cockpit hears thi
 
 ## 6. Run it as a service
 
-SETUP step 6, *Run as systemd services*, has both variants with the exact commands:
+**Optional, and only on the user's request.** Section 3 has the rule — *Ask before installing
+it as a service*: a foreground run (step 4) plus the smoke check (step 5) is a finished setup.
+Do this section only after the user has said yes to auto-start. SETUP step 6,
+*Run as systemd services*, has both variants with the exact commands:
 
 - **System units** (`/etc/systemd/system/`, needs sudo — ask the user).
 - **User units** when there is no sudo: rendered into `~/.config/systemd/user/`, managed with
@@ -172,6 +178,7 @@ Each row starts with the exact text the software prints.
 | `openai.APIConnectionError: Connection error.` at the end of a traceback when the pipeline starts | the LLM endpoint is unreachable; the pipeline warms the model up at boot and exits | fix `--responses_api_base_url`; check with `curl -sf <base>/models` |
 | `BrainControl: no brains.json at <path> -- brain switching is off.` | a warning; the command-line brain still works | set `BRAINS_JSON` to the file's path |
 | `WebSocket connection rejected: Origin '<origin>' doesn't match Host '<host>'. Set VOICE_WS_ORIGINS to allow it explicitly (see README).` | a browser page from another host tried to open the socket | serve the page from the same host, or set `VOICE_WS_ORIGINS` (README *Who can connect*) |
+| `WebSocket connection rejected: Host '<host>' is not this machine. Set VOICE_ALLOWED_HOSTS to allow it (see README).` (the HTTP server logs the same sentence starting `HTTP request rejected:`) | the page addressed the box by a hostname that is not this machine's — the DNS-rebinding guard; expected and correct for a hostile name | only if the name is legitimately yours (private DNS, custom alias): add it to `VOICE_ALLOWED_HOSTS` (README *Who can connect*) |
 | Wake word toggle greyed out with `openwakeword is not installed in the pipeline's venv (pip install openwakeword onnxruntime, then restart the pipeline)` | no detector installed | install it only if the user wants wake word (the pre-trained models are non-commercial, SETUP step 6) |
 | Cockpit status `mic denied` | the browser refused the microphone: not a secure context (`http://` to a LAN address), or the permission was denied | use `http://localhost:8770` on the same machine, or set up HTTPS |
 | Calibration lamp `FAULT` / status `can't reach ws://...` | the browser could not open the WebSocket (wrong URL or port, pipeline not running, `https` page without `wss`, or Origin rejected) — **not** the LLM | check the pipeline is up and the settings panel's "Server socket URL" |

@@ -5260,6 +5260,39 @@ def test_ptt_processing_ends_when_the_response_fails(client):
     assert page.evaluate(_STATUS) == {"text": "connected", "shimmer": False}
 
 
+def test_ptt_silent_turn_watchdog_clears_processing(client):
+    """Hold TALK, say nothing, release: the server's VAD never fires, so NO
+    frame ever arrives to end the turn -- only the NOTHING_HEARD_MS watchdog
+    can. The timer is shortened via window.__vaNothingHeardMs, the same
+    override shape the ws-connect tests use for window.__vaConnectTimeoutMs
+    (set before the hold: index.html reads it when arming, in stopCapture()).
+    """
+    page, server = client
+    page.evaluate("window.__vaNothingHeardMs = 1200")
+    _ptt_turn_to_processing(page)
+    # The stub sends NOTHING. The status must leave "processing…" on its own.
+    page.wait_for_function(
+        "() => !document.getElementById('statusText').classList.contains('shimmer')", timeout=5000)
+    assert page.evaluate(_STATUS) == {"text": "connected", "shimmer": False}
+    assert "nothing heard" in page.evaluate(
+        "() => document.getElementById('log').textContent")
+
+
+def test_ptt_silent_turn_watchdog_cancels_when_server_hears(client):
+    """Guard: a partial_transcription right after release proves the server
+    heard the turn -- the answer may still be coming, so the watchdog must
+    NOT reset the status; only the real turn-ending frames may."""
+    page, server = client
+    page.evaluate("window.__vaNothingHeardMs = 1200")
+    _ptt_turn_to_processing(page)
+    server.send({"type": "partial_transcription", "delta": "hello"})
+    page.wait_for_timeout(3000)  # comfortably past the shortened watchdog window
+    assert page.evaluate(_STATUS) == {"text": "processing…", "shimmer": True}, \
+        "the watchdog fired despite the server showing it heard something"
+    assert "nothing heard" not in page.evaluate(
+        "() => document.getElementById('log').textContent")
+
+
 def test_answer_leaves_the_wake_status_line_alone(client):
     """Only "processing…" is cleared: the open-mic asleep line is its own
     state and an answer arriving must not overwrite it."""
