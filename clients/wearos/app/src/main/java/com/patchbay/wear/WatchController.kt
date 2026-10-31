@@ -79,6 +79,13 @@ class WatchController(context: Context) {
         if (visible) connect()
     }
 
+    fun permissionDenied() {
+        if (!visible) return
+        _ui.update {
+            it.copy(detail = "Microphone permission is needed for voice input")
+        }
+    }
+
     fun retry() {
         if (visible) connect()
     }
@@ -94,7 +101,8 @@ class WatchController(context: Context) {
             it.copy(phase = WatchPhase.CONNECTING, connected = false,
                 detail = "Connecting to PatchBay…", audioLevel = 0f)
         }
-        val fresh = PatchbaySocket(object : PatchbaySocket.Callbacks {
+        lateinit var fresh: PatchbaySocket
+        fresh = PatchbaySocket(object : PatchbaySocket.Callbacks {
             override fun connected() {
                 scope.launch {
                     if (!visible || socket !== fresh) return@launch
