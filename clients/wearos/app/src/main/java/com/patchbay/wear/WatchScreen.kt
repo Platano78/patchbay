@@ -11,6 +11,7 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -270,13 +271,13 @@ private fun ReplyPage(state: WatchUiState, onBack: () -> Unit) {
         modifier = Modifier
             .fillMaxSize()
             .background(BACK)
-            .focusRequester(focusRequester)
+            .verticalScroll(scroll)
             .onRotaryScrollEvent {
                 scope.launch { scroll.scrollBy(it.verticalScrollPixels) }
                 true
             }
+            .focusRequester(focusRequester)
             .focusable()
-            .verticalScroll(scroll)
             .padding(horizontal = 39.dp, vertical = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
