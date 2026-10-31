@@ -1,0 +1,40 @@
+name: Wear OS watch client
+on:
+  pull_request:
+    paths:
+      - 'clients/wearos/**'
+      - '.github/workflows/wearos.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install SDK platform
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0"
+      - name: Set up Gradle 8.13
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.13'
+      - name: Check unit protocol and compile debug APK
+        run: gradle -p clients/wearos :app:testDebugUnitTest :app:assembleDebug --stacktrace --no-daemon
+      - name: Upload debug APK for watch testing
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: patchbay-watch-debug
+          path: clients/wearos/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
