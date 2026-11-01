@@ -15,6 +15,16 @@ object PatchbayProtocol {
     const val BYTES_PER_SAMPLE = 2
     const val TURN_END_SILENCE_MS = 2_000
 
+    /**
+     * VOICE_RECOGNITION has no AGC (CDD 5.4.2), and at wrist distance quiet speech reached the
+     * server's VAD below its 384 ms active-speech floor and was discarded. Apply a fixed +15.6 dB
+     * with a tanh soft clip so loud speech (raw peaks ~8500 seen) is rounded, not chopped.
+     */
+    const val UPLINK_GAIN = 6.0
+
+    fun uplinkGain(sample: Short): Short =
+        (32767.0 * kotlin.math.tanh(UPLINK_GAIN * sample / 32767.0)).toInt().toShort()
+
     fun finishTurnSilence(): ByteArray =
         ByteArray(SAMPLE_RATE * BYTES_PER_SAMPLE * TURN_END_SILENCE_MS / 1_000)
 
@@ -67,6 +77,8 @@ object PatchbayProtocol {
         data class Transcript(val text: String) : Event
         data class Partial(val delta: String) : Event
         data class Reply(val text: String) : Event
+        /** Empty-text assistant_text carrying `tools`: the real answer comes later. */
+        data object ToolCall : Event
         data object Configured : Event
         data object Unknown : Event
     }
@@ -77,8 +89,15 @@ object PatchbayProtocol {
         when (json.optString("type")) {
             "transcription_completed" -> Event.Transcript(json.optString("transcript"))
             "partial_transcription" -> Event.Partial(json.optString("delta"))
-            "assistant_text" -> json.optString("text").takeIf(String::isNotBlank)
-                ?.let(Event::Reply) ?: Event.Unknown
+            "assistant_text" -> {
+                val reply = json.optString("text")
+                val tools = json.optJSONArray("tools")
+                when {
+                    reply.isNotBlank() -> Event.Reply(reply)
+                    tools != null && tools.length() > 0 -> Event.ToolCall
+                    else -> Event.Unknown
+                }
+            }
             "config_state", "config_ack" -> Event.Configured
             else -> Event.Unknown
         }

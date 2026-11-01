@@ -5,14 +5,18 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.abs
 import kotlin.math.max
+import kotlin.math.sqrt
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Hardware I/O only. This watch does not transcribe, reason, or synthesize.
@@ -37,8 +41,14 @@ class WatchMicrophone(private val scope: CoroutineScope) {
                 AudioFormat.ENCODING_PCM_16BIT
             )
             if (min <= 0) throw IllegalStateException("Watch microphone does not accept 16kHz PCM")
+            // VOICE_RECOGNITION, not VOICE_COMMUNICATION: on a Galaxy Watch6 Classic (SM-R960,
+            // Android 16) VOICE_COMMUNICATION delivered speech at RMS ~1-30 (the server VAD never
+            // fired), while VOICE_RECOGNITION -- CDD 5.4.2: no AGC, no noise suppression,
+            // calibrated level -- was transcribed on most turns; its misses were quiet speech,
+            // which PatchbayProtocol.uplinkGain addresses. Push-to-talk keeps the mic closed
+            // during playback, so the echo canceller VOICE_COMMUNICATION would bring is not needed.
             val source = AudioRecord.Builder()
-                .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
+                .setAudioSource(MediaRecorder.AudioSource.VOICE_RECOGNITION)
                 .setAudioFormat(format)
                 .setBufferSizeInBytes(max(min * 2, 6400))
                 .build()
@@ -55,6 +65,9 @@ class WatchMicrophone(private val scope: CoroutineScope) {
             running.set(true)
             captureJob = scope.launch(Dispatchers.IO) {
                 val buf = ShortArray(640) // 40 ms
+                var samples = 0L
+                var peak = 0
+                var sumSquares = 0.0
                 try {
                     while (isActive && running.get()) {
                         val count = source.read(buf, 0, buf.size, AudioRecord.READ_BLOCKING)
@@ -62,6 +75,13 @@ class WatchMicrophone(private val scope: CoroutineScope) {
                             if (running.get()) onError("Microphone read failed: $count")
                             break
                         }
+                        for (i in 0 until count) {
+                            val v = buf[i].toInt()
+                            peak = max(peak, abs(v))
+                            sumSquares += v.toDouble() * v
+                        }
+                        samples += max(count, 0)
+                        for (i in 0 until count) buf[i] = PatchbayProtocol.uplinkGain(buf[i])
                         if (count > 0 && running.get()) {
                             val pcm = PatchbayProtocol.packPcm(buf, count)
                             onPcm(pcm)
@@ -70,6 +90,12 @@ class WatchMicrophone(private val scope: CoroutineScope) {
                     }
                 } catch (t: Exception) {
                     if (running.get()) onError("Microphone error: ${t.message}")
+                } finally {
+                    // One line per turn, levels only: tells "mic heard nothing" apart from
+                    // "server ignored it" without recording anything.
+                    val rms = if (samples > 0) sqrt(sumSquares / samples).toInt() else 0
+                    Log.i(TAG, "capture: secs=${samples / PatchbayProtocol.SAMPLE_RATE.toFloat()} " +
+                        "peak=$peak rms=$rms")
                 }
             }
             return true
@@ -118,9 +144,16 @@ class WatchSpeaker(
     private val onLevel: (Float) -> Unit,
     private val onError: (String) -> Unit
 ) {
-    private val queue = Channel<ByteArray>(capacity = 40)
+    // Bounded by seconds of audio, not chunk count: the server streams TTS ~2x faster than
+    // real time, so a 40-chunk cap (~5 s of backlog) failed mid-reply on every answer longer
+    // than ~8 s and tore the session down.
+    private val queue = Channel<ByteArray>(capacity = Channel.UNLIMITED)
     private val running = AtomicBoolean(true)
     @Volatile private var track: AudioTrack? = null
+    /** Bytes offered but not yet handed to the AudioTrack. */
+    private val pendingBytes = AtomicLong(0)
+    /** Frames handed to the AudioTrack so far. */
+    @Volatile private var framesWritten = 0L
 
     private val worker: Job = scope.launch(Dispatchers.IO) {
         try {
@@ -136,6 +169,8 @@ class WatchSpeaker(
                     )
                     if (written <= 0) throw IllegalStateException("Speaker write error: $written")
                     offset += written
+                    framesWritten += written / PatchbayProtocol.BYTES_PER_SAMPLE
+                    pendingBytes.addAndGet(-written.toLong())
                 }
             }
         } catch (t: Exception) {
@@ -145,8 +180,26 @@ class WatchSpeaker(
         }
     }
 
-    fun offer(pcm: ByteArray): Boolean =
-        running.get() && queue.trySend(pcm).isSuccess
+    fun offer(pcm: ByteArray): Boolean {
+        if (!running.get()) return false
+        if (pendingBytes.get() + pcm.size > MAX_PENDING_BYTES) return false
+        pendingBytes.addAndGet(pcm.size.toLong())
+        if (queue.trySend(pcm).isSuccess) return true
+        pendingBytes.addAndGet(-pcm.size.toLong())
+        return false
+    }
+
+    /**
+     * True once every offered byte has been written AND played out by the hardware.
+     * The server streams TTS faster than real time, so "no new audio arrived" is not
+     * "finished speaking" -- stopping then flushes the unplayed tail of the reply.
+     */
+    fun isDrained(): Boolean {
+        if (pendingBytes.get() > 0) return false
+        val out = track ?: return true
+        val played = out.playbackHeadPosition.toLong() and 0xffffffffL
+        return played >= framesWritten
+    }
 
     fun stop() {
         if (!running.getAndSet(false)) return
@@ -196,3 +249,9 @@ class WatchSpeaker(
         onLevel(0f)
     }
 }
+
+private const val TAG = "PatchBayWear"
+
+/** 60 s of 16 kHz mono int16 not yet played: far beyond any real reply, still a hard bound. */
+private const val MAX_PENDING_BYTES =
+    60L * PatchbayProtocol.SAMPLE_RATE * PatchbayProtocol.BYTES_PER_SAMPLE

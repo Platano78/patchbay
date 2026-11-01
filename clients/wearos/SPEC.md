@@ -1,6 +1,6 @@
 # PatchBay Wear: Watch6 Classic expression
 
-**Status:** implementation in a draft branch; not yet built or verified on a watch
+**Status:** draft branch; built in CI and verified on a physical Watch6 Classic for gates A0-A6 (see section 8)
 **Target:** Samsung Galaxy Watch6 Classic, 43 mm or 47 mm, Wear OS
 **Date:** 2026-10-31
 
@@ -47,7 +47,7 @@ One WebSocket connection to the existing server on port 8765 (unless a private g
 - On PTT release, stop/drain the microphone and send 2 seconds of PCM zeroes to close the server VAD turn; this mirrors Lifeline.
 - Do not capture through spoken playback; no continuous wake word in v0.1.
 - Handle arbitrary TTS frame boundaries in a continuous AudioTrack stream.
-- There is no server-emitted explicit completion-of-TTS event for this audio path. The prototype uses a 1.6 second arrival-quiet heuristic. **Device testing is mandatory** to detect premature cutoff or delayed speech. Improving this may warrant an explicit server event in a separate protocol PR.
+- There is no server-emitted explicit completion-of-TTS event for this audio path. A reply ends only when (a) no audio arrived for 1.6 s, (b) the AudioTrack has played out every frame written (the server streams ~2x faster than real time, so arrival-quiet alone cut replies short), and (c) no tool call is pending (empty-text `assistant_text` carrying `tools`, until the answer frame). The playback queue is bounded at 60 s of audio, not by chunk count. An explicit server event would still be cleaner, in a separate protocol PR.
 - UI only plays audio after the wearer initiated a PTT turn, while the app is foreground. This is a mitigation, **not** true per-client routing; simultaneous clients remain a known limitation.
 
 ## 5. Network and confidentiality
@@ -98,7 +98,15 @@ Watch6 Classic (Wear OS, foreground)
 | A8 | Interleaved desktop use explored; warn of shared-audio limitations rather than fake session privacy |
 | A9 | Battery and latency measured over 20 interactions plus idle period; thresholds set from actual baseline |
 
-**Gate status today:** Source implementation written. Unit tests and physical/watch checks are **not yet verified**. A green unit test alone cannot validate audio quality or reliable turn completion.
+**Gate status (2026-11-01, SM-R960, Android 16):**
+- A0: unit tests and `assembleDebug` pass locally; CI re-run on push.
+- A1, A2: pass.
+- A3: 12 consecutive turns transcribed on the last two builds. Very short, quiet utterances can still fall under the server VAD's 384 ms active-speech floor.
+- A4: replies up to 20 s played to the last frame, including web-search turns with 3-6 s silent gaps; no self-feedback heard.
+- A5: pass. Mic and speaker are released about 1 s after leaving the app (`onStop`).
+- A6: pass. Wi-Fi off mid-listen released the mic at once; nothing was replayed after reconnecting.
+- A7: circular layout seen on the device. The Settings page Back/Save row sits at the bottom edge and is partly clipped. TalkBack and rotary are not tested.
+- A8, A9: not done.
 
 ## 9. Backlog only after acceptance
 

@@ -2,7 +2,7 @@
 
 A small Wear OS application that turns the watch into **another physical expression of your existing PatchBay**, not a new assistant. It captures 16kHz mono PCM, streams it to PatchBay, plays the existing TTS, and animates an original 2D face.
 
-**Status:** source prototype; not yet verified on an actual Watch6 Classic. No APK is claimed to exist until a successful Android build.
+**Status:** prototype, verified on a physical Galaxy Watch6 Classic (SM-R960, Android 16 / SDK 36) on 2026-11-01: install, launch, connect, voice turns, full-length replies, tool-call turns, background release and Wi-Fi drop recovery. Gates still open are listed in SPEC.md section 8.
 
 ## Prerequisites
 
@@ -61,7 +61,10 @@ No local AI model, agent, speech model, or independent memory is shipped in this
 ## Known limitations / next tests
 
 - No true server-side turn ownership or per-client playback routing.
-- The server doesn't emit an explicit TTS-done event on this path. 1.6s stream inactivity is a **heuristic**; verify there is no speech cutoff on device.
-- 16kHz AudioRecord/AudioTrack availability, mic permission, gain, latency and battery must be tested on a real watch.
+- The server emits no TTS-done event on this path. A reply ends when no audio has arrived for 1.6 s, the speaker has played out everything it was given, and no tool call is pending (the server's empty-text `assistant_text` with `tools`). Verified on device for 17-20 s replies and web-search turns with ~3-6 s silent gaps.
+- Capture uses `VOICE_RECOGNITION` plus a fixed +15.6 dB soft-clipped gain. On the SM-R960, `VOICE_COMMUNICATION` delivered near-silence that the server's VAD never accepted.
+- If no turn gets transcribed, check the watch's own mic first: record in Samsung Voice Recorder and play it back. A partly blocked mic port produced exactly this symptom during testing (gently blow it out or use a soft brush; no pins).
+- Leaving the app releases the mic and speaker about 1 s later (teardown runs in `onStop`, after the exit animation).
+- Battery and latency over a long session, TalkBack and rotary scrolling are not yet measured.
 - No Gradle wrapper binary bundled; use Gradle 8.13 via Android Studio or CLI.
 - No Android companion app or Wear Data Layer relay in v0.1. Only direct watch-to-server networking.

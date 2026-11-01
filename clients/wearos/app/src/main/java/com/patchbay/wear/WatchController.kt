@@ -38,6 +38,7 @@ class WatchController(context: Context) {
     private var idleJob: Job? = null
     private var waitingJob: Job? = null
     private var stoppingCapture = false
+    private var toolPending = false
 
     fun onForeground() {
         if (visible) return
@@ -94,7 +95,10 @@ class WatchController(context: Context) {
         tearDown()
         val endpoint = PatchbayProtocol.validateEndpoint(_ui.value.endpoint)
         if (endpoint == null) {
-            _ui.update { it.copy(phase = WatchPhase.UNCONFIGURED, connected = false) }
+            _ui.update {
+                it.copy(phase = WatchPhase.UNCONFIGURED, connected = false,
+                    detail = WatchUiState().detail)
+            }
             return
         }
         _ui.update {
@@ -134,21 +138,7 @@ class WatchController(context: Context) {
                     _ui.update {
                         it.copy(phase = WatchPhase.SPEAKING, detail = "PatchBay is speaking")
                     }
-                    idleJob?.cancel()
-                    idleJob = scope.launch {
-                        // The server does not broadcast an end-of-TTS event. Wait for
-                        // a quiet interval before accepting a new turn. Verify on hardware.
-                        delay(1_600L)
-                        if (visible && socket === fresh && expectingReply && heardSpeech) {
-                            expectingReply = false
-                            speaker?.stop()
-                            speaker = null
-                            _ui.update {
-                                it.copy(phase = WatchPhase.READY, audioLevel = 0f,
-                                    detail = "Tap to talk")
-                            }
-                        }
-                    }
+                    scheduleReplyEnd(fresh)
                 }
             }
 
@@ -170,7 +160,17 @@ class WatchController(context: Context) {
                                 }
                             }
                         is PatchbayProtocol.Event.Reply -> if (expectingReply) {
+                            toolPending = false
                             _ui.update { it.copy(lastReply = event.text) }
+                            // The answer's audio follows this frame; restart the quiet window
+                            // so a turn already past its filler cannot end in that gap.
+                            if (heardSpeech) scheduleReplyEnd(fresh)
+                        }
+                        is PatchbayProtocol.Event.ToolCall -> if (expectingReply) {
+                            // Contract: a tool turn sends an empty-text frame with `tools`, then
+                            // the real answer once the tool returns. A web search left a 2.9 s
+                            // silent gap after the filler and the watch dropped the answer.
+                            toolPending = true
                         }
                         else -> Unit
                     }
@@ -204,6 +204,7 @@ class WatchController(context: Context) {
         waitingJob?.cancel()
         expectingReply = false
         heardSpeech = false
+        toolPending = false
         speaker?.stop()
         speaker = null
         stoppingCapture = false
@@ -260,8 +261,42 @@ class WatchController(context: Context) {
             waitingJob?.cancel()
             waitingJob = launch {
                 delay(40_000L)
-                if (expectingReply && !heardSpeech && visible) {
-                    _ui.update { it.copy(detail = "Still waiting for speech from PatchBay…") }
+                if (expectingReply && !heardSpeech && visible &&
+                    _ui.value.phase == WatchPhase.WAITING) {
+                    // No reply ever arrives when the server's VAD heard no speech in the turn.
+                    // Without this the watch sat on "Working" until the app was closed.
+                    expectingReply = false
+                    _ui.update {
+                        it.copy(phase = WatchPhase.READY,
+                            detail = "No reply from PatchBay. Tap to try again")
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * End the reply only when: no new audio for a quiet interval, the speaker has played out
+     * everything it holds, and no tool call is still running. The server sends no end-of-TTS
+     * event and streams faster than real time, so the quiet interval alone cut replies short
+     * (a 5.0 s reply delivered in 2.3 s stopped at 3.8 s on a Watch6 Classic).
+     */
+    private fun scheduleReplyEnd(fresh: PatchbaySocket) {
+        idleJob?.cancel()
+        idleJob = scope.launch {
+            delay(1_600L)
+            val deadline = System.currentTimeMillis() + 30_000L
+            while ((speaker?.isDrained() == false || toolPending) &&
+                System.currentTimeMillis() < deadline) {
+                delay(100L)
+            }
+            if (visible && socket === fresh && expectingReply && heardSpeech) {
+                expectingReply = false
+                toolPending = false
+                speaker?.stop()
+                speaker = null
+                _ui.update {
+                    it.copy(phase = WatchPhase.READY, audioLevel = 0f, detail = "Tap to talk")
                 }
             }
         }
@@ -269,6 +304,7 @@ class WatchController(context: Context) {
 
     private fun fail(reason: String) {
         if (!visible) return
+        android.util.Log.w("PatchBayWear", "session failed: $reason")
         tearDown()
         _ui.update {
             it.copy(
@@ -281,6 +317,7 @@ class WatchController(context: Context) {
     private fun tearDown() {
         expectingReply = false
         heardSpeech = false
+        toolPending = false
         idleJob?.cancel()
         waitingJob?.cancel()
         idleJob = null

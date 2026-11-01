@@ -32,7 +32,8 @@ class PatchbayProtocolTest {
             """{"type":"transcription_completed","transcript":"Where is my phone?"}"""
         )
         assertEquals(PatchbayProtocol.Event.Transcript("Where is my phone?"), user)
-        assertEquals(PatchbayProtocol.Event.Unknown,
+        // The empty tool frame is never a Reply (nothing to render); it signals a pending tool.
+        assertEquals(PatchbayProtocol.Event.ToolCall,
             PatchbayProtocol.parseEvent("""{"type":"assistant_text","text":"","tools":["tool"]}"""))
         assertEquals(PatchbayProtocol.Event.Reply("Found it."),
             PatchbayProtocol.parseEvent("""{"type":"assistant_text","text":"Found it."}"""))
@@ -46,5 +47,30 @@ class PatchbayProtocolTest {
         assertEquals(1f, PatchbayProtocol.amplitude(
             PatchbayProtocol.packPcm(shortArrayOf(Short.MIN_VALUE), 1)
         ), 0.001f)
+    }
+
+    @Test fun uplinkGainLiftsQuietSpeechAndSoftClipsLoud() {
+        fun g(v: Int) = PatchbayProtocol.uplinkGain(v.toShort()).toInt()
+        assertEquals(0, g(0))
+        // Quiet wrist-distance speech (RMS ~30-100 measured) gets ~6x.
+        assertEquals(600.0, g(100).toDouble(), 6.0)
+        // Loud peaks are rounded into range, never wrapped.
+        assertTrue(g(8_500) in 28_000..32_767) // tanh: 29_976
+        assertTrue(g(Short.MAX_VALUE.toInt()) <= 32_767)
+        assertTrue(g(Short.MIN_VALUE.toInt()) >= -32_768)
+        assertEquals(-g(4_000), g(-4_000))
+        // Monotonic: louder in never gives quieter out.
+        var last = Int.MIN_VALUE
+        for (v in -32_768..32_767 step 97) { val o = g(v); assertTrue(o >= last); last = o }
+    }
+
+    @Test fun toolCallFrameIsNotAReplyButIsRecognised() {
+        // Shape observed live: empty text + tools, then the real answer in a second frame.
+        assertEquals(PatchbayProtocol.Event.ToolCall, PatchbayProtocol.parseEvent(
+            """{"type":"assistant_text","text":"","tools":[{"name":"web_search","arguments":"{}"}]}"""))
+        assertEquals(PatchbayProtocol.Event.Reply("No games today."), PatchbayProtocol.parseEvent(
+            """{"type":"assistant_text","text":"No games today.","tools":[]}"""))
+        assertEquals(PatchbayProtocol.Event.Unknown, PatchbayProtocol.parseEvent(
+            """{"type":"assistant_text","text":""}"""))
     }
 }
