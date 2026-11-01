@@ -1,6 +1,6 @@
 # PatchBay Wear: Watch6 Classic expression
 
-**Status:** draft branch; built in CI and verified on a physical Watch6 Classic for gates A0-A6 (see section 8)
+**Status:** draft branch; built in CI and verified on a physical Watch6 Classic (47 mm) for gates A0-A6 and most of A7 (see section 8, updated 2026-11-01)
 **Target:** Samsung Galaxy Watch6 Classic, 43 mm or 47 mm, Wear OS
 **Date:** 2026-10-31
 
@@ -22,7 +22,8 @@ No new hardware purchase is needed for the first acceptance program.
 - Speaking: blue ring, mouth openness from decoded PCM amplitude. No claim of viseme accuracy.
 - Offline/error: warm red status and explicit retry.
 - Latest answer: separate readable, bezel-scrollable view. No full conversation browser.
-- Settings: one editable WebSocket endpoint; no brain chooser, no model tuning, no local agent configuration.
+- Settings: one server address, typed on an in-app 0-9 / . / delete keypad as a bare private IPv4 (optionally `:port`; saved as `ws://<ip>:8765`). "Full URL" switches to the system keyboard for `wss://`. No brain chooser, no model tuning, no local agent configuration. (The system keyboards could not enter an IP on the Watch6 Classic: QWERTY needs page switches for every symbol, the decimal pad allows one dot, the phone pad has no dot.)
+- Round screen: Home, Settings and Last Reply scroll with touch and the rotating bezel, with padding scaled to the display, so no control is left at the narrow bottom of the circle.
 - Accessibility: descriptive click labels, readable text, large touch target; animation respects system-wide animator disable where practical.
 - Layout must be evaluated on both watch sizes (432x432 and 480x480 physical pixel variants), font scaling, and TalkBack.
 
@@ -98,20 +99,25 @@ Watch6 Classic (Wear OS, foreground)
 | A8 | Interleaved desktop use explored; warn of shared-audio limitations rather than fake session privacy |
 | A9 | Battery and latency measured over 20 interactions plus idle period; thresholds set from actual baseline |
 
-**Gate status (2026-11-01, SM-R960, Android 16):**
-- A0: unit tests and `assembleDebug` pass locally; CI re-run on push.
-- A1, A2: pass.
-- A3: 12 consecutive turns transcribed on the last two builds. Very short, quiet utterances can still fall under the server VAD's 384 ms active-speech floor.
-- A4: replies up to 20 s played to the last frame, including web-search turns with 3-6 s silent gaps; no self-feedback heard.
-- A5: pass. Mic and speaker are released about 1 s after leaving the app (`onStop`).
-- A6: pass. Wi-Fi off mid-listen released the mic at once; nothing was replayed after reconnecting.
-- A7: circular layout seen on the device. The Settings page Back/Save row sits at the bottom edge and is partly clipped. TalkBack and rotary are not tested.
-- A8, A9: not done.
+**Gate status (2026-11-01, one 47 mm SM-R960, Android 16; small samples, preliminary):**
+
+| Gate | Result | Evidence |
+|---|---|---|
+| A0 | Pass | CI green on every pushed head; 10 unit tests (protocol, endpoint entry, gain, capture stats). |
+| A1 | Pass | Debug APK installed and launched; no crash seen. |
+| A2 | Pass | Socket connects on home Wi-Fi; `config_state` arrives. |
+| A3 | Pass, with a known edge | 30+ turns over the session; 6/6 short, quiet phrases on the final build. 4 turns were lost to the server VAD's 384 ms active-speech floor, all within one 8-minute stretch that ended after the owner checked the watch's mic again; none in the 20+ turns after. |
+| A4 | Pass, with a server-side limit | Replies of 17-20 s played to the last frame; web-search answers survive 3-6 s tool gaps; no self-feedback. One reply was cut at 15 s by PatchBay's own remote-TTS synthesis cap while the TTS host was busy; that affects every client. |
+| A5 | Pass | Mic and speaker released ~1 s after leaving the app (teardown in `onStop`). |
+| A6 | Pass | Wi-Fi off mid-listen released the mic at once; nothing replayed after reconnect. |
+| A7 | Partly | Circular layout: every control reachable inside the circle (device screenshots, taps). Address entry works through the in-app keypad (adb-driven taps; owner hand test pending). Last Reply shows the latest answer. Not done: TalkBack, font scaling, 43 mm model, owner confirmation of bezel scrolling. |
+| A8 | Not done | Expected from the code: an idle watch stays silent during desktop turns, but the desktop cockpit speaks the answers to watch turns (server broadcast). Needs a hands-on check. |
+| A9 | Partly | Latency, second tap to first reply audio: median 1.31 s (0.87-1.62 s, n=6, no tools). Memory at idle: 86 MB PSS. Battery over 20 turns + idle: not measured yet. Playback-queue peak memory: bounded by design at 60 s of PCM (1.92 MB), not measured on device. |
 
 ## 9. Backlog only after acceptance
 
 1. Explicit audio-done and turn-origin metadata if multi-client use makes the current heuristic unsafe.
-2. Private watch-to-phone relay for outside-home use, with authenticated home connection.
+2. Outside-home use through an authenticated private path. Findings so far: the watch's Bluetooth proxy through the phone reportedly does not carry the phone's VPN (other users' reports, not tested here); Tailscale has no official Wear OS app; a `wss://` URL with a valid certificate already passes the client's validation, so the work is mostly server-side plus a vetted way for the watch to join the network.
 3. Better 2D animation assets, more expressive mouth shapes, avatar/persona identity from existing PatchBay.
 4. Optional watch complication to launch the app while retaining Samsung's watch face.
 
