@@ -27,6 +27,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicText
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
@@ -56,6 +57,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -73,6 +75,27 @@ private val SPEAKING = Color(0xFF6DB7FF)
 private val ERROR = Color(0xFFFF9D94)
 
 private enum class Page { HOME, REPLY, SETTINGS }
+
+/**
+ * Vertical scrolling driven by touch AND the Watch6 Classic's rotating bezel. Content that does
+ * not fit a round screen must scroll into its wide middle: a fixed bottom row sits where the
+ * circle is narrowest and gets clipped (the Reply/Settings and Back/Save rows both were).
+ */
+@Composable
+private fun Modifier.roundScroll(): Modifier {
+    val scroll = rememberScrollState()
+    val focusRequester = remember { FocusRequester() }
+    val scope = rememberCoroutineScope()
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+    return this
+        .onRotaryScrollEvent {
+            scope.launch { scroll.scrollBy(it.verticalScrollPixels) }
+            true
+        }
+        .focusRequester(focusRequester)
+        .focusable()
+        .verticalScroll(scroll)
+}
 
 private fun accent(phase: WatchPhase): Color = when (phase) {
     WatchPhase.LISTENING -> LISTENING
@@ -138,9 +161,13 @@ private fun HomeFace(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = diameter * 0.12f, vertical = 20.dp),
+                .roundScroll()
+                .padding(
+                    start = diameter * 0.12f, end = diameter * 0.12f,
+                    top = diameter * 0.08f, bottom = diameter * 0.26f
+                ),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween
+            verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 SmallText("PATCHBAY", 13, ICE, FontWeight.Bold)
@@ -262,23 +289,12 @@ private fun Face(
 
 @Composable
 private fun ReplyPage(state: WatchUiState, onBack: () -> Unit) {
-    val scroll = rememberScrollState()
-    val focusRequester = remember { FocusRequester() }
-    val scope = rememberCoroutineScope()
-    LaunchedEffect(Unit) { focusRequester.requestFocus() }
-
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(BACK)
-            .verticalScroll(scroll)
-            .onRotaryScrollEvent {
-                scope.launch { scroll.scrollBy(it.verticalScrollPixels) }
-                true
-            }
-            .focusRequester(focusRequester)
-            .focusable()
-            .padding(horizontal = 39.dp, vertical = 20.dp),
+            .roundScroll()
+            .padding(start = 39.dp, end = 39.dp, top = 24.dp, bottom = 56.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         SmallText("LAST REPLY", 12, READY, FontWeight.Bold)
@@ -296,43 +312,101 @@ private fun SettingsPage(
     onSave: (String) -> Unit,
     onBack: () -> Unit
 ) {
-    var input by rememberSaveable(current) { mutableStateOf(current) }
+    // IP mode uses an in-app keypad. On a Galaxy Watch6 Classic the system keyboards all failed
+    // for an IP: QWERTY needs page switches for "ws://" and ":", the decimal pad allows only one
+    // dot (it rewrote 192.168.0.20 to 1921680.20), and the phone pad has no dot key.
+    // "Full URL" keeps the system keyboard for wss:// setups.
+    val simple = PatchbayProtocol.editableAddress(current)
+    var fullUrl by rememberSaveable(current) { mutableStateOf(PatchbayProtocol.needsFullUrl(current)) }
+    var input by rememberSaveable(current, fullUrl) { mutableStateOf(if (fullUrl) current else simple) }
     Column(
         modifier = Modifier
             .fillMaxSize()
             .background(BACK)
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 38.dp, vertical = 20.dp),
+            .roundScroll()
+            .padding(start = 30.dp, end = 30.dp, top = 24.dp, bottom = 56.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
         SmallText("PATCHBAY SERVER", 13, ICE, FontWeight.Bold)
-        SmallText("Enter your trusted home WebSocket address", 11, MUTED)
-        BasicTextField(
-            value = input,
-            onValueChange = { input = it.take(180) },
-            singleLine = true,
-            textStyle = TextStyle(color = ICE, fontSize = 13.sp),
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(NAVY)
-                .defaultMinSize(minHeight = 48.dp)
-                .padding(9.dp)
-                .semantics { contentDescription = "PatchBay WebSocket URL" },
-            decorationBox = { inner ->
-                Box {
-                    if (input.isEmpty()) SmallText("ws://192.168.x.x:8765", 11, MUTED)
-                    inner()
+        SmallText(
+            if (fullUrl) "Enter your trusted home WebSocket URL"
+            else "Your PatchBay server's home IP address. Port 8765 is added for you.",
+            11, MUTED
+        )
+        if (fullUrl) {
+            BasicTextField(
+                value = input,
+                onValueChange = { input = it.take(180) },
+                singleLine = true,
+                textStyle = TextStyle(color = ICE, fontSize = 13.sp),
+                keyboardOptions = KeyboardOptions(
+                    keyboardType = KeyboardType.Uri,
+                    imeAction = ImeAction.Done
+                ),
+                keyboardActions = KeyboardActions(onDone = { onSave(input) }),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(NAVY)
+                    .defaultMinSize(minHeight = 48.dp)
+                    .padding(9.dp)
+                    .semantics { contentDescription = "PatchBay WebSocket URL" },
+                decorationBox = { inner ->
+                    Box {
+                        if (input.isEmpty()) SmallText("ws://192.168.x.x:8765", 11, MUTED)
+                        inner()
+                    }
+                }
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(NAVY)
+                    .defaultMinSize(minHeight = 44.dp)
+                    .padding(9.dp)
+                    .semantics { contentDescription = "PatchBay server IP address: ${input.ifEmpty { "empty" }}" },
+                contentAlignment = Alignment.Center
+            ) {
+                if (input.isEmpty()) SmallText("192.168.x.x", 14, MUTED)
+                else SmallText(input, 15, ICE, FontWeight.Medium)
+            }
+            for (row in listOf("123", "456", "789", ".0<")) {
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    for (key in row) {
+                        Key(if (key == '<') "⌫" else key.toString(),
+                            description = if (key == '<') "Delete" else key.toString()) {
+                            input = if (key == '<') input.dropLast(1)
+                                    else (input + key).take(21) // a.b.c.d:port
+                        }
+                    }
                 }
             }
-        )
+        }
         SmallText("Unencrypted ws:// is limited to private LAN IPs. Use wss:// only through a protected private connection.", 10, MUTED)
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Action("Back", onClick = onBack)
             Action("Save", onClick = { onSave(input) })
         }
+        Action(if (fullUrl) "IP only" else "Full URL", onClick = { fullUrl = !fullUrl })
+    }
+}
+
+/** One keypad key: 48 dp square, the Wear minimum touch target. */
+@Composable
+private fun Key(label: String, description: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .size(48.dp)
+            .clip(CircleShape)
+            .background(NAVY)
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics { contentDescription = description },
+        contentAlignment = Alignment.Center
+    ) {
+        SmallText(label, 16, ICE, FontWeight.Medium)
     }
 }
 

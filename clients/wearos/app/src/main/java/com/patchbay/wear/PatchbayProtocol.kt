@@ -50,8 +50,19 @@ object PatchbayProtocol {
         return (peak / 16000f).coerceIn(0f, 1f)
     }
 
+    const val DEFAULT_PORT = 8765
+    private val BARE_IPV4 = Regex("""^\d{1,3}(\.\d{1,3}){3}(:\d{1,5})?$""")
+
+    /**
+     * Accepts a full ws:// or wss:// URL, or -- because typing "ws://" and ":" on a watch
+     * keyboard proved impractical on a Galaxy Watch6 Classic -- a bare private IPv4 address
+     * with an optional port, which becomes ws://<ip>:<port, default 8765>.
+     */
     fun validateEndpoint(input: String): String? {
-        val url = input.trim()
+        val trimmed = input.trim()
+        val url = if (BARE_IPV4.matches(trimmed)) {
+            if (':' in trimmed) "ws://$trimmed" else "ws://$trimmed:$DEFAULT_PORT"
+        } else trimmed
         val uri = try { URI(url) } catch (_: Exception) { return null }
         val scheme = uri.scheme?.lowercase()
         if (scheme != "ws" && scheme != "wss") return null
@@ -61,6 +72,19 @@ object PatchbayProtocol {
         if (scheme == "ws" && !isPrivateIpv4(host)) return null
         return url
     }
+
+    /** What the number-pad entry field shows for a saved endpoint: just the address. */
+    fun editableAddress(endpoint: String): String {
+        val uri = try { URI(endpoint) } catch (_: Exception) { return endpoint }
+        if (uri.scheme?.lowercase() != "ws" || uri.host == null || !isPrivateIpv4(uri.host)) return endpoint
+        if (uri.rawPath?.let { it.isNotEmpty() && it != "/" } == true) return endpoint
+        return if (uri.port == -1 || uri.port == DEFAULT_PORT) uri.host else "${uri.host}:${uri.port}"
+    }
+
+    /** True when a saved endpoint cannot be shown as a bare IP (e.g. wss://), so the
+     *  entry page must open in full-URL mode. Blank means first setup: IP mode. */
+    fun needsFullUrl(endpoint: String): Boolean =
+        endpoint.isNotBlank() && editableAddress(endpoint) == endpoint
 
     private fun isPrivateIpv4(host: String): Boolean {
         val parts = host.split(".")

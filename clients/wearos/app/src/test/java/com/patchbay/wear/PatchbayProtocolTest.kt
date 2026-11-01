@@ -73,4 +73,33 @@ class PatchbayProtocolTest {
         assertEquals(PatchbayProtocol.Event.Unknown, PatchbayProtocol.parseEvent(
             """{"type":"assistant_text","text":""}"""))
     }
+
+    @Test fun bareIpEntryBecomesALanWebSocketUrl() {
+        assertEquals("ws://10.0.0.5:8765", PatchbayProtocol.validateEndpoint("10.0.0.5"))
+        assertEquals("ws://10.0.0.5:9000", PatchbayProtocol.validateEndpoint(" 10.0.0.5:9000 "))
+        // The private-LAN rule still applies to the shorthand.
+        assertNull(PatchbayProtocol.validateEndpoint("8.8.8.8"))
+        assertNull(PatchbayProtocol.validateEndpoint("10.0.0"))
+        assertNull(PatchbayProtocol.validateEndpoint("10.0.0.5:99999"))
+        assertNull(PatchbayProtocol.validateEndpoint("10.0.0.256"))
+        // Full URLs keep working unchanged.
+        assertEquals("ws://10.0.0.5:8765", PatchbayProtocol.validateEndpoint("ws://10.0.0.5:8765"))
+    }
+
+    @Test fun editableAddressShowsOnlyTheIpForNumberPadEditing() {
+        assertEquals("10.0.0.5", PatchbayProtocol.editableAddress("ws://10.0.0.5:8765"))
+        assertEquals("10.0.0.5:9000", PatchbayProtocol.editableAddress("ws://10.0.0.5:9000"))
+        // Anything a bare IP cannot express stays a full URL.
+        assertEquals("wss://voice.example:443", PatchbayProtocol.editableAddress("wss://voice.example:443"))
+        assertEquals("ws://10.0.0.5:8765/x", PatchbayProtocol.editableAddress("ws://10.0.0.5:8765/x"))
+        assertEquals("", PatchbayProtocol.editableAddress(""))
+    }
+
+    @Test fun entryPageOpensInIpModeUnlessTheUrlNeedsMore() {
+        // Regression: the page compared the other way round and always opened in full-URL mode.
+        assertFalse(PatchbayProtocol.needsFullUrl("ws://10.0.0.5:8765"))
+        assertFalse(PatchbayProtocol.needsFullUrl("ws://10.0.0.5:9000"))
+        assertFalse(PatchbayProtocol.needsFullUrl(""))
+        assertTrue(PatchbayProtocol.needsFullUrl("wss://voice.example:443"))
+    }
 }
