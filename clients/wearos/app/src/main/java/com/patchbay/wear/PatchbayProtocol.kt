@@ -144,3 +144,47 @@ data class WatchUiState(
     val audioLevel: Float = 0f,
     val detail: String = "Set the PatchBay address in Settings"
 )
+
+/**
+ * Per-turn capture levels for field diagnosis: numbers only, never audio. Separates a quiet
+ * speaker from a clipping one, and keeps the stop tap (which lands in the last few hundred ms
+ * and can reach full scale on its own) out of the speech figures.
+ */
+class CaptureStats {
+    private val windows = ArrayList<Int>()          // pre-gain RMS per 200 ms window
+    private var winSq = 0.0
+    private var winN = 0
+    private var samples = 0L
+    private var rawClipped = 0L                    // pre-gain samples at the int16 rail
+    private var postSaturated = 0L                 // post-gain samples at >= 97.7% of full scale
+
+    fun add(raw: Short, sent: Short) {
+        val v = raw.toInt()
+        samples++
+        if (v >= 32_760 || v <= -32_760) rawClipped++
+        if (sent >= 32_000 || sent <= -32_000) postSaturated++
+        winSq += v.toDouble() * v
+        if (++winN == WINDOW) {
+            windows.add(kotlin.math.sqrt(winSq / WINDOW).toInt())
+            winSq = 0.0; winN = 0
+        }
+    }
+
+    /** Windows that can contain speech: all but the last [TAP_WINDOWS] (the stop tap). */
+    fun speechWindows(): List<Int> = windows.dropLast(TAP_WINDOWS)
+
+    fun summary(): String {
+        val speech = speechWindows()
+        val peakWin = speech.maxOrNull() ?: 0
+        val median = speech.sorted().let { if (it.isEmpty()) 0 else it[it.size / 2] }
+        val satPct = if (samples > 0) 100.0 * postSaturated / samples else 0.0
+        return "capture: secs=%.2f speechPeakWinRms=%d speechMedianWinRms=%d rawClipped=%d postSaturated=%.2f%% env200ms=%s"
+            .format(samples / PatchbayProtocol.SAMPLE_RATE.toFloat(), peakWin, median, rawClipped, satPct,
+                windows.joinToString(","))
+    }
+
+    companion object {
+        const val WINDOW = 3_200   // 200 ms at 16 kHz
+        const val TAP_WINDOWS = 2  // last 400 ms
+    }
+}

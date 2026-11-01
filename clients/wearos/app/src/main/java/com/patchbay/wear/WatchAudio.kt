@@ -12,9 +12,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlin.math.abs
 import kotlin.math.max
-import kotlin.math.sqrt
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
@@ -65,9 +63,7 @@ class WatchMicrophone(private val scope: CoroutineScope) {
             running.set(true)
             captureJob = scope.launch(Dispatchers.IO) {
                 val buf = ShortArray(640) // 40 ms
-                var samples = 0L
-                var peak = 0
-                var sumSquares = 0.0
+                val stats = CaptureStats()
                 try {
                     while (isActive && running.get()) {
                         val count = source.read(buf, 0, buf.size, AudioRecord.READ_BLOCKING)
@@ -76,12 +72,10 @@ class WatchMicrophone(private val scope: CoroutineScope) {
                             break
                         }
                         for (i in 0 until count) {
-                            val v = buf[i].toInt()
-                            peak = max(peak, abs(v))
-                            sumSquares += v.toDouble() * v
+                            val raw = buf[i]
+                            buf[i] = PatchbayProtocol.uplinkGain(raw)
+                            stats.add(raw, buf[i])
                         }
-                        samples += max(count, 0)
-                        for (i in 0 until count) buf[i] = PatchbayProtocol.uplinkGain(buf[i])
                         if (count > 0 && running.get()) {
                             val pcm = PatchbayProtocol.packPcm(buf, count)
                             onPcm(pcm)
@@ -92,10 +86,8 @@ class WatchMicrophone(private val scope: CoroutineScope) {
                     if (running.get()) onError("Microphone error: ${t.message}")
                 } finally {
                     // One line per turn, levels only: tells "mic heard nothing" apart from
-                    // "server ignored it" without recording anything.
-                    val rms = if (samples > 0) sqrt(sumSquares / samples).toInt() else 0
-                    Log.i(TAG, "capture: secs=${samples / PatchbayProtocol.SAMPLE_RATE.toFloat()} " +
-                        "peak=$peak rms=$rms")
+                    // "server ignored it", and quiet speech from clipping, recording nothing.
+                    Log.i(TAG, stats.summary())
                 }
             }
             return true

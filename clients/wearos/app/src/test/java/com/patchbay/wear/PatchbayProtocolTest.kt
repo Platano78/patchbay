@@ -102,4 +102,18 @@ class PatchbayProtocolTest {
         assertFalse(PatchbayProtocol.needsFullUrl(""))
         assertTrue(PatchbayProtocol.needsFullUrl("wss://voice.example:443"))
     }
+
+    @Test fun captureStatsKeepTheStopTapOutOfSpeechLevelsAndCountClipping() {
+        val st = CaptureStats()
+        fun feed(level: Int, windows: Int) = repeat(windows * CaptureStats.WINDOW) { i ->
+            val raw = (if (i % 2 == 0) level else -level).toShort()
+            st.add(raw, PatchbayProtocol.uplinkGain(raw))
+        }
+        feed(100, 3)      // quiet speech, RMS 100
+        feed(32_767, 2)   // stop tap at the rail, last 400 ms
+        assertEquals(listOf(100, 100, 100), st.speechWindows())
+        assertTrue(st.summary().contains("speechPeakWinRms=100"))
+        assertTrue(st.summary().contains("rawClipped=6400"))   // the tap's 2 windows
+        assertTrue(st.summary().contains("postSaturated=40.00%"))
+    }
 }
