@@ -3,6 +3,23 @@
 All notable changes to this project are documented in this file. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Removed
+
+- The pre-LLM reflex lane (`patches/reflex_lane.py`, `VOICE_REFLEX`). `VOICE_REFLEX` is now ignored: every turn goes to the LLM, which already handles smart-home commands through the `home_assistant` tool. Reason: measured over 60 days enabled, it answered zero turns (its `^turn ...` patterns missed real phrasings such as "can you turn off the living room lights") and it duplicated the tool's command parsing. `emit_synthetic_reply` and the chat-buffer reader that parrot mode shared with it now live in `patches/parrot_lane.py`.
+
+### Added
+
+- Push-to-talk hold: the webclient sends `{"type":"ptt","state":"down"}` on press (button, touch or Space) and `"up"` on release, before its tail silence. While a connection holds `down`, the server withholds the pauses of the turn from the VAD, so a pause mid-thought (measured 2026-11-02: a turn finalised 3 s into a 6 s hold, and another 3 s into an 8 s hold) no longer ends the turn; speech before and after it is one turn. `up` ends the turn at once by feeding the VAD silence, the same path silence takes today. A hold ends on `up`, on socket close, or after 120 s. Clients that never send `ptt` behave exactly as before. On by default; `VOICE_PTT_HOLD=0` ignores the frames. `patches/websocket_streamer.py` (`PttHold`), `docs/contracts/ws-client-protocol.md`.
+- `remote-transcription` STT backend (`--stt remote-transcription`): speech-to-text on any server implementing OpenAI's `/v1/audio/transcriptions` protocol, so the model can live on another machine. Opt-in (`--remote_transcription_base_url` required); `parakeet-tdt` stays the default. Live partials re-upload the last `--remote_transcription_progressive_window_s` seconds on the same endpoint; no local fallback (a failed request gives an empty transcript). `patches/remote_transcription_stt_handler.py`, `patches/remote_transcription_stt_arguments.py`, README "STT backends".
+- Server-side cancel on barge-in (websocket mode). A push-to-talk press that lands on a reply sends `{"type":"barge_in"}`; the server cancels the LLM stream, the speech synthesis and the queued audio, re-opens the microphone and broadcasts `{"type":"audio_stop"}`, and the client drops audio until it arrives. Before this, only the browser's playback stopped: the pipeline kept producing the old reply, which could resume after the new question and take the held utterance with it. The cancelled reply's text so far stays in chat history. On by default; `VOICE_BARGE_CANCEL=off` restores the old behaviour. Both frames are in `docs/contracts/ws-client-protocol.md`.
+- `patches/backchannel.py`: lexical acknowledgement classifier (reimplemented from the idea in `speakrail/speakrail`, stdlib-only); the phrase list is changed materially and the module carries no third-party code.
+- `examples/echo_gate_report.py`: stdlib-only fixed-format summary of `echo_gate.calib` log lines (fills the documented gap at README.md:381), with verdict line (`ECHO EVIDENCE` / `NO ECHO EVIDENCE`).
+- `playback` client frames (`start`/`end`/`cut`, always sent, metadata only) and `patches/floor_state.py`, the server's shared "who holds the floor" state. Every playback start logs `TURN_HEARD speech_stopped_to_heard_s=… first_audio_out_to_heard_s=…` (the time until the reply is actually audible; includes one-way network latency once, and is anchored at the VAD decision).
+- `VOICE_OVERLAP_OBSERVE` (off by default; needs `VOICE_ECHO_GATE=observe|on`): an open-mic client also streams mic frames while a reply plays; the server scores them under `phase=playback` and never queues them. `echo_gate_calib` lines gain ` phase=playback` only for those frames (unchanged otherwise), `config_state` gains `overlap_observe`, and `examples/echo_gate_report.py` prints a per-window table.
+- `services/tyger/`: optional turn-taker sidecar (GPU, own venv; the pipeline does not use it yet): `install.sh`, `run.sh`, a WebSocket server at `/v1/floor`, socket-activated user-unit templates in `systemd/patchbay-tyger.*.template`, and tests. See `services/tyger/README.md`.
+
 ## [2.8.0] - 2026-09-24
 
 ### Added

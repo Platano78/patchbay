@@ -64,6 +64,7 @@ if _probe.returncode != 0:
 _PARSE_CODE = (
     "import sys\n"
     'sys.argv = ["s2s_pipeline.py", *sys.argv[1:]]\n'
+    "import conftest; conftest.alias_unapplied_pack_modules()\n"
     "from patches.s2s_pipeline import parse_arguments\n"
     "print(parse_arguments().websocket_streamer_kwargs.ws_host)\n"
 )

@@ -152,8 +152,9 @@ lines SETUP gives to bind `127.0.0.1` instead.
 
 | Thing | Location |
 |---|---|
-| Brain registry | `brains.json` in the repo root; the pipeline reads the path in `BRAINS_JSON` (unset: `~/speech-to-speech/brains.json`) |
-| Personas, per-brain model overrides, chosen voice | `~/speech-to-speech/persona.json`, `model_overrides.json`, `voice_choice.json` (override with `VOICE_PERSONA_FILE`, `VOICE_MODEL_OVERRIDES_FILE`, `VOICE_CHOICE_FILE`) |
+| Brain registry | `brains.json` in the repo root; the pipeline reads the path in `BRAINS_JSON` (unset: ~/speech-to-speech/brains.json, not present on this host) |
+| Personas, per-brain model overrides, chosen voice | defaults ~/speech-to-speech/persona.json, model_overrides.json, voice_choice.json (written by the panel on save; none present on this host; override with `VOICE_PERSONA_FILE`, `VOICE_MODEL_OVERRIDES_FILE`, `VOICE_CHOICE_FILE`) |
+| Optional vocabulary list (post-transcription term repair; off while the file is absent) | `~/speech-to-speech/vocab.txt` (`VOICE_VOCAB_FILE`) |
 | Cloned voices | `~/speech-to-speech/voices/` (`VOICE_CLONE_DIR`) |
 | Framework install + venv | `~/speech-to-speech-main`, venv at `~/speech-to-speech-main/.venv` (`INSTALL_DIR`) |
 | Downloaded models | `~/.cache/huggingface/hub` (speech models), `~/.cache/torch/hub` (VAD), `~/nltk_data` |

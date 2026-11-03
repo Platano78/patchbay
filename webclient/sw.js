@@ -29,7 +29,7 @@ const OFFLINE_SHELL = "./index.html";
 // deployments since nothing else in the app supports one. Anyone adding a
 // dynamic route, or actually adding subdirectory support, must change BOTH
 // this list and the client's fetch calls, or neither.
-const DYNAMIC_PATHS = new Set(["/models", "/v1/models", "/ha/stream", "/ha/states", "/ha/intent"]);
+const DYNAMIC_PATHS = new Set(["/models", "/v1/models", "/ha/stream", "/ha/states", "/ha/intent", "/persona-voices.json"]);
 
 self.addEventListener("install", (event) => {
   // Deliberately NO self.skipWaiting() here. This is a live voice

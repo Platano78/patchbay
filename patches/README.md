@@ -463,6 +463,30 @@ shared by both OpenAI-style handlers) instead of `responses-api`.
   Dependency-light like `voice_rules.py`/`phone_context.py` (no
   `speech_to_speech` import), importable/testable standalone.
 
+- `backchannel.py` (new) — `speech_to_speech/backchannel.py`. Lexical
+  acknowledgement classifier: a short reply over a speaking assistant is
+  tiled from acknowledgement phrases (`yeah`, `mm hm`, `i see`, etc.). Only
+  meaningful while the assistant is speaking; when silent, `"yeah"` is an
+  answer, not an acknowledgement. Reimplemented from the idea in
+  `speakrail/speakrail` (Apache-2.0) — the phrase list is changed materially
+  and the module carries no third-party code, so `NOTICE` is untouched.
+  Dependency-free (`re` + `__future__` only, no `speech_to_speech` import),
+  importable/testable standalone like `voice_rules.py`. Not imported by
+  anything yet; the barge-in decision will use it.
+
+- `floor_state.py` (new) — `speech_to_speech/floor_state.py`. Who holds the
+  floor right now: per-client playback state (fed by the client's
+  `playback` start/end/cut frames), the user's speech state (the VAD's
+  `speech_started` / `speech_stopped` events) and the time audio was last
+  sent. `mutual_quiet_s()` is how long neither side has been talking. Stdlib
+  only, thread-safe, injectable clock; observe-only. `websocket_streamer.py`
+  owns one instance (`floor_state`). With `VOICE_OVERLAP_OBSERVE=1` (and the
+  echo gate on `observe`/`on`), mic frames from a client that reports it is
+  playing a reply are scored by the echo gate under `phase=playback` and
+  never queued; every `playback` start also stamps a `TURN_HEARD` line
+  (`turn_stats.mark_heard`). `examples/echo_gate_report.py` tabulates the
+  playback-phase calibration lines per window.
+
 ## Why there is no shared helper module
 
 Modules in this pack do import each other, but only by their installed

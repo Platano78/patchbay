@@ -36,6 +36,7 @@ class _Turn:
     marks: dict[str, float] = field(default_factory=dict)
     llm_chunks: int = 0
     pending_followup: bool = False
+    heard: bool = False
 
 
 class TurnStats:
@@ -44,6 +45,11 @@ class TurnStats:
     def __init__(self) -> None:
         self._lock = Lock()
         self._turn: _Turn | None = None
+        # The most recently flushed turn that had audio out but has not been
+        # reported heard yet. A short reply flushes (end_of_response) before
+        # the client's playback acknowledgement arrives, so its anchors must
+        # outlive the flush or mark_heard() would have nothing to attach to.
+        self._unheard: _Turn | None = None
 
     def on_llm_chunk(self, speech_stopped_at_s: float | None) -> None:
         """Call once per LLMResponseChunk reaching LMOutputProcessor.
@@ -84,6 +90,39 @@ class TurnStats:
             if self._turn is not None:
                 self._turn.marks.setdefault(event, _clock())
 
+    def mark_heard(self, at_s: float) -> None:
+        """Record when the user's speaker started playing this turn's reply.
+
+        ``at_s`` is on the ``perf_counter`` clock: the server's arrival time of
+        the client's ``playback`` start frame plus the client's reported
+        scheduling delay. Applies to the most recent turn whose
+        ``first_audio_out`` is set and that is not yet heard: the active turn,
+        else the last flushed one. Logs one ``TURN_HEARD`` line and never
+        raises. No such turn: dropped silently.
+
+        Error terms, by design: the figure includes one-way network latency
+        once (an overestimate), and the anchor is the VAD decision, about
+        ``min_silence_ms`` after the last word, not the word end.
+        """
+        with self._lock:
+            turn = None
+            for candidate in (self._turn, self._unheard):
+                if candidate is not None and "first_audio_out" in candidate.marks and not candidate.heard:
+                    turn = candidate
+                    break
+            if turn is None:
+                return
+            turn.heard = True
+            if turn is self._unheard:
+                self._unheard = None
+            start = turn.speech_stopped_at_s
+            first_out = turn.marks["first_audio_out"]
+            logger.info(
+                "TURN_HEARD speech_stopped_to_heard_s=%s first_audio_out_to_heard_s=%s",
+                _fmt(None if start is None else at_s - start),
+                _fmt(at_s - first_out),
+            )
+
     def note_followup_pending(self) -> None:
         """Call when a tool call just enqueued a follow-up generation.
 
@@ -96,7 +135,7 @@ class TurnStats:
                 self._turn.pending_followup = True
 
     def set_route(self, route: str) -> None:
-        """Reserved for the reflex lane (Slice 2) to mark route="reflex"."""
+        """Mark the turn's route (e.g. "parrot"); the default is "llm"."""
         with self._lock:
             if self._turn is not None:
                 self._turn.route = route
@@ -127,6 +166,8 @@ class TurnStats:
         self._turn = None
         if turn is None:
             return
+        if "first_audio_out" in turn.marks and not turn.heard:
+            self._unheard = turn
 
         start = turn.speech_stopped_at_s
 

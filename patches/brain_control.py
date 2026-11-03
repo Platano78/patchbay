@@ -1000,6 +1000,14 @@ class BrainControl:
             "tools_armed": self.tools_armed,
             "tools": list(self.tools_armed_names),
             "wake_word": self._wake_word_state(),
+            # True only when VOICE_OVERLAP_OBSERVE is effective (it needs the
+            # echo gate scoring): an open-mic client then also streams mic
+            # frames while a reply plays. False when no streamer is wired.
+            "overlap_observe": bool(getattr(self.streamer, "overlap_observe", False)),
+            # True only when the streamer has a cancel scope (VOICE_BARGE_CANCEL
+            # not off): a client may then send {"type":"barge_in"} and expects
+            # {"type":"audio_stop"} back. Absent/False = the client must not.
+            "barge_cancel": getattr(self.streamer, "cancel_scope", None) is not None,
             # Live diagnostic state (B6 UI slice) -- False when the gate
             # isn't wired up (e.g. no BrainControl-managed pipeline), same
             # convention as the other Optional[handler]-gated fields above.
@@ -1317,6 +1325,25 @@ class BrainControl:
             extra_body = None
         elif extra_body is None:
             extra_body = BaseOpenAICompatibleHandler._build_extra_body(base_url, True, None)
+        # A brain may declare extra chat-template flags (brains.json
+        # `chat_template_kwargs`, e.g. a conversational-mode switch). Declaring
+        # one is an explicit act, so it is merged over whatever was computed
+        # above (entry keys win) and, like `reasoning_effort`, is sent even on
+        # a lane that otherwise sends nothing -- but then WITHOUT the default
+        # `enable_thinking`. Invalid values are ignored, never fatal.
+        declared = entry.get("chat_template_kwargs")
+        if declared is not None:
+            if isinstance(declared, dict) and all(isinstance(k, str) for k in declared):
+                if declared:
+                    merged = dict((extra_body or {}).get("chat_template_kwargs") or {})
+                    merged.update(declared)
+                    extra_body = {**(extra_body or {}), "chat_template_kwargs": merged}
+            else:
+                logger.warning(
+                    "BrainControl: brain %s has invalid chat_template_kwargs %r (expected an object with string keys); ignoring",
+                    name,
+                    declared,
+                )
         self.llm_handler._extra_body = extra_body
         self.active_brain = name
         self._record_probe(name, True, "", probed_models)

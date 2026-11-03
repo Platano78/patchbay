@@ -4684,6 +4684,33 @@ function loadPersonaVoices() {
 function savePersonaVoices(obj) {
   try { localStorage.setItem(PERSONA_VOICE_KEY, JSON.stringify(obj)); } catch {}
 }
+// Optional install-local seed for the pairings above: a file persona-voices.json served at
+// the site root, e.g. {"builtin:The Butler": "the-butler"}. It fills pairings the user has
+// not made and never overwrites one. Applied once per distinct file content (the marker
+// below), so a pairing the user later removes stays removed until the file itself changes.
+// No file (the default, and the public export) is a silent no-op. Absolute path, and listed
+// in sw.js DYNAMIC_PATHS, like every other non-static route.
+const PERSONA_VOICE_SEED_KEY = "va-persona-voices-seeded";
+async function seedPersonaVoices() {
+  let text;
+  try {
+    const r = await fetch("/persona-voices.json", { cache: "no-store" });
+    if (!r.ok) return;
+    text = await r.text();
+  } catch { return; }
+  let seed;
+  try { seed = JSON.parse(text); } catch { return; }
+  if (!seed || typeof seed !== "object" || Array.isArray(seed)) return;
+  try { if (localStorage.getItem(PERSONA_VOICE_SEED_KEY) === text) return; } catch {}
+  const pairings = loadPersonaVoices();
+  for (const [persona, voice] of Object.entries(seed)) {
+    if (typeof voice === "string" && voice && !(persona in pairings)) pairings[persona] = voice;
+  }
+  savePersonaVoices(pairings);
+  try { localStorage.setItem(PERSONA_VOICE_SEED_KEY, text); } catch {}
+  updatePersonaVoicePairBtn();
+  applyPersonaVoicePairing(els.personaSelect.value);
+}
 function loadPersonas() {
   try { return JSON.parse(localStorage.getItem(PERSONA_LIB_KEY)) || {}; } catch { return {}; }
 }
@@ -4852,6 +4879,7 @@ els.personaVoicePairBtn.addEventListener("click", () => {
   updatePersonaVoicePairBtn();
 });
 populatePersonaSelect();
+seedPersonaVoices();
 
 // ── Custom voice cloning ────────────────────────────────────────────────
 // Protocol: docs/plans/custom-voice-cloning-v1.3.md (rulings 5, 6, 9, 10, 11; maintainer notes, not in the public export) +
@@ -5576,6 +5604,11 @@ function renderConfigState(ev) {
     els.parrotToggle.checked = !!ev.parrot;
   }
 
+  // Overlap-observe instrument (see overlapSendDuringReply). Absent key = off.
+  overlapObserve = !!ev.overlap_observe;
+  // Server-side barge-in cancel: only a server that says so answers barge_in with audio_stop.
+  bargeCancel = ev.barge_cancel === true;
+
   // `wake_word: null` is real news — no streamer, so wake-word control is
   // unavailable. An absent key is not news, and must not be read as "off":
   // setOpenMicMode owns a live mic graph, and disarming one because a frame
@@ -6195,6 +6228,7 @@ function connect() {
   }, connectTimeoutMs);
 
   ws.onopen = () => {
+    resetPartialTracking(); // the server's turn counter restarts with its session
     clearTimeout(connectTimer);
     opened = true;
     if (els.wsUrlStatus) els.wsUrlStatus.textContent = "";
@@ -6256,6 +6290,10 @@ function connect() {
     if (typeof ev.data === "string") {
       handleEvent(ev.data);
     } else {
+      // Between our barge_in and the server's audio_stop every binary frame is the
+      // cancelled reply (frames are in order), so it is neither scheduled nor counted
+      // as proof the server heard us.
+      if (bargeInDropping) return;
       // ArrayBuffer (binaryType='arraybuffer'). Int16 16k mono PCM.
       stallWatchdog.disarm(); // real assistant audio has arrived — stop filling the gap
       cancelNothingHeardWatchdog(); // audio arriving proves the server heard the turn
@@ -6471,6 +6509,28 @@ function applyMoodFromTools(tools) {
   window.__avatarMood?.(mood); // no-op until the lazy avatar module registers it
 }
 
+// Ordering of live partials. turn ids are "turn_<n>" (VAD counter); an id that
+// doesn't parse can't be ordered, so it only counts as "a different turn".
+let partialSeen = { turn: null, rev: null }; // newest partial's turn id / revision
+let finalTurn = null;                         // newest turn that got its final transcript
+const turnNum = (id) => { const m = /(\d+)$/.exec(String(id ?? "")); return m ? Number(m[1]) : null; };
+function resetPartialTracking() { partialSeen = { turn: null, rev: null }; finalTurn = null; }
+function noteTurnFinal(ev) { if (ev.turn_id != null) finalTurn = ev.turn_id; }
+function partialIsStale(ev) {
+  if (ev.turn_id == null) return false; // no turn info: just replace
+  const n = turnNum(ev.turn_id), seen = turnNum(partialSeen.turn), fin = turnNum(finalTurn);
+  if (n !== null && fin !== null && n <= fin) return true;
+  if (ev.turn_id === finalTurn) return true;
+  if (partialSeen.turn !== null && ev.turn_id !== partialSeen.turn) {
+    if (n !== null && seen !== null && n < seen) return true;
+  } else if (partialSeen.turn !== null && ev.turn_revision != null &&
+             partialSeen.rev != null && ev.turn_revision < partialSeen.rev) {
+    return true;
+  }
+  partialSeen = { turn: ev.turn_id, rev: ev.turn_revision ?? null };
+  return false;
+}
+
 function handleEvent(text) {
   let ev;
   try { ev = JSON.parse(text); } catch { log("bad json: " + text.slice(0, 120)); return; }
@@ -6478,6 +6538,7 @@ function handleEvent(text) {
   switch (ev.type) {
     case "transcription_completed":
       cancelNothingHeardWatchdog(); // the server heard (or definitively didn't) — it owns the ending now
+      noteTurnFinal(ev);
       els.transcript.textContent = ev.transcript || "—";
       if (pendingHistoryEntry) {
         // Barge-in: a new turn started before the previous one got its reply — don't lose it.
@@ -6533,8 +6594,12 @@ function handleEvent(text) {
       break;
     case "partial_transcription":
       cancelNothingHeardWatchdog(); // a partial means the server heard something
-      // live partials: show in transcript as it grows
-      if (ev.delta) els.transcript.textContent = (els.transcript.textContent === "—" ? "" : els.transcript.textContent) + ev.delta;
+      // Despite the field name, `delta` is a SNAPSHOT: the whole transcript so far for
+      // this turn (upstream transcription_notifier + both STT backends emit cumulative
+      // text), so it REPLACES the live text. Appending piles the partials end to end.
+      // turn_id is "turn_<n>" and turn_revision an int; drop a partial for a turn at or
+      // before the last final, or older than the newest turn/revision seen.
+      if (ev.delta && !partialIsStale(ev)) els.transcript.textContent = ev.delta;
       break;
     case "token_usage":
       log(`tokens in=${ev.input_tokens} out=${ev.output_tokens}`);
@@ -6557,6 +6622,12 @@ function handleEvent(text) {
         if (els.wakeToggle) els.wakeToggle.checked = false;
         syncArmSwitch();
       }
+      break;
+    case "audio_stop":
+      // The server cancelled the reply in flight (ours, or another screen's), or
+      // answered our barge_in with nothing to cancel. Either way what follows is new.
+      endBargeInDrop();
+      flushPlayback(); // a second screen may still be playing the cancelled reply
       break;
     case "config_state":
       renderConfigState(ev);
@@ -6637,6 +6708,44 @@ function handleEvent(text) {
   }
 }
 
+// ── Barge-in: ask the server to cancel the reply it is still producing ──────
+// {"type":"barge_in"} goes out BEFORE flushPlayback() when a PTT press lands on a
+// reply (audio playing, or a committed turn still waiting for its answer). Until
+// the server's {"type":"audio_stop"} comes back, binary frames are the cancelled
+// reply and are dropped. The timer is only a safety valve: a server that does not
+// lose the audio_stop must not throw the next real reply away forever. A server that
+// does not advertise barge_cancel in its config snapshot (older build, or
+// VOICE_BARGE_CANCEL=off) is never sent the frame and the gate is never armed.
+const BARGE_IN_DROP_MAX_MS = 1500;
+let bargeInDropping = false;
+let bargeCancel = false;    // last config snapshot said the server cancels on barge_in
+let bargeInDropTimer = null;
+function endBargeInDrop() {
+  bargeInDropping = false;
+  clearTimeout(bargeInDropTimer);
+  bargeInDropTimer = null;
+}
+function replyPending() {
+  return !!(pendingHistoryEntry && pendingHistoryEntry.assistant === null);
+}
+// ── PTT hold: tell the server the user holds the floor ──────────────────────
+// {"type":"ptt","state":"down"|"up"}. While down, the server's VAD silence cannot end
+// the turn, so a pause mid-thought no longer cuts it. "up" goes out before the tail
+// silence and ends the turn. A server without the feature ignores the frames.
+let pttDownSent = false;
+function sendPtt(state) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  try { ws.send(JSON.stringify({ type: "ptt", state })); } catch { return false; }
+  return true;
+}
+function sendBargeIn() {
+  if (!bargeCancel || !ws || ws.readyState !== WebSocket.OPEN) return;
+  try { ws.send(JSON.stringify({ type: "barge_in" })); } catch { return; }
+  bargeInDropping = true;
+  clearTimeout(bargeInDropTimer);
+  bargeInDropTimer = setTimeout(endBargeInDrop, BARGE_IN_DROP_MAX_MS);
+}
+
 // ── Playback (gapless int16 16k) ─────────────────────────────────────
 let playCtx = null;
 let nextStartTime = 0;
@@ -6664,6 +6773,61 @@ function noteLocalPlayback(endTime) {
 // interrupting a reply in open-mic requires the wake word to re-trigger, or a tap.
 function assistantAudioActive() {
   return !!playCtx && playCtx.currentTime < localPlaybackTailTime + PLAYBACK_TAIL_MARGIN_SEC;
+}
+
+// ── Playback acknowledgements ({"type":"playback"} frames) ───────────────
+// Always sent, metadata only: they tell the server when THIS speaker is really
+// playing a reply (start: first chunk scheduled, with how far ahead it will
+// sound; end: the last chunk has played out; cut: stopped early), which gives
+// it a heard-latency figure and, in overlap-observe, the window in which mic
+// frames are measured. Only assistant TTS audio counts: the stall-fill clips
+// and the wake chime are not in the server's echo reference, so they never
+// send these (see nonTtsTailTime). Tracks TTS separately from the combined
+// tail above because a stalled-out filler clip would otherwise swallow `start`.
+let ttsPlaying = false;     // a `start` was sent and no `end`/`cut` yet
+let ttsTailTime = 0;        // end (ctx time) of the last scheduled TTS chunk
+let nonTtsTailTime = 0;     // end (ctx time) of the latest stall clip / wake chime
+let ttsEndTimer = null;
+let overlapObserve = false; // server says it runs the overlap-observe instrument (config_state)
+function sendPlayback(state, delayMs) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const msg = { type: "playback", state };
+  if (state === "start") msg.delay_ms = Math.round(delayMs * 10) / 10;
+  try { ws.send(JSON.stringify(msg)); } catch {}
+}
+function armTtsEndTimer() {
+  clearTimeout(ttsEndTimer);
+  const waitMs = Math.max(0, (ttsTailTime + PLAYBACK_TAIL_MARGIN_SEC - playCtx.currentTime) * 1000) + 20;
+  ttsEndTimer = setTimeout(() => {
+    ttsEndTimer = null;
+    if (!ttsPlaying) return;
+    if (playCtx.currentTime < ttsTailTime + PLAYBACK_TAIL_MARGIN_SEC) { armTtsEndTimer(); return; }
+    ttsPlaying = false;
+    sendPlayback("end");
+  }, waitMs);
+}
+// One TTS chunk was scheduled to sound at `startAt` and run until `endAt` (ctx time).
+function noteTtsPlayback(startAt, endAt, now) {
+  if (endAt > ttsTailTime) ttsTailTime = endAt;
+  if (!ttsPlaying) {
+    ttsPlaying = true;
+    sendPlayback("start", (startAt - now) * 1000);
+  }
+  armTtsEndTimer(); // re-armed on every scheduled chunk
+}
+function cutTtsPlayback() {
+  if (!ttsPlaying) return;
+  clearTimeout(ttsEndTimer);
+  ttsEndTimer = null;
+  ttsPlaying = false;
+  ttsTailTime = 0;
+  sendPlayback("cut");
+}
+// Overlap-observe only: an open-mic client also streams while a TTS reply plays,
+// but never during a stall clip or the chime (they are not in the echo reference).
+function overlapSendDuringReply() {
+  return overlapObserve && ttsPlaying && !!playCtx &&
+    playCtx.currentTime >= nonTtsTailTime + PLAYBACK_TAIL_MARGIN_SEC;
 }
 
 function updateSpeakingIndicator() {
@@ -6700,6 +6864,7 @@ function playWakeChime() {
       chimeEnd = start + 0.12;
     });
     noteLocalPlayback(chimeEnd);
+    nonTtsTailTime = Math.max(nonTtsTailTime, chimeEnd);
   } catch {}
 }
 
@@ -6742,9 +6907,11 @@ function enqueuePlayback(arrayBuffer) {
     }
     nextStartTime = now + 0.02; // small priming gap
   }
+  const scheduledAt = nextStartTime;
   src.start(nextStartTime);
   nextStartTime += buf.duration;
   noteLocalPlayback(nextStartTime); // nextStartTime already IS the scheduled tail
+  noteTtsPlayback(scheduledAt, nextStartTime, now);
 
   liveSources.add(src);
   updateSpeakingIndicator();
@@ -6760,6 +6927,8 @@ function flushPlayback() {
   // the tail to "now" too (the max-only rule in noteLocalPlayback protects concurrent
   // schedulers, not a hard stop like this one).
   localPlaybackTailTime = playCtx ? playCtx.currentTime : 0;
+  nonTtsTailTime = 0; // the stall clips went silent with everything else
+  cutTtsPlayback();
   updateSpeakingIndicator();
 }
 
@@ -6828,6 +6997,7 @@ const stallWatchdog = {
     const startTime = ctx.currentTime;
     src.start(startTime);
     noteLocalPlayback(startTime + this.buffers[idx].duration);
+    nonTtsTailTime = Math.max(nonTtsTailTime, startTime + this.buffers[idx].duration);
 
     this.activeSource = src;
     liveSources.add(src);
@@ -6845,6 +7015,9 @@ const stallWatchdog = {
     if (this.activeSource) {
       try { this.activeSource.stop(); } catch {}
       this.activeSource = null;
+      // The clip just went silent: its tail ends now (+ the usual margin), so a reply that
+      // arrives right after it is not shut out of overlap-observe by the clip's scheduled end.
+      nonTtsTailTime = playCtx ? playCtx.currentTime : 0;
     }
   },
 };
@@ -7067,7 +7240,9 @@ async function startCapture(isOpenMic) {
   cancelNothingHeardWatchdog(); // a new recording supersedes any pending silent turn
 
   if (!isOpenMic) {
-    // barge-in: kill any assistant audio the moment the user starts talking
+    // barge-in: tell the server first (it stops producing the reply), then kill any
+    // assistant audio the moment the user starts talking
+    if (assistantAudioActive() || replyPending()) sendBargeIn();
     flushPlayback();
     stallWatchdog.disarm();
   }
@@ -7130,7 +7305,7 @@ async function startCapture(isOpenMic) {
     // the assistant's own reply off the speaker and loops on itself. PTT is deliberately
     // NOT gated on it — holding the button while the assistant speaks is the existing
     // barge-in path and must keep working exactly as today.
-    if (d.pcm && (isHeld || (openMicStreaming && !assistantAudioActive())) && ws && ws.readyState === WebSocket.OPEN) {
+    if (d.pcm && (isHeld || (openMicStreaming && (!assistantAudioActive() || overlapSendDuringReply()))) && ws && ws.readyState === WebSocket.OPEN) {
       ws.send(d.pcm); // raw binary int16 16k mono
     }
   };
@@ -7241,6 +7416,7 @@ function press(e) {
     return;
   }
   isHeld = true;
+  pttDownSent = sendPtt("down");
   startCapture();
 }
 function release(e) {
@@ -7253,6 +7429,7 @@ function release(e) {
   // whole point of that block — was never reached.
   if (openMic && !isHeld) return;
   isHeld = false;
+  if (pttDownSent) { pttDownSent = false; sendPtt("up"); }
   stopCapture();
 }
 // Mouse — release on window so dragging off the button still ends the turn.

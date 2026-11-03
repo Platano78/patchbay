@@ -1,0 +1,25 @@
+# Template: user service unit for the tyger sidecar, started by patchbay-tyger.socket (see that file for the
+# install commands). Not installed automatically; there is no [Install] section on purpose: the socket starts it.
+#
+# The server exits cleanly after --idle-exit-s seconds with no conversation, so the GPU and its memory are free
+# between conversations, and systemd starts it again on the next connection.
+#
+# Variables to substitute:
+#   ${PATCHBAY_DIR}  - path to this repo
+#   ${TYGER_HOME}    - the install directory made by services/tyger/install.sh (default ~/patchbay-tyger)
+
+[Unit]
+Description=patchbay tyger sidecar (turn-taking decisions over WebSocket)
+Requires=patchbay-tyger.socket
+After=patchbay-tyger.socket
+
+[Service]
+Type=simple
+Environment=TYGER_HOME=${TYGER_HOME}
+# ROCm only, optional: the ROCm runtime can spin one CPU core while idle. See "ROCm idle spin" in
+# services/tyger/README.md for what to put here; if a file named does not exist the sidecar starts without it.
+#Environment=TYGER_ROCR_PRELOAD=/path/to/libhsa_shim.so /path/to/system/libhsa-runtime64.so.N
+ExecStart=${PATCHBAY_DIR}/services/tyger/run.sh --idle-exit-s 300
+# Loading the weights and warming the encoder takes about 20-60 s; the first connection waits in the socket's queue.
+TimeoutStartSec=300
+Restart=no

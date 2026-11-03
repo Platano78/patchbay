@@ -47,7 +47,6 @@ FILES=(
   "lm_output_processor.py|LLM/lm_output_processor.py"
   "voice_tools.py|voice_tools.py"
   "turn_stats.py|turn_stats.py"
-  "reflex_lane.py|reflex_lane.py"
   "parrot_lane.py|parrot_lane.py"
   "hermes_cockpit.py|hermes_cockpit.py"
   "wakeword_gate.py|wakeword_gate.py"
@@ -57,9 +56,14 @@ FILES=(
   "voice_affect.py|voice_affect.py"
   "phone_context.py|phone_context.py"
   "transcript_buffer.py|transcript_buffer.py"
+  "backchannel.py|backchannel.py"
+  "floor_state.py|floor_state.py"
+  "vocab_snap.py|vocab_snap.py"
   "chat_completions_language_model.py|LLM/chat_completions_language_model.py"
   "remote_speech_tts_handler.py|TTS/remote_speech_tts_handler.py"
   "remote_speech_tts_arguments.py|arguments_classes/remote_speech_tts_arguments.py"
+  "remote_transcription_stt_handler.py|STT/remote_transcription_stt_handler.py"
+  "remote_transcription_stt_arguments.py|arguments_classes/remote_transcription_stt_arguments.py"
   "module_arguments.py|arguments_classes/module_arguments.py"
 )
 
@@ -139,8 +143,22 @@ for entry in "${FILES[@]}"; do
   fi
 done
 
+# Record which source revision this install came from, so a box running a mix
+# of versions is traceable. `-dirty` = uncommitted changes under patches/;
+# "unknown" = not a git checkout (e.g. an exported tarball). Not part of FILES:
+# it is generated, and --dry-run never reports it as pending work.
+patch_version="unknown"
+if rev="$(git -C "$SCRIPT_DIR" rev-parse --short HEAD 2>/dev/null)" && [ -n "$rev" ]; then
+  patch_version="$rev"
+  if [ -n "$(git -C "$SCRIPT_DIR" status --porcelain -- . 2>/dev/null)" ]; then
+    patch_version="$rev-dirty"
+  fi
+fi
+echo "Patch version: $patch_version"
+
 if [ "$DRY_RUN" -eq 1 ]; then
   echo "Re-run without --dry-run to apply."
 else
+  printf '%s\n' "$patch_version" > "$PKG/PATCH_VERSION"
   echo "Patches applied."
 fi

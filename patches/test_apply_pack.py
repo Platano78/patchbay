@@ -203,3 +203,77 @@ class TestApplyPackFiles:
             "patch module(s) exist in patches/ but are not listed in "
             f"apply.sh's FILES array: {missing}"
         )
+
+
+# ── PATCH_VERSION: apply.sh records which source revision it deployed ──────
+
+import shutil
+import subprocess
+
+
+def _stage_source_repo(tmp_path, committed=True):
+    """A throwaway git repo holding a copy of patches/, so the test never
+    depends on the checkout it runs from (an rsync'd tree has no .git)."""
+    src = tmp_path / "src"
+    shutil.copytree(HERE, src / "patches", ignore=shutil.ignore_patterns("__pycache__", "test_*"))
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    if committed:
+        for cmd in (["git", "init", "-q"], ["git", "add", "-A"], ["git", "commit", "-qm", "x"]):
+            subprocess.run(cmd, cwd=src, env=env, check=True, capture_output=True)
+    return src, env
+
+
+def _empty_pkg(tmp_path):
+    pkg = tmp_path / "pkg"
+    for _s, dst in _parse_files_array(APPLY_SH):
+        (pkg / dst).parent.mkdir(parents=True, exist_ok=True)
+    return pkg
+
+
+def _apply(src, pkg, env, *flags):
+    return subprocess.run(
+        ["bash", str(src / "patches" / "apply.sh"), *flags, "--dest", str(pkg)],
+        env=env, capture_output=True, text=True,
+    )
+
+
+def test_apply_writes_patch_version_of_the_source_commit(tmp_path):
+    src, env = _stage_source_repo(tmp_path)
+    pkg = _empty_pkg(tmp_path)
+    head = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=src, capture_output=True, text=True).stdout.strip()
+
+    r = _apply(src, pkg, env)
+
+    assert r.returncode == 0, r.stderr
+    assert (pkg / "PATCH_VERSION").read_text().strip() == head
+
+
+def test_apply_marks_patch_version_dirty_when_patches_are_uncommitted(tmp_path):
+    src, env = _stage_source_repo(tmp_path)
+    (src / "patches" / "echo_gate.py").write_text("# edited\n")
+    pkg = _empty_pkg(tmp_path)
+
+    assert _apply(src, pkg, env).returncode == 0
+    assert (pkg / "PATCH_VERSION").read_text().strip().endswith("-dirty")
+
+
+def test_apply_writes_unknown_when_source_is_not_a_git_checkout(tmp_path):
+    src, env = _stage_source_repo(tmp_path, committed=False)
+    env = {**env, "GIT_CEILING_DIRECTORIES": str(tmp_path)}
+    pkg = _empty_pkg(tmp_path)
+
+    assert _apply(src, pkg, env).returncode == 0
+    assert (pkg / "PATCH_VERSION").read_text().strip() == "unknown"
+
+
+def test_dry_run_writes_nothing_and_does_not_list_patch_version_as_pending(tmp_path):
+    src, env = _stage_source_repo(tmp_path)
+    pkg = _empty_pkg(tmp_path)
+
+    r = _apply(src, pkg, env, "--dry-run")
+
+    assert r.returncode == 0, r.stderr
+    assert not (pkg / "PATCH_VERSION").exists()
+    # setup.sh's patches-applied check greps for indented new/OVERWRITE rows
+    assert not re.search(r"^\s+(new|OVERWRITE)\s+PATCH_VERSION", r.stdout, re.M)

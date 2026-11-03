@@ -133,13 +133,86 @@ class TurnStatsTest(unittest.TestCase):
     def test_flush_with_no_active_turn_does_not_raise(self) -> None:
         self.stats.flush()
 
-    def test_set_route_reserved_for_reflex_lane(self) -> None:
+    def test_set_route_overrides_default_route(self) -> None:
         with self.assertLogs("patches.turn_stats", level="INFO") as cm:
             self.stats.on_llm_chunk(100.0)
-            self.stats.set_route("reflex")
+            self.stats.set_route("parrot")
             self.stats.end_of_response()
 
-        self.assertIn("route=reflex", self._last_record(cm).getMessage())
+        self.assertIn("route=parrot", self._last_record(cm).getMessage())
+
+
+    # ── mark_heard (floor-management slice 2) ────────────────────────────
+
+    def _heard_lines(self, cm) -> list[str]:
+        return [r.getMessage() for r in cm.records if r.getMessage().startswith("TURN_HEARD")]
+
+    def test_mark_heard_on_the_active_turn(self) -> None:
+        with self.assertLogs("patches.turn_stats", level="INFO") as cm:
+            self.stats.on_llm_chunk(100.0)
+            self.clock.advance(0.70)
+            self.stats.mark("first_audio_out")  # @ 100.70
+            self.stats.mark_heard(101.25)
+        self.assertEqual(
+            self._heard_lines(cm),
+            ["TURN_HEARD speech_stopped_to_heard_s=1.250 first_audio_out_to_heard_s=0.550"],
+        )
+
+    def test_short_reply_flushes_before_the_ack_but_is_still_heard(self) -> None:
+        """TTS runs faster than real time: end_of_response flushes the turn
+        before the client's playback-start frame arrives. The anchors must
+        outlive the flush."""
+        with self.assertLogs("patches.turn_stats", level="INFO") as cm:
+            self.stats.on_llm_chunk(100.0)
+            self.clock.advance(0.50)
+            self.stats.mark("first_audio_out")
+            self.clock.advance(0.10)
+            self.stats.end_of_response()  # flush: TURN_STATS logged, turn gone
+            self.clock.advance(0.20)
+            self.stats.mark_heard(100.90)
+        self.assertEqual(
+            self._heard_lines(cm),
+            ["TURN_HEARD speech_stopped_to_heard_s=0.900 first_audio_out_to_heard_s=0.400"],
+        )
+
+    def test_a_turn_is_reported_heard_once(self) -> None:
+        with self.assertLogs("patches.turn_stats", level="INFO") as cm:
+            self.stats.on_llm_chunk(100.0)
+            self.stats.mark("first_audio_out")
+            self.stats.end_of_response()
+            self.stats.mark_heard(101.0)
+            self.stats.mark_heard(102.0)  # a second burst of the same reply
+        self.assertEqual(len(self._heard_lines(cm)), 1)
+
+    def test_no_audio_out_means_nothing_to_hear(self) -> None:
+        with self.assertLogs("patches.turn_stats", level="INFO") as cm:
+            self.stats.on_llm_chunk(100.0)
+            self.stats.end_of_response()  # TURN_STATS only; no first_audio_out
+            self.stats.mark_heard(101.0)
+        self.assertEqual(self._heard_lines(cm), [])
+        self.stats.mark_heard(102.0)  # and no turn at all: silent, no raise
+
+    def test_heard_attaches_to_the_most_recent_turn_with_audio(self) -> None:
+        with self.assertLogs("patches.turn_stats", level="INFO") as cm:
+            self.stats.on_llm_chunk(100.0)
+            self.stats.mark("first_audio_out")
+            self.stats.end_of_response()  # turn A: flushed, unheard
+            self.stats.on_llm_chunk(200.0)  # turn B active, no audio out yet
+            self.stats.mark_heard(100.5)  # A's ack lands late
+        self.assertEqual(
+            self._heard_lines(cm),
+            ["TURN_HEARD speech_stopped_to_heard_s=0.500 first_audio_out_to_heard_s=0.500"],
+        )
+
+    def test_turn_stats_line_is_unchanged_by_heard_tracking(self) -> None:
+        with self.assertLogs("patches.turn_stats", level="INFO") as cm:
+            self.stats.on_llm_chunk(100.0)
+            self.stats.mark("first_audio_out")
+            self.stats.end_of_response()
+            self.stats.mark_heard(101.0)
+        stats_lines = [r.getMessage() for r in cm.records if r.getMessage().startswith("TURN_STATS")]
+        self.assertEqual(len(stats_lines), 1)
+        self.assertNotIn("heard", stats_lines[0])
 
 
 if __name__ == "__main__":

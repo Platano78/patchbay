@@ -22,6 +22,7 @@ from openai.types.chat.chat_completion_content_part_image_param import ImageURL
 from openai.types.chat.chat_completion_named_tool_choice_param import Function as NamedToolChoiceFunction
 from openai.types.realtime.realtime_conversation_item_assistant_message import (
     Content as AssistantContent,
+    RealtimeConversationItemAssistantMessage,
 )
 from openai.types.responses import ResponseFunctionToolCall
 from openai.types.shared_params import FunctionDefinition
@@ -38,9 +39,9 @@ from speech_to_speech.LLM.chat import Chat
 from speech_to_speech.LLM.compaction_prompt import CompactGenerateFn
 from speech_to_speech.phone_context import apply_ambient
 from speech_to_speech.think_filter import ThinkTagFilter
-from speech_to_speech.utils.utils import _generate_id
+from speech_to_speech.utils.utils import _generate_id, is_out_of_band
 from speech_to_speech.voice_affect import apply_affect_rule
-from speech_to_speech.voice_rules import apply_system_rules
+from speech_to_speech.voice_rules import apply_date_anchor, apply_system_rules
 
 logger = logging.getLogger(__name__)
 
@@ -240,7 +241,7 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
     # ── base hooks ──────────────────────────────────────────────────────────--
 
     def _serialize(self, active_chat: Chat) -> list[dict[str, Any]]:
-        return apply_affect_rule(apply_ambient(apply_system_rules(self._chat_messages(active_chat))))
+        return apply_affect_rule(apply_ambient(apply_date_anchor(apply_system_rules(self._chat_messages(active_chat)))))
 
     def _build_optional_kwargs(self, req_tools: Any, req_tool_choice: Any) -> dict[str, Any]:
         optional_kwargs: dict[str, Any] = {}
@@ -267,6 +268,38 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
             **create_kwargs,
         )
 
+    def _generate(self, active_chat: Chat, original_chat: Chat, turn: Any, optional_kwargs: dict[str, Any]) -> Iterator[Any]:
+        # Remember the generation this turn started under, so the stream reader below
+        # can stop on a barge-in cancel even while no event is being yielded (a trickle
+        # of empty-delta chunks never reaches the base class's per-event stale check).
+        self._turn_gen = turn.gen
+        yield from super()._generate(active_chat, original_chat, turn, optional_kwargs)
+
+    def _consume_streaming(self, events: Iterator[ProviderEvent], state: Any, turn: Any) -> Iterator[Any]:
+        try:
+            yield from super()._consume_streaming(events, state, turn)
+        finally:
+            self._record_cancelled_reply(state, turn)
+
+    def _record_cancelled_reply(self, state: Any, turn: Any) -> None:
+        """A reply cut off by a barge-in never reaches the base class's write-back, so
+        the model would forget what it was saying. Record what was generated so far
+        (not what was heard: the client's playback position is not mapped onto text)."""
+        if not self._generation_is_stale(turn.gen) or is_out_of_band(turn.response):
+            return
+        text = state.clean_text.strip()
+        if not text:
+            return
+        turn.runtime_config.chat.add_item(
+            RealtimeConversationItemAssistantMessage(
+                type="message", role="assistant", content=[AssistantContent(type="output_text", text=text)]
+            )
+        )
+        # add_item does not enforce the soft size limit; the caller does, as the base
+        # class's own write-back does.
+        turn.runtime_config.chat.trim_if_needed(self.compactor)
+        logger.info("barge-in: kept %d chars of the cancelled reply in history", len(text))
+
     def _iter_stream_events(self, api_response: Stream[ChatCompletionChunk]) -> Iterator[ProviderEvent]:
         # Accumulate streamed tool-call deltas, keyed by their stream index, and the
         # raw assistant text, then emit assistant message + tool calls + usage once
@@ -284,7 +317,11 @@ class ChatCompletionsApiModelHandler(BaseOpenAICompatibleHandler):
         # the check is skipped) when the watchdog is disabled.
         stream_max_s = _parse_stream_max_s()
         deadline = time.monotonic() + stream_max_s if stream_max_s is not None else None
+        turn_gen = getattr(self, "_turn_gen", None)
         for chunk in api_response:
+            if self._generation_is_stale(turn_gen):
+                logger.info("LLM stream abandoned (barge-in)")
+                return
             if deadline is not None and time.monotonic() > deadline:
                 # Reuse httpx.ReadTimeout deliberately: the base class's
                 # existing `except httpx.ReadTimeout` around stream

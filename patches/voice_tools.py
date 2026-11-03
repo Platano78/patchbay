@@ -13,8 +13,10 @@ import logging
 import os
 import re
 import sys
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -34,6 +36,9 @@ _MAX_RESULT_CHARS = 600
 # rather than by what is speakable.
 _KNOWLEDGE_RESULT_CHARS = 1800
 _DECISION_RESULT_CHARS = 1200
+_WEB_SEARCH_RESULT_CHARS = 1200
+# web_search keeps up to two sentences / this many chars of each hit's body.
+_WEB_SNIPPET_CHARS = 300
 
 # Per-document excerpt budget inside knowledge_lookup.
 _DOC_EXCERPT_CHARS = 450
@@ -60,15 +65,16 @@ _KNOWLEDGE_TIMEOUT_S = 6.0
 # Every knowledge backend is a container on this same box, so these are
 # loopback budgets, not network ones. Measured on the live box: QMD query
 # ~0.15s and get ~0.01s, Genesis /search ~0.09s, Faulkner /api/search ~0.002s.
-# Each is set well above its measurement to absorb a cold container, and well
-# below what a person would notice mid-sentence.
-_QMD_TIMEOUT_S = 2.0
+# Genesis and Faulkner are set well above those measurements. QMD is the
+# exception: re-measured on the live box (vec+lex query) at 1.76-3.05s, and a
+# 2.0s budget timed out on 3/3 live knowledge_lookup calls, so it gets 4.0s.
+_QMD_TIMEOUT_S = 4.0
 _GENESIS_TIMEOUT_S = 1.5
 _DECISION_TIMEOUT_S = 1.5
 # Wall clock the whole fan-out gets, shared across both lanes. Sits under the
 # 6s tool deadline so a slow backend degrades to partial results rather than
 # tripping execute()'s "timed out" refusal.
-_FANOUT_BUDGET_S = 2.5
+_FANOUT_BUDGET_S = 5.0
 _SEARCH_TIMEOUT_S = 10.0
 _MOOD_TIMEOUT_S = 2.0
 _HERMES_DELEGATE_TIMEOUT_S = 3.0
@@ -123,18 +129,62 @@ _cockpit: Optional[Any] = None
 # has not run (standalone/unit use) = permissive.
 _ARMED_NAMES: set[str] = set()
 
+# Consequential-action confirmation gate. Tool names in _CONFIRM_NAMES must be
+# explicitly confirmed by the user (via confirm_action) before they may run.
+# Rebound, never mutated, in get_tool_defs() for the same reason as
+# _ARMED_NAMES. Two opt-in sources: the VOICE_CONFIRM_TOOLS env var
+# (pipe-separated; the literal "off" disables the whole mechanism) and
+# drop-in modules that set CONSEQUENTIAL = True. EMPTY BY DEFAULT: no built-in
+# is gated out of the box — patchbay has no tool today that warrants it, and
+# an empty default means the public build's behaviour is unchanged.
+_CONFIRM_NAMES: set[str] = set()
+# Which drop-ins declared CONSEQUENTIAL on the last _load_dropin_tools() call.
+# Rebound at the top of that call so a load never accumulates across calls;
+# get_tool_defs() merges it into _CONFIRM_NAMES.
+_CONSEQUENTIAL_DROPINS: set[str] = set()
+# RESULT_CHARS values declared by drop-ins on the last _load_dropin_tools()
+# call, name -> int. Rebound at the top of that call so a load never
+# accumulates across calls; execute() falls back here before the default.
+_DROPIN_RESULT_CHARS: dict[str, int] = {}
+# Drop-ins that set TIME_SENSITIVE = True get the "Checked at" stamp on results.
+_TIME_SENSITIVE_DROPINS: set[str] = set()
+# Sentinel: a declared ``RESULT_CHARS = None`` must warn, but an absent
+# attribute is the normal case and must not.
+_UNSET = object()
+# The two-token gate, guarded by _CONFIRM_LOCK because execute() and
+# confirm_action both touch it, from tool worker threads:
+#   _CONFIRM_REFUSED   = the (tool, arg) the gate last refused, or None
+#   _CONFIRM_CONFIRMED = the (tool, arg) the user has confirmed, or None
+# The token is scoped to the EXACT arg that was refused (so confirming a send
+# of A never authorizes a send of B) and is single-use (an immediate identical
+# repeat is refused again). None is a legitimate arg for zero-arg tools and
+# compares correctly.
+_CONFIRM_LOCK = threading.Lock()
+_CONFIRM_REFUSED: Optional[tuple[str, Any]] = None
+_CONFIRM_CONFIRMED: Optional[tuple[str, Any]] = None
+# Spoken back to the model when a consequential call is refused.
+_CONFIRM_REFUSAL = (
+    "That needs your explicit go-ahead before I can do it. If the user "
+    "confirms, call confirm_action with this action's name, then retry."
+)
+
 
 def set_cockpit(cockpit: Any) -> None:
     global _cockpit
     _cockpit = cockpit
 
-# One shared worker pool for the hard wall-clock deadlines below; tool calls
-# are infrequent and short-lived so a small pool is plenty.
-_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="voice-tool")
+# Every tool call runs on its OWN daemon thread (see _run_bounded), never on a
+# shared pool: a timed-out call cannot be cancelled, so on a pool one hung
+# backend kept its worker forever and four of them starved every other tool.
+# Calls that timed out but are still running are tracked here (record id ->
+# tool name) so a permanently hung backend cannot grow threads without bound.
+_STRAGGLER_LOCK = threading.Lock()
+_STRAGGLERS: dict[int, str] = {}
+_MAX_STRAGGLERS_PER_TOOL = 2
+_MAX_STRAGGLERS_TOTAL = 16
 
-# Separate pool for knowledge_lookup's backend fan-out. It must NOT share
-# _EXECUTOR: a tool running there submits into this one, and nesting onto a
-# saturated pool would deadlock.
+# Separate pool for knowledge_lookup's backend fan-out. Its lanes carry their
+# own per-call httpx timeouts, so unlike tool calls they cannot hang forever.
 _FANOUT = ThreadPoolExecutor(max_workers=4, thread_name_prefix="voice-fanout")
 
 _WMO_WEATHER: dict[int, str] = {
@@ -220,6 +270,9 @@ TOOL_DEFS: list[dict] = [
             "rejected alternative — use decision_lookup instead. Returns "
             "excerpts from the source documents and past conversations; read "
             "them and answer in 1-2 spoken sentences."
+            # If a reminder tool is ever added, this next sentence must go.
+            " This searches saved notes only and is not a reminder system; "
+            "there is no way to set reminders - say so."
         ),
         "parameters": {
             "type": "object",
@@ -263,11 +316,12 @@ TOOL_DEFS: list[dict] = [
         "type": "function",
         "name": "set_mood",
         "description": (
-            "Set the visual mood of your interface. Call this whenever your "
-            "emotional tone shifts — when sharing good news, thinking hard, "
-            "expressing concern, being playful. The user sees your mood as "
-            "the interface's appearance. Mood persists until you change it. "
-            "Never announce or narrate the mood change in your reply."
+            "Set the visual mood of your interface. Call this only when the "
+            "user asks you to show an emotion or expression, or asks you to "
+            "change your mood. Do not call it to accompany ordinary answers. "
+            "The user sees your mood as the interface's appearance. Mood "
+            "persists until you change it. Never announce or narrate the mood "
+            "change in your reply."
         ),
         "parameters": {
             "type": "object",
@@ -346,6 +400,25 @@ TOOL_DEFS: list[dict] = [
                 "message": {"type": "string", "description": "The message to send to Hermes."}
             },
             "required": ["message"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "confirm_action",
+        "description": (
+            "Confirm a consequential action the user just explicitly approved. "
+            "Call this ONLY after the user has clearly confirmed the action you "
+            "were refused for, then retry that same call exactly as it was."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "description": "The name of the action the user just approved.",
+                }
+            },
+            "required": ["action"],
         },
     },
 ]
@@ -536,20 +609,33 @@ def _load_dropin_tools() -> list[dict]:
     """Load drop-in tools from ``VOICE_TOOLS_DIR`` (one ``*.py`` per tool),
     registering each into ``_DISPATCH`` and returning its TOOL_DEF.
 
+    Files whose name starts with ``_`` or ``test_`` are skipped quietly, not
+    with a warning: the repo ships its drop-in tests beside the tools in
+    ``examples/tools/`` and the README points ``VOICE_TOOLS_DIR`` there, so
+    they are expected neighbours, not broken drop-ins. Skipping matters
+    beyond the noise — a test module with a module-level ``TOOL_DEF`` and
+    ``run`` (a fixture, a helper) must not arm itself as a live voice tool.
+
     Off unless the env var points at a directory. Each module must expose a
     ``TOOL_DEF`` dict (with a string "name" and "parameters") and a callable
     ``run``; optional ``TIMEOUT_S`` / ``ARG_KEY`` / ``ARG_LABEL`` /
-    ``TOOL_LABEL`` / ``REQUIRED`` override the defaults. Any load/validation
-    failure warns and skips — a broken drop-in never crashes the pipeline.
+    ``TOOL_LABEL`` / ``REQUIRED`` / ``RESULT_CHARS`` override the defaults, and a truthy
+    ``CONSEQUENTIAL`` opts the tool into the confirmation gate. Any load or
+    validation failure warns and skips — a broken drop-in never crashes the
+    pipeline.
     Built-ins and earlier-loaded drop-ins win name collisions. Idempotent:
     re-registration overwrites the ``_DISPATCH`` entry rather than duplicating."""
+    global _CONSEQUENTIAL_DROPINS, _DROPIN_RESULT_CHARS
+    _CONSEQUENTIAL_DROPINS = set()
+    _DROPIN_RESULT_CHARS = {}
+    _TIME_SENSITIVE_DROPINS.clear()
     if not _TOOLS_DIR or not os.path.isdir(_TOOLS_DIR):
         return []
     builtin_names = {t["name"] for t in TOOL_DEFS}
     defs: list[dict] = []
     seen: set[str] = set()
     for path in sorted(Path(_TOOLS_DIR).glob("*.py")):
-        if path.name.startswith("_"):
+        if path.name.startswith(("_", "test_")):
             continue
         try:
             spec = importlib.util.spec_from_file_location(f"voice_dropin_{path.stem}", str(path))
@@ -586,11 +672,43 @@ def _load_dropin_tools() -> list[dict]:
         arg_label = getattr(module, "ARG_LABEL", f"a value for {name}")
         tool_label = getattr(module, "TOOL_LABEL", name.replace("_", " "))
         required = getattr(module, "REQUIRED", arg_key is not None)
+        if getattr(module, "CONSEQUENTIAL", False):
+            _CONSEQUENTIAL_DROPINS.add(name)
+        if getattr(module, "TIME_SENSITIVE", False) is True:
+            _TIME_SENSITIVE_DROPINS.add(name)
+        result_chars = getattr(module, "RESULT_CHARS", _UNSET)
+        if result_chars is not _UNSET:
+            # bool is an int in Python; True is a mistake, not a cap of 1.
+            if (
+                isinstance(result_chars, bool)
+                or not isinstance(result_chars, int)
+                or result_chars <= 0
+            ):
+                logger.warning(
+                    "voice_tools: drop-in %s has an invalid RESULT_CHARS %r; using the default cap",
+                    path, result_chars)
+            else:
+                _DROPIN_RESULT_CHARS[name] = result_chars
         tool_def.setdefault("type", "function")
         _DISPATCH[name] = (run, timeout_s, arg_key, arg_label, tool_label, required)
         seen.add(name)
         defs.append(tool_def)
     return defs
+
+
+def _maybe_arm_confirm(armed: list[dict]) -> list[dict]:
+    """Append confirm_action to the armed list (and _ARMED_NAMES) iff an armed
+    tool is consequential. With nothing gated, confirm_action is prompt noise
+    and the legend plate would show a tool that can only refuse, so it stays
+    out of the catalog entirely. Idempotent: a VOICE_TOOLS pin that already
+    named it is not duplicated."""
+    global _ARMED_NAMES
+    if not (_CONFIRM_NAMES & _ARMED_NAMES):
+        return armed
+    if any(t["name"] == "confirm_action" for t in armed):
+        return armed
+    _ARMED_NAMES = _ARMED_NAMES | {"confirm_action"}
+    return armed + [next(t for t in TOOL_DEFS if t["name"] == "confirm_action")]
 
 
 def get_tool_defs() -> list[dict]:
@@ -621,6 +739,38 @@ def get_tool_defs() -> list[dict]:
     by_name = {t["name"]: t for t in catalog}
     dropin_suffix = f" +{len(dropins)} drop-in" if dropins else ""
 
+    # Consequential-action gate: VOICE_CONFIRM_TOOLS (pipe-separated tool
+    # names; the literal "off" disables the mechanism entirely, overriding
+    # drop-in declarations) plus drop-ins that set CONSEQUENTIAL = True.
+    # Empty by default. Unknown names warn and are ignored, as with
+    # VOICE_TOOLS below. Rebound, never mutated, as with _ARMED_NAMES.
+    global _CONFIRM_NAMES, _CONFIRM_REFUSED, _CONFIRM_CONFIRMED
+    confirm_env = os.environ.get("VOICE_CONFIRM_TOOLS", "").strip()
+    if confirm_env.lower() == "off":
+        _CONFIRM_NAMES = set()
+    else:
+        confirm_names = set(_CONSEQUENTIAL_DROPINS)
+        for raw in confirm_env.split("|"):
+            name = raw.strip()
+            if not name:
+                continue
+            if name in by_name:
+                confirm_names.add(name)
+            else:
+                logger.warning(
+                    "voice_tools: VOICE_CONFIRM_TOOLS names unknown tool %r (ignored)", name
+                )
+        # confirm_action must never gate itself, whatever the env says —
+        # the tool that authorizes a gated call cannot require its own
+        # authorization, or the refusal/confirm pair is unbreakable.
+        confirm_names.discard("confirm_action")
+        _CONFIRM_NAMES = confirm_names
+    # Rearming is a new session: a token left over from a previous run must
+    # not authorize the first call of this one.
+    with _CONFIRM_LOCK:
+        _CONFIRM_REFUSED = None
+        _CONFIRM_CONFIRMED = None
+
     env = os.environ.get("VOICE_TOOLS")
     if env:
         wanted = set()
@@ -634,6 +784,7 @@ def get_tool_defs() -> list[dict]:
                 logger.warning("voice_tools: VOICE_TOOLS names unknown tool %r (ignored)", name)
         armed = [t for t in catalog if t["name"] in wanted]
         _ARMED_NAMES = {t["name"] for t in armed}
+        armed = _maybe_arm_confirm(armed)
         logger.info("voice_tools: armed %d/%d (env)%s", len(armed), len(catalog), dropin_suffix)
         return armed
 
@@ -671,6 +822,7 @@ def get_tool_defs() -> list[dict]:
 
     armed = [t for t in TOOL_DEFS if t["name"] in names] + dropins
     _ARMED_NAMES = {t["name"] for t in armed}
+    armed = _maybe_arm_confirm(armed)
     logger.info(
         "voice_tools: armed %d/%d (probe: qmd=%s hermes=%s genesis=%s faulkner=%s)%s",
         len(armed),
@@ -690,6 +842,11 @@ def get_tool_defs() -> list[dict]:
 VISUAL_TOOLS = {"set_mood"}
 
 
+class _Unstamped(str):
+    """A runner's "nothing to report" string (no place, no results). It is a
+    normal return, but not a real result, so execute() never stamps it."""
+
+
 def _truncate(text: str, limit: int = _MAX_RESULT_CHARS) -> str:
     text = " ".join(text.split())
     if len(text) <= limit:
@@ -702,7 +859,12 @@ def _truncate(text: str, limit: int = _MAX_RESULT_CHARS) -> str:
 _RESULT_CHARS = {
     "knowledge_lookup": _KNOWLEDGE_RESULT_CHARS,
     "decision_lookup": _DECISION_RESULT_CHARS,
+    "web_search": _WEB_SEARCH_RESULT_CHARS,
 }
+
+# Built-ins whose result is about "now"; a successful result is stamped with
+# the time it was fetched so a stale one in the history is recognisable later.
+_TIME_SENSITIVE_BUILTINS = {"web_search", "get_weather"}
 
 
 # Kept as a shared constant so the runner's own fallback refusal (when
@@ -722,7 +884,7 @@ def _run_get_weather(place: str | None) -> str:
             geo.raise_for_status()
             results = geo.json().get("results") or []
             if not results:
-                return f"I couldn't find a place called {place}."
+                return _Unstamped(f"I couldn't find a place called {place}.")
             hit = results[0]
             lat, lon = hit["latitude"], hit["longitude"]
             label = hit.get("name", place)
@@ -732,7 +894,7 @@ def _run_get_weather(place: str | None) -> str:
         else:
             loc = phone_context.location()
             if loc is None:
-                return f"I need {_WEATHER_PLACE_ARG_LABEL}."
+                return _Unstamped(f"I need {_WEATHER_PLACE_ARG_LABEL}.")
             lat, lon = loc
             label = "your location"
 
@@ -747,7 +909,7 @@ def _run_get_weather(place: str | None) -> str:
         code = current.get("weathercode")
         conditions = _WMO_WEATHER.get(code, "unknown conditions")
         if temp is None:
-            return f"I couldn't get current conditions for {label}."
+            return _Unstamped(f"I couldn't get current conditions for {label}.")
         sentence = f"It's currently {temp}°C and {conditions} in {label}"
         if wind is not None:
             sentence += f", with wind around {wind} km/h."
@@ -768,21 +930,51 @@ def _serp_title(title: str) -> str:
     return title.strip()
 
 
+def _snippet(body: str, limit: int = _WEB_SNIPPET_CHARS) -> str:
+    """Up to two sentences of ``body``, at most ``limit`` chars, cut at a
+    sentence or word boundary, never mid-word."""
+    body = " ".join(body.split())
+    if not body:
+        return ""
+    text = ". ".join(body.split(". ")[:2])
+    if len(text) <= limit:
+        return text.strip()
+    cut = text[:limit]
+    end = cut.rfind(". ")
+    if end > 0:
+        return cut[: end + 1].strip()
+    if text[limit] != " ":  # the cut landed inside a word: back up to a boundary
+        space = cut.rfind(" ")
+        if space > 0:
+            cut = cut[:space]
+        else:
+            # No space in the window (one long token, CJK): the last
+            # non-alphanumeric character is the only safe boundary.
+            bound = max((i for i, c in enumerate(cut) if not c.isalnum()), default=-1)
+            if bound <= 0:
+                return ""  # drop the snippet rather than emit a mid-word cut
+            cut = cut[: bound + 1]
+    return cut.strip()
+
+
 def _run_web_search(query: str) -> str:
     from ddgs import DDGS
 
     with DDGS(timeout=int(_SEARCH_TIMEOUT_S)) as ddgs:
         hits = list(ddgs.text(query, max_results=3))
     if not hits:
-        return f"I didn't find any web results for {query}."
+        return _Unstamped(f"I didn't find any web results for {query}.")
     lines = []
     links = []
     for hit in hits[:3]:
         title = _serp_title((hit.get("title") or "").strip())
         body = (hit.get("body") or "").strip()
         # DDG instant-answer boxes sometimes return one run-on sentence with no
-        # ". " breaks; a hard character cap keeps each line short regardless.
-        snippet = body.split(". ")[0][:120].strip() if body else ""
+        # ". " breaks; the char cap (cut at a word boundary) bounds it anyway.
+        snippet = _snippet(body)
+        date = str(hit.get("date") or hit.get("published") or "").strip()
+        if date and title:
+            title = f"{title} ({date})"
         if title and snippet:
             lines.append(f"{title}: {snippet.rstrip('.')}")
         elif title:
@@ -799,7 +991,7 @@ def _run_web_search(query: str) -> str:
         except Exception as e:
             logger.warning("voice_tools: push_links failed: %r", e)
     # Sentences, not pipe-delimited rows: TTS reads "|" aloud as a word.
-    return _truncate(". ".join(lines) + "." if lines else "")
+    return _truncate(". ".join(lines) + "." if lines else "", _WEB_SEARCH_RESULT_CHARS)
 
 
 def _qmd_query(query: str, collections: list[str] | None) -> list[dict]:
@@ -1067,6 +1259,20 @@ def _run_send_to_hermes(message: str) -> str:
     return _cockpit.send_message(message)
 
 
+def _run_confirm_action(action: str) -> str:
+    """Promote the last refused call to confirmed, iff it was the one named.
+    A wrong name confirms nothing and leaves the refusal standing."""
+    global _CONFIRM_REFUSED, _CONFIRM_CONFIRMED
+    with _CONFIRM_LOCK:
+        if _CONFIRM_REFUSED is None:
+            return "Nothing is waiting for confirmation."
+        if _CONFIRM_REFUSED[0] != action:
+            return "That isn't the action waiting for confirmation."
+        _CONFIRM_CONFIRMED = _CONFIRM_REFUSED
+        _CONFIRM_REFUSED = None
+    return "Confirmed. Retry that call exactly as it was."
+
+
 # (fn, timeout_s, arg kwarg name (None for zero-arg tools), spoken label for
 # that arg, spoken label for the tool itself, required: whether a missing arg
 # should be refused ("I need ...") rather than passed through as None)
@@ -1108,6 +1314,15 @@ _DISPATCH = {
         "Hermes message",
         True,
     ),
+    # 2.0s: confirm_action does no I/O — it only swaps two in-memory tokens.
+    "confirm_action": (
+        _run_confirm_action,
+        2.0,
+        "action",
+        "the name of the action to confirm",
+        "confirmation",
+        True,
+    ),
 }
 
 
@@ -1134,15 +1349,108 @@ def execute(name: str, kwargs: dict) -> str:
                 logger.warning("voice_tools.execute: %s missing required arg %r (got %r)", name, arg_key, kwargs)
                 return f"I need {arg_label}."
             arg = None
+    # Bound thread growth against a permanently hung backend. Checked before
+    # the confirm gate so a refusal here never burns the user's confirmation.
+    with _STRAGGLER_LOCK:
+        stuck = list(_STRAGGLERS.values())
+    if stuck.count(name) >= _MAX_STRAGGLERS_PER_TOOL or len(stuck) >= _MAX_STRAGGLERS_TOTAL:
+        logger.warning("voice_tools.execute: %s refused, %d stuck call(s) (%d for this tool)",
+                       name, len(stuck), stuck.count(name))
+        return _failure_result(name, tool_label, "it is still stuck on an earlier request", time.monotonic())
+    # Consequential-action gate, at the one choke point every tool passes
+    # through. confirm_action is never in _CONFIRM_NAMES (discarded when the
+    # set is built), so it can never gate itself.
+    if name in _CONFIRM_NAMES:
+        global _CONFIRM_REFUSED, _CONFIRM_CONFIRMED
+        with _CONFIRM_LOCK:
+            if _CONFIRM_CONFIRMED is not None and _CONFIRM_CONFIRMED == (name, arg):
+                _CONFIRM_CONFIRMED = None  # single use: an identical repeat is refused
+            else:
+                _CONFIRM_REFUSED = (name, arg)
+                _CONFIRM_CONFIRMED = None  # a new refusal invalidates a stale confirmation
+                return _CONFIRM_REFUSAL
+    started = time.monotonic()
     try:
-        future = _EXECUTOR.submit(fn, arg)
-        try:
-            result = future.result(timeout=timeout_s)
-        except FutureTimeoutError:
-            logger.warning("voice_tools.execute: %s timed out after %.1fs", name, timeout_s)
-            future.cancel()
-            return f"The {tool_label} timed out."
-        return _truncate(result, _RESULT_CHARS.get(name, _MAX_RESULT_CHARS)) if result else f"The {tool_label} failed."
+        result = _run_bounded(fn, arg, name, timeout_s)
+    except _ToolTimeout:
+        logger.warning("voice_tools.execute: %s timed out after %.1fs", name, timeout_s)
+        return _failure_result(name, tool_label, "timed out", started)
     except Exception as e:
         logger.warning("voice_tools.execute: %s failed: %r", name, e)
-        return f"The {tool_label} failed."
+        return _failure_result(name, tool_label, "it failed", started)
+    try:
+        # Built-ins first: a drop-in that shadows a built-in name must not
+        # be able to raise that built-in's cap.
+        cap = _RESULT_CHARS.get(name, _DROPIN_RESULT_CHARS.get(name, _MAX_RESULT_CHARS))
+        elapsed_ms = (time.monotonic() - started) * 1000
+        if not result:
+            return _failure_result(name, tool_label, "no result came back", started)
+        out = _truncate(result, cap)
+        logger.info("voice_tools.execute: %s %.0fms -> %s", name, elapsed_ms, out[:200])
+        if not isinstance(result, _Unstamped) and (
+            name in _TIME_SENSITIVE_BUILTINS or name in _TIME_SENSITIVE_DROPINS
+        ):
+            out += _checked_at_stamp()
+        return out
+    except Exception as e:
+        logger.warning("voice_tools.execute: %s failed: %r", name, e)
+        return _failure_result(name, tool_label, "it failed", started)
+
+
+class _ToolTimeout(Exception):
+    pass
+
+
+def _run_bounded(fn: Any, arg: Any, name: str, timeout_s: float) -> Any:
+    """Run ``fn(arg)`` on a fresh daemon thread; wait at most ``timeout_s``.
+
+    Returns the result, re-raises the tool's own exception, or raises
+    _ToolTimeout (the thread is then a tracked straggler until it finishes).
+    """
+    done = threading.Event()
+    box: dict[str, Any] = {}
+    key = id(box)
+    t0 = time.monotonic()
+
+    def worker() -> None:
+        try:
+            box["result"] = fn(arg)
+        except BaseException as e:  # handed to the caller, never lost
+            box["error"] = e
+        with _STRAGGLER_LOCK:
+            done.set()
+            was_straggler = _STRAGGLERS.pop(key, None) is not None
+        if was_straggler:
+            logger.warning(
+                "voice_tools.execute: %s finally finished after %.1fs (it had timed out)",
+                name, time.monotonic() - t0,
+            )
+
+    threading.Thread(target=worker, name="voice-tool", daemon=True).start()
+    if not done.wait(timeout_s):
+        with _STRAGGLER_LOCK:
+            # Decide under the lock the worker also takes to finish, so a call
+            # finishing right at the deadline is never both returned and counted.
+            if not done.is_set():
+                _STRAGGLERS[key] = name
+                raise _ToolTimeout()
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
+
+
+def _failure_result(name: str, tool_label: str, reason: str, started: float) -> str:
+    """A failure string the LLM can act on (the model reads it; it is not
+    spoken verbatim): says what failed and what to do instead. Logs the same
+    one INFO result line every executed tool gets."""
+    text = (
+        f"Couldn't complete the {tool_label}: {reason}. Tell the user you "
+        "couldn't check right now; don't guess the answer and don't call it "
+        "again this turn."
+    )
+    logger.info("voice_tools.execute: %s %.0fms -> %s", name, (time.monotonic() - started) * 1000, text[:200])
+    return text
+
+
+def _checked_at_stamp() -> str:
+    return f" (Checked at {datetime.now().strftime('%I:%M %p').lstrip('0')} today.)"

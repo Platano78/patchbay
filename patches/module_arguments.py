@@ -21,11 +21,19 @@ class ModuleArguments:
         },
     )
     stt: Optional[
-        Literal["whisper", "whisper-mlx", "mlx-audio-whisper", "faster-whisper", "parakeet-tdt", "paraformer"]
+        Literal[
+            "whisper",
+            "whisper-mlx",
+            "mlx-audio-whisper",
+            "faster-whisper",
+            "parakeet-tdt",
+            "paraformer",
+            "remote-transcription",
+        ]
     ] = field(
         default="parakeet-tdt",
         metadata={
-            "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', 'parakeet-tdt', or 'paraformer'. Default is 'parakeet-tdt'."
+            "help": "The STT to use. Either 'whisper', 'whisper-mlx', 'mlx-audio-whisper', 'faster-whisper', 'parakeet-tdt', 'paraformer', or 'remote-transcription' (any server speaking OpenAI's /v1/audio/transcriptions protocol; needs --remote_transcription_base_url, no local fallback). Default is 'parakeet-tdt'."
         },
     )
     llm_backend: Optional[Literal["transformers", "mlx-lm", "responses-api", "chat-completions"]] = field(
@@ -50,7 +58,7 @@ class ModuleArguments:
     enable_live_transcription: bool = field(
         default=True,
         metadata={
-            "help": "Enable live transcription display while user is speaking (works with parakeet-tdt). Default is true."
+            "help": "Enable live transcription display while user is speaking (works with parakeet-tdt and remote-transcription). Default is true."
         },
     )
     live_transcription_update_interval: float = field(

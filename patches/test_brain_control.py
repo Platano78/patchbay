@@ -5,7 +5,7 @@ Run from repo root: python3 -m pytest patches/test_brain_control.py -v
 The real ``speech_to_speech`` package is not installed in this repo, so the
 handful of symbols brain_control.py imports from it are stubbed into
 ``sys.modules`` before the import below -- same hermetic pattern as
-``test_reflex_lane.py``. ``speech_to_speech.voice_clone`` is aliased to the
+``test_parrot_lane.py``. ``speech_to_speech.voice_clone`` is aliased to the
 REAL ``patches.voice_clone`` module (not a stub) so these tests exercise the
 actual deployed logic, not a mock of it.
 """
@@ -1244,6 +1244,100 @@ def test_set_brain_invalid_reasoning_effort_warns_and_falls_back(tmp_path, monke
     assert bc.llm_handler._extra_body == {"sentinel": "fallback"}
     assert "bogus" in caplog.text
     assert "herald" in caplog.text
+
+
+# ── per-brain chat_template_kwargs passthrough ─────────────────────────────
+
+
+def _ctk_switch(tmp_path, monkeypatch, entry, built, name="herald"):
+    bc = _make_brain_control(tmp_path)
+    bc.brains = {name: {"available": True, "base_url": "http://x", "model": "auto", **entry}}
+    monkeypatch.setattr(bc, "_resolve_model", lambda *a, **k: "m")
+    monkeypatch.setattr(bc, "_resolve_api_key", lambda e: "sk-x")
+    monkeypatch.setattr(
+        brain_control.BaseOpenAICompatibleHandler,
+        "_build_extra_body",
+        staticmethod(lambda *a, **k: built),
+        raising=False,
+    )
+    ok, error = bc._set_brain(name)
+    assert (ok, error) == (True, "")
+    return bc
+
+
+def test_declared_chat_template_kwargs_merge_over_the_default(tmp_path, monkeypatch):
+    built = {"chat_template_kwargs": {"enable_thinking": False}}
+    bc = _ctk_switch(tmp_path, monkeypatch, {"chat_template_kwargs": {"conversational_mode": True}}, built)
+
+    assert bc.llm_handler._extra_body == {
+        "chat_template_kwargs": {"enable_thinking": False, "conversational_mode": True}
+    }
+    assert built == {"chat_template_kwargs": {"enable_thinking": False}}  # computed dict not mutated
+
+
+def test_declared_chat_template_kwargs_win_over_computed_keys(tmp_path, monkeypatch):
+    built = {"chat_template_kwargs": {"enable_thinking": False}}
+    bc = _ctk_switch(tmp_path, monkeypatch, {"chat_template_kwargs": {"enable_thinking": True}}, built)
+
+    assert bc.llm_handler._extra_body == {"chat_template_kwargs": {"enable_thinking": True}}
+
+
+def test_declared_chat_template_kwargs_on_a_hosted_lane_send_only_what_was_declared(tmp_path, monkeypatch):
+    bc = _ctk_switch(
+        tmp_path,
+        monkeypatch,
+        {"type": "openrouter", "model": "a/b", "chat_template_kwargs": {"conversational_mode": True}},
+        {"chat_template_kwargs": {"enable_thinking": False}},
+        name="frontier",
+    )
+
+    assert bc.llm_handler._extra_body == {"chat_template_kwargs": {"conversational_mode": True}}
+
+
+def test_declared_chat_template_kwargs_when_default_body_is_none(tmp_path, monkeypatch):
+    bc = _ctk_switch(tmp_path, monkeypatch, {"chat_template_kwargs": {"conversational_mode": True}}, None)
+
+    assert bc.llm_handler._extra_body == {"chat_template_kwargs": {"conversational_mode": True}}
+
+
+def test_declared_chat_template_kwargs_combine_with_reasoning_effort(tmp_path, monkeypatch):
+    bc = _ctk_switch(
+        tmp_path,
+        monkeypatch,
+        {"reasoning_effort": "high", "chat_template_kwargs": {"conversational_mode": True}},
+        {"sentinel": "unused"},
+    )
+
+    assert bc.llm_handler._extra_body == {
+        "chat_template_kwargs": {"enable_thinking": False, "reasoning_effort": "high", "conversational_mode": True}
+    }
+
+
+def test_absent_or_empty_chat_template_kwargs_change_nothing(tmp_path, monkeypatch):
+    built = {"chat_template_kwargs": {"enable_thinking": False}}
+    absent = _ctk_switch(tmp_path, monkeypatch, {}, built)
+    empty = _ctk_switch(tmp_path, monkeypatch, {"chat_template_kwargs": {}}, built)
+    hosted_empty = _ctk_switch(
+        tmp_path, monkeypatch, {"type": "openrouter", "model": "a/b", "chat_template_kwargs": {}}, built, name="f"
+    )
+
+    assert absent.llm_handler._extra_body == built
+    assert empty.llm_handler._extra_body == built
+    assert hosted_empty.llm_handler._extra_body is None
+
+
+def test_invalid_chat_template_kwargs_warn_and_are_ignored(tmp_path, monkeypatch, caplog):
+    built = {"chat_template_kwargs": {"enable_thinking": False}}
+    with caplog.at_level(logging.WARNING, logger=brain_control.__name__):
+        for bad in ("conversational_mode", ["a"], {1: "x"}):
+            caplog.clear()
+            bc = _ctk_switch(tmp_path, monkeypatch, {"chat_template_kwargs": bad}, built)
+            assert bc.llm_handler._extra_body == built
+            matching = [
+                r for r in caplog.records
+                if r.levelno == logging.WARNING and "herald" in r.getMessage() and "chat_template_kwargs" in r.getMessage()
+            ]
+            assert len(matching) == 1
 
 
 # ── validate_model_override ──────────────────────────────────────────────
@@ -2735,3 +2829,35 @@ def test_a_brain_scoped_persona_is_refused_with_no_active_brain(tmp_path, monkey
     assert ack["ok"] is False
     assert "no active brain" in ack["error"]
     assert bc.persona_store.get("brains", {}) == {}
+
+
+# ── overlap_observe in the config snapshot (floor-management slice 2) ────
+
+
+def test_snapshot_overlap_observe_false_without_a_streamer(tmp_path):
+    assert _make_brain_control(tmp_path).handle({"type": "config_get"})["overlap_observe"] is False
+
+
+def test_snapshot_barge_cancel_false_without_a_streamer(tmp_path):
+    assert _make_brain_control(tmp_path).handle({"type": "config_get"})["barge_cancel"] is False
+
+
+def test_snapshot_barge_cancel_follows_the_streamers_cancel_scope(tmp_path):
+    """Knob on = the streamer holds a scope; VOICE_BARGE_CANCEL=off = it holds None."""
+    streamer = _FakeStreamer()
+    bc = _make_brain_control(tmp_path, streamer=streamer)
+    assert bc.handle({"type": "config_get"})["barge_cancel"] is False  # no such attribute: an older streamer
+    streamer.cancel_scope = None
+    assert bc.handle({"type": "config_get"})["barge_cancel"] is False
+    streamer.cancel_scope = object()
+    assert bc.handle({"type": "config_get"})["barge_cancel"] is True
+
+
+def test_snapshot_overlap_observe_follows_the_streamer(tmp_path):
+    streamer = _FakeStreamer()
+    bc = _make_brain_control(tmp_path, streamer=streamer)
+    assert bc.handle({"type": "config_get"})["overlap_observe"] is False  # a streamer with no such attribute
+    streamer.overlap_observe = True
+    assert bc.handle({"type": "config_get"})["overlap_observe"] is True
+    streamer.overlap_observe = False
+    assert bc.handle({"type": "config_get"})["overlap_observe"] is False

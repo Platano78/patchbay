@@ -5,8 +5,8 @@ HA_URL / HA_TOKEN, and restart the voice agent. See the bottom of this file
 for the one exposed tool, `home_assistant`.
 
 Command parsing (`parse_command`) is a pure function, independent of the HTTP
-I/O below it, so a later pre-LLM reflex lane can reuse it without going
-through this module's network calls.
+I/O below it, so it can be tested without going through this module's
+network calls.
 """
 from __future__ import annotations
 
@@ -336,11 +336,22 @@ def _strip_leading_filler(name: str) -> str:
     return name
 
 
-def _resolve_entity(name: str) -> Optional[str]:
-    """Resolve a spoken name to an entity_id, or None if nothing matches.
+class _Ambiguous:
+    """`_resolve_entity` result: the spoken name fits several different
+    devices, so none may be acted on. `aliases` is the sorted alias list."""
+
+    def __init__(self, aliases: list[str]):
+        self.aliases = aliases
+
+
+def _resolve_entity(name: str) -> "Optional[str | _Ambiguous]":
+    """Resolve a spoken name to an entity_id, or None if nothing matches, or
+    an `_Ambiguous` when the token-superset step matches aliases belonging to
+    more than one distinct entity_id.
 
     Order: exact alias match, suffix strip/add variants, token-superset
-    fuzzy match (shortest alias wins), raw entity_id passthrough.
+    fuzzy match (several entity_ids -> `_Ambiguous`; one entity_id -> its
+    shortest alias), raw entity_id passthrough.
     """
     key = _strip_leading_filler(name.lower().strip())
     if key in _ALIASES:
@@ -362,6 +373,8 @@ def _resolve_entity(name: str) -> Optional[str]:
             if input_tokens.issubset(set(alias.split()))
         ]
         if candidates:
+            if len({eid for _, eid in candidates}) > 1:
+                return _Ambiguous(sorted(alias for alias, _ in candidates))
             candidates.sort(key=lambda kv: len(kv[0]))
             return candidates[0][1]
 
@@ -520,7 +533,10 @@ TOOL_DEF = {
         "temperature. Give the whole request as natural language in "
         "`command`, e.g. 'turn on the kitchen lights' or 'set the office "
         "lamp to blue'. Handles one device or action per call — for "
-        "multiple actions, call this tool once per action."
+        "multiple actions, call this tool once per action. Only call this "
+        "when the user has named the device, or it is unmistakable from the "
+        "conversation which one they mean. If they say 'it' or 'that' "
+        "without naming a device, ask which device instead of guessing."
     ),
     "parameters": {
         "type": "object",
@@ -530,13 +546,32 @@ TOOL_DEF = {
                 "description": (
                     "The home automation request in natural language, e.g. "
                     "'turn off the living room lights' or 'activate the "
-                    "movie night scene'."
+                    "movie night scene'. It must contain the device name the "
+                    "user said; never invent or assume a device name."
                 ),
             }
         },
         "required": ["command"],
     },
 }
+
+
+_UNCLEAR_MSG = "Didn't catch which device. Ask the user which one; don't guess or retry."
+_COMPOUND_MSG = "That's more than one action. Call this tool once per device or action."
+
+
+def _unparsed_message(command: str) -> str:
+    """Why `parse_command` returned None, as the tool result. A compound
+    command should be split by the caller; anything else (vague "it", no
+    device, unrecognised) means the device is unknown and must be asked."""
+    return _COMPOUND_MSG if _has_compound(command) else _UNCLEAR_MSG
+
+
+def _ambiguous_message(spoken: str, amb: _Ambiguous) -> str:
+    return (
+        f"More than one device matches '{spoken}': {', '.join(amb.aliases[:4])}. "
+        "Ask the user which one."
+    )
 
 
 def run(arg: Optional[str] = None) -> str:
@@ -548,7 +583,7 @@ def run(arg: Optional[str] = None) -> str:
 
     intent = parse_command(command)
     if intent is None:
-        return _CAPABILITIES_MSG
+        return _unparsed_message(command)
 
     err = _ensure_aliases()
     if err:
@@ -557,6 +592,8 @@ def run(arg: Optional[str] = None) -> str:
     entity_id = None
     if intent.entity is not None:
         entity_id = _resolve_entity(intent.entity)
+        if isinstance(entity_id, _Ambiguous):
+            return _ambiguous_message(intent.entity, entity_id)
         if entity_id is None:
             # The alias map is a snapshot taken on first use. A device renamed
             # or added in Home Assistant since then would miss here forever,
@@ -564,6 +601,8 @@ def run(arg: Optional[str] = None) -> str:
             # once more before telling the user it doesn't exist.
             _ensure_aliases(force=True)
             entity_id = _resolve_entity(intent.entity)
+            if isinstance(entity_id, _Ambiguous):
+                return _ambiguous_message(intent.entity, entity_id)
         if entity_id is None:
             return f"I couldn't find anything called {intent.entity}."
 

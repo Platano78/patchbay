@@ -28,6 +28,7 @@ import queue
 import re
 import shutil
 import subprocess
+import sys
 import threading
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -42,7 +43,8 @@ sync_api = pytest.importorskip("playwright.sync_api", reason="playwright not ins
 # a false pass once already (see CONTRAST_PAIRS' comment).
 Image = pytest.importorskip("PIL.Image", reason="Pillow not installed")
 
-import asyncio  # noqa: E402  — only reachable once the two imports above succeed
+import asyncio
+import contextlib  # noqa: E402  — only reachable once the two imports above succeed
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -99,6 +101,10 @@ class StubControlServer:
         self.ack_payload = None  # body of the config_ack{ok:true} a config_set gets back
         self.wake_enabled = False  # mirrors the last wakeword_state this stub sent
         self.answer_config_get = True  # off = leave a resync in flight, unanswered
+        self.overlap_observe = False  # report overlap_observe:true in config_state when set
+        self.frame_log = []  # client->server order: "playback:<state>", "barge_in" and runs of "b" (binary mic frames)
+        self.barge_cancel = True  # advertise barge_cancel in config_state, as a server with the knob on does
+        self.answer_barge_in = True  # reply to {"type":"barge_in"} with {"type":"audio_stop"}, as the real server does
         self._client = None
         self._loop = None
         self._stop = None
@@ -112,12 +118,22 @@ class StubControlServer:
             async for msg in ws:
                 if isinstance(msg, (bytes, bytearray)):
                     self.binary_frames += 1
+                    if not self.frame_log or self.frame_log[-1] != "b":
+                        self.frame_log.append("b")
                     continue
                 try:
                     data = json.loads(msg)
                 except ValueError:
                     continue
                 self.text_msgs.append(data)
+                if data.get("type") == "playback":
+                    self.frame_log.append("playback:" + str(data.get("state")))
+                if data.get("type") == "ptt":
+                    self.frame_log.append("ptt:" + str(data.get("state")))
+                if data.get("type") == "barge_in":
+                    self.frame_log.append("barge_in")
+                    if self.answer_barge_in:
+                        await ws.send(json.dumps({"type": "audio_stop"}))
                 if data.get("type") == "config_get":
                     if self.answer_config_get:
                         await ws.send(json.dumps(self._state_frame()))
@@ -165,13 +181,27 @@ class StubControlServer:
     def _state_frame(self):
         """A config_state that agrees with the wake-word state this stub has
         already broadcast — the same consistency a real server has for free."""
-        return dict(CONFIG_STATE, wake_word={
+        frame = dict(CONFIG_STATE, wake_word={
             "enabled": self.wake_enabled,
             "state": "asleep" if self.wake_enabled else "off",
             "phrase": "hey jarvis",
             "model": "hey_jarvis",
             "models": ["hey_jarvis"],
         })
+        if self.overlap_observe:
+            frame["overlap_observe"] = True
+        if self.barge_cancel:
+            frame["barge_cancel"] = True
+        return frame
+
+    def send_audio(self, seconds):
+        """Push `seconds` of silent 16 kHz mono int16 PCM, as a TTS chunk would arrive."""
+        data = bytes(int(16000 * seconds) * 2)
+        asyncio.run_coroutine_threadsafe(
+            self._client.send(data), self._loop).result(timeout=5)
+
+    def playback_frames(self):
+        return [m for m in self.text_msgs if m.get("type") == "playback"]
 
     def send(self, payload):
         """Push a server->client frame, as the pipeline or a second screen would."""
@@ -201,6 +231,11 @@ def _webclient_temp_root(tmp_path_factory):
     for name in os.listdir(HERE):
         if name in ("themes", "avatar"):
             continue
+        if name == "persona-voices.json":
+            # An install-local seed file (see seedPersonaVoices in index.html): the real
+            # one must not leak into the suite, or it would pre-pair personas under tests
+            # that assume none. Tests that need one write it into this temp root.
+            continue
         os.symlink(os.path.join(HERE, name), os.path.join(root, name))
     for sub, local_name in (("themes", "local"), ("avatar", "local")):
         sub_root = os.path.join(root, sub)
@@ -225,6 +260,20 @@ def static_server(_webclient_temp_root):
 
         def log_message(self, *a):
             pass
+
+        def do_GET(self):
+            # Mirrors serve.py: an absent persona-voices.json answers 200 {} (a 404 would
+            # log a console error on every page load, which the console-clean tests reject).
+            if (self.path.split("?")[0] == "/persona-voices.json"
+                    and not os.path.isfile(os.path.join(_webclient_temp_root, "persona-voices.json"))):
+                body = b"{}"
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
+            super().do_GET()
 
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
@@ -1672,6 +1721,99 @@ def test_persona_voice_pairing_applies_on_switch(client):
                   if m.get("type") == "config_set" and "voice" in m]
     assert voice_sets and voice_sets[-1]["voice"] == "alba"
     assert voice_sets[-1].get("voice_audition") is False
+
+
+@contextlib.contextmanager
+def _seeded_client(browser, static_server, _webclient_temp_root, seed, init_js=""):
+    """Like `client`, but with a persona-voices.json present in the served root
+    BEFORE the page loads (the seed is fetched once, at load)."""
+    seed_path = os.path.join(_webclient_temp_root, "persona-voices.json")
+    with open(seed_path, "w") as f:
+        f.write(seed if isinstance(seed, str) else json.dumps(seed))
+    server = StubControlServer()
+    server.start()
+    ctx = browser.new_context(permissions=["microphone"], viewport={"width": 1280, "height": 900})
+    page = ctx.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    page.add_init_script(
+        f"localStorage.setItem('va-ws-url', 'ws://127.0.0.1:{server.port}');"
+        "localStorage.setItem('va-avatar', 'off');"
+        "try{localStorage.setItem('va-firstrun-done','1')}catch(e){}" + init_js)
+    try:
+        page.goto(f"http://127.0.0.1:{static_server}/index.html")
+        page.wait_for_function("() => ws && ws.readyState === 1", timeout=15000)
+        yield page, server
+    finally:
+        ctx.close()
+        server.stop()
+        os.remove(seed_path)
+    assert not errors, f"uncaught page errors: {errors}"
+
+
+def test_persona_voice_seed_file_pairs_and_applies(browser, static_server, _webclient_temp_root):
+    """A persona-voices.json at the site root pre-pairs personas, so choosing the
+    persona switches the voice with no manual 'Pair voice' click."""
+    with _seeded_client(browser, static_server, _webclient_temp_root,
+                        {"builtin:The Butler": "alba"}) as (page, server):
+        server.send(dict(CONFIG_STATE, voices=["alba", "jean", "fantine"], voice="jean"))
+        page.wait_for_function(
+            "() => document.getElementById('voiceSelect').value === 'jean'", timeout=10000)
+        page.wait_for_function(
+            "() => (JSON.parse(localStorage.getItem('va-persona-voices')) || {})['builtin:The Butler'] === 'alba'",
+            timeout=10000)
+        page.click("#personaDisplay")
+        page.wait_for_function("() => document.getElementById('personaGroup').open", timeout=10000)
+        server.text_msgs.clear()
+        page.select_option("#personaSelect", "builtin:The Butler")
+        page.wait_for_function(
+            "() => document.getElementById('voiceSelect').value === 'alba'", timeout=10000)
+        voice_sets = [m for m in server.text_msgs if m.get("type") == "config_set" and "voice" in m]
+        assert voice_sets and voice_sets[-1]["voice"] == "alba"
+
+
+def test_persona_voice_seed_never_overwrites_a_user_pairing(browser, static_server, _webclient_temp_root):
+    with _seeded_client(browser, static_server, _webclient_temp_root,
+                        {"builtin:The Butler": "alba", "builtin:The Bro": "fantine"},
+                        init_js="if(!localStorage.getItem('va-persona-voices'))"
+                                "localStorage.setItem('va-persona-voices',"
+                                "JSON.stringify({'builtin:The Butler':'jean'}));") as (page, server):
+        server.send(dict(CONFIG_STATE, voices=["alba", "jean", "fantine"], voice="jean"))
+        page.wait_for_function(
+            "() => (JSON.parse(localStorage.getItem('va-persona-voices')) || {})['builtin:The Bro'] === 'fantine'",
+            timeout=10000)
+        pairs = page.evaluate("() => JSON.parse(localStorage.getItem('va-persona-voices'))")
+        assert pairs["builtin:The Butler"] == "jean", "the seed overwrote a pairing the user already had"
+
+
+def test_persona_voice_seed_applies_once_so_unpairing_sticks(browser, static_server, _webclient_temp_root):
+    with _seeded_client(browser, static_server, _webclient_temp_root,
+                        {"builtin:The Butler": "alba"}) as (page, server):
+        server.send(dict(CONFIG_STATE, voices=["alba", "jean", "fantine"], voice="jean"))
+        page.wait_for_function(
+            "() => (JSON.parse(localStorage.getItem('va-persona-voices')) || {})['builtin:The Butler'] === 'alba'",
+            timeout=10000)
+        page.click("#personaDisplay")
+        page.wait_for_function("() => document.getElementById('personaGroup').open", timeout=10000)
+        page.select_option("#personaSelect", "builtin:The Butler")
+        page.click("#personaVoicePairBtn")   # unpair
+        assert page.evaluate(
+            "() => 'builtin:The Butler' in JSON.parse(localStorage.getItem('va-persona-voices'))") is False
+        page.reload()
+        page.wait_for_function("() => ws && ws.readyState === 1", timeout=15000)
+        page.wait_for_timeout(500)
+        assert page.evaluate(
+            "() => 'builtin:The Butler' in JSON.parse(localStorage.getItem('va-persona-voices') || '{}')") is False, \
+            "the seed re-paired a persona the user had unpaired, though the file did not change"
+
+
+def test_persona_voice_seed_garbage_is_ignored(browser, static_server, _webclient_temp_root):
+    for bad in ("not json at all", "[1, 2]", '{"builtin:The Butler": 7}'):
+        with _seeded_client(browser, static_server, _webclient_temp_root, bad) as (page, server):
+            server.send(dict(CONFIG_STATE, voices=["alba", "jean"], voice="jean"))
+            page.wait_for_timeout(400)
+            assert page.evaluate(
+                "() => JSON.parse(localStorage.getItem('va-persona-voices') || '{}')") == {}, bad
 
 
 def test_persona_voice_pairing_ignored_when_voice_unknown(client):
@@ -3340,7 +3482,7 @@ def test_exported_tree_test_suite_still_collects(tmp_path):
     assert export.returncode == 0, f"export failed:\nstdout: {export.stdout}\nstderr: {export.stderr}"
 
     collect = subprocess.run(
-        ["python3", "-m", "pytest", "test_webclient.py", "--collect-only", "-q"],
+        [sys.executable, "-m", "pytest", "test_webclient.py", "--collect-only", "-q"],
         cwd=os.path.join(dest, "webclient"), capture_output=True, text=True, timeout=60)
     assert collect.returncode == 0, (
         f"exported test_webclient.py failed to COLLECT (not just run) on a clean clone:\n"
@@ -3363,7 +3505,7 @@ def test_exported_tree_test_suite_still_collects(tmp_path):
     # perf tests from this run -- the point of this gate is that the
     # exported tree passes exactly as a stranger would run it.
     run = subprocess.run(
-        ["python3", "-m", "pytest", "test_webclient.py", "-q"],
+        [sys.executable, "-m", "pytest", "test_webclient.py", "-q"],
         cwd=os.path.join(dest, "webclient"), capture_output=True, text=True, timeout=600)
     assert run.returncode == 0, (
         f"exported test_webclient.py collected but did not pass cleanly on a clean clone "
@@ -3424,6 +3566,31 @@ def test_models_endpoint_supports_head(serve_py_server):
     assert resp.status in (200, 503)
     assert body == b""
     assert resp.getheader("Content-Length") not in (None, "0")
+
+
+def test_persona_voices_json_is_empty_object_when_absent_and_the_file_when_present(tmp_path, monkeypatch):
+    """serve.py answers /persona-voices.json with 200 {} when the install has no seed file (so the
+    page load logs no 404), and with the file's own bytes when it does. HERE is pointed at a temp
+    dir so the real install's seed file, if any, cannot decide the outcome."""
+    monkeypatch.setattr(_serve_mod, "HERE", str(tmp_path))
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _serve_mod.Handler)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", port)
+        conn.request("GET", "/persona-voices.json")
+        resp = conn.getresponse()
+        assert (resp.status, resp.read()) == (200, b"{}")
+        conn.request("HEAD", "/persona-voices.json")
+        resp = conn.getresponse()
+        assert resp.status == 200 and resp.read() == b""
+        (tmp_path / "persona-voices.json").write_text('{"builtin:The Butler": "x"}')
+        conn.request("GET", "/persona-voices.json")
+        resp = conn.getresponse()
+        assert (resp.status, json.loads(resp.read())) == (200, {"builtin:The Butler": "x"})
+        conn.close()
+    finally:
+        httpd.shutdown()
 
 
 def test_serve_py_binds_loopback_by_default():
@@ -5291,6 +5458,46 @@ def test_ptt_silent_turn_watchdog_cancels_when_server_hears(client):
         "the watchdog fired despite the server showing it heard something"
     assert "nothing heard" not in page.evaluate(
         "() => document.getElementById('log').textContent")
+
+
+_TRANSCRIPT = "() => document.getElementById('transcriptBody').textContent"
+
+
+def _send_partials(page, server, frames):
+    for f in frames:
+        server.send(dict(f, type="partial_transcription"))
+    page.wait_for_timeout(300)
+
+
+def test_partial_transcripts_replace_not_append(client):
+    """Guard: partial_transcription.delta is the whole transcript so far (a
+    snapshot), so three cumulative partials must show only the last one."""
+    page, server = client
+    _send_partials(page, server, [{"delta": "turn off"}, {"delta": "turn off the"},
+                                  {"delta": "turn off the lights"}])
+    assert page.evaluate(_TRANSCRIPT) == "turn off the lights"
+
+
+def test_stale_turn_partial_cannot_overwrite_newer_turn_or_final(client):
+    """Guard: a late partial from an earlier turn (or an older revision of the
+    same turn) is dropped; so is one for a turn that already got its final."""
+    page, server = client
+    _send_partials(page, server, [
+        {"delta": "second turn", "turn_id": "turn_2", "turn_revision": 1},
+        {"delta": "late first turn", "turn_id": "turn_1", "turn_revision": 1}])
+    assert page.evaluate(_TRANSCRIPT) == "second turn"
+    _send_partials(page, server, [
+        {"delta": "second turn more", "turn_id": "turn_2", "turn_revision": 2},
+        {"delta": "second turn old rev", "turn_id": "turn_2", "turn_revision": 1}])
+    assert page.evaluate(_TRANSCRIPT) == "second turn more"
+    server.send({"type": "transcription_completed", "transcript": "Second turn final.",
+                 "turn_id": "turn_2", "turn_revision": 2})
+    page.wait_for_timeout(200)
+    _send_partials(page, server, [{"delta": "second turn straggler",
+                                   "turn_id": "turn_2", "turn_revision": 2}])
+    assert page.evaluate(_TRANSCRIPT) == "Second turn final."
+    _send_partials(page, server, [{"delta": "third", "turn_id": "turn_3", "turn_revision": 1}])
+    assert page.evaluate(_TRANSCRIPT) == "third"
 
 
 def test_answer_leaves_the_wake_status_line_alone(client):
@@ -7232,3 +7439,331 @@ def test_a_deploy_does_not_auto_reload_the_open_cockpit_only_the_user_can(browse
     assert active_script and active_script.endswith("/sw.js")
     assert not errors, f"uncaught page errors: {errors}"
     ctx.close()
+
+
+# ── playback acknowledgements and overlap-observe (floor-management slice 2) ──
+#
+# The page tells the server when ITS speaker plays a reply ({"type":"playback"}
+# start/end/cut). With the server's overlap-observe instrument on, an open-mic
+# client also streams the microphone while a reply plays. The stub counts the
+# binary mic frames it receives; the fake microphone is always producing.
+
+
+def _wait(page, predicate, timeout_ms=8000, step_ms=50):
+    waited = 0
+    while not predicate():
+        if waited >= timeout_ms:
+            return False
+        page.wait_for_timeout(step_ms)
+        waited += step_ms
+    return True
+
+
+def _arm_open_mic(page, server):
+    server.send({"type": "wakeword_state", "state": "asleep", "phrase": "hey jarvis"})
+    page.wait_for_function(
+        "() => typeof openMicStreaming !== 'undefined' && openMicStreaming", timeout=10000)
+    assert _wait(page, lambda: server.binary_frames > 3), "open mic is armed but no mic frames flow"
+
+
+def _resync_config(page, server, overlap):
+    server.overlap_observe = overlap
+    page.evaluate("() => ws.send(JSON.stringify({type: 'config_get'}))")
+    page.wait_for_function(f"() => overlapObserve === {str(overlap).lower()}", timeout=5000)
+
+
+def _mic_frames_over(page, server, ms):
+    before = server.binary_frames
+    page.wait_for_timeout(ms)
+    return server.binary_frames - before
+
+
+def test_playback_start_end_frames_bracket_a_reply(client):
+    page, server = client
+    server.send_audio(0.5)
+    assert _wait(page, lambda: any(m["state"] == "start" for m in server.playback_frames())), \
+        "no playback start frame"
+    start = server.playback_frames()[0]
+    assert start["state"] == "start"
+    assert isinstance(start["delay_ms"], (int, float)) and 0 <= start["delay_ms"] < 2000
+    # end is held back by the 0.35 s tail margin: 0.5 s of audio + margin, not before.
+    assert _wait(page, lambda: any(m["state"] == "end" for m in server.playback_frames()), 6000), \
+        "no playback end frame"
+    states = [m["state"] for m in server.playback_frames()]
+    assert states == ["start", "end"], states
+
+
+def test_playback_one_start_per_reply_and_end_rearms_on_each_chunk(client):
+    page, server = client
+    # Three 0.4 s chunks arrive together: 1.2 s of audio. A timer armed only for the
+    # first chunk would send `end` at ~0.8 s, while the speaker is still playing.
+    import time
+    server.send_audio(0.4)
+    server.send_audio(0.4)
+    server.send_audio(0.4)
+    assert _wait(page, lambda: any(m["state"] == "start" for m in server.playback_frames()))
+    t_start = time.monotonic()
+    assert _wait(page, lambda: any(m["state"] == "end" for m in server.playback_frames()), 8000)
+    assert time.monotonic() - t_start >= 1.4, "end was sent while the reply was still playing"
+    assert [m["state"] for m in server.playback_frames()] == ["start", "end"]
+
+
+def test_playback_cut_frame_when_flush_stops_a_reply(client):
+    page, server = client
+    server.send_audio(6)
+    assert _wait(page, lambda: any(m["state"] == "start" for m in server.playback_frames()))
+    page.evaluate("() => flushPlayback()")
+    assert _wait(page, lambda: any(m["state"] == "cut" for m in server.playback_frames())), "no cut frame"
+    page.wait_for_timeout(900)  # past where the cancelled end timer would have fired
+    assert [m["state"] for m in server.playback_frames()] == ["start", "cut"]
+
+
+def test_flush_with_nothing_playing_sends_nothing(client):
+    page, server = client
+    page.evaluate("() => flushPlayback()")
+    page.wait_for_timeout(300)
+    assert server.playback_frames() == []
+
+
+def test_stall_clips_and_chime_send_no_playback_frames(client):
+    page, server = client
+    page.wait_for_function("() => stallWatchdog.enabled && stallWatchdog.buffers.length > 0", timeout=10000)
+    page.evaluate("() => { stallWatchdog._play(); playWakeChime(); }")
+    assert page.evaluate("() => assistantAudioActive()") is True, "premise: the speaker is active"
+    page.wait_for_timeout(1500)
+    assert server.playback_frames() == []
+
+
+def test_open_mic_sends_no_frames_during_a_reply_without_overlap_observe(client):
+    page, server = client
+    _arm_open_mic(page, server)
+    server.send_audio(4)
+    assert _wait(page, lambda: any(m["state"] == "start" for m in server.playback_frames()))
+    page.wait_for_timeout(200)  # let any in-flight frame land
+    assert _mic_frames_over(page, server, 1000) == 0
+    # control: the same instrument sees frames again once the reply is cut
+    page.evaluate("() => flushPlayback()")
+    page.wait_for_timeout(600)  # past the tail margin
+    assert _mic_frames_over(page, server, 500) > 0
+
+
+def test_open_mic_streams_during_a_reply_with_overlap_observe(client):
+    page, server = client
+    _arm_open_mic(page, server)
+    _resync_config(page, server, True)
+    server.send_audio(4)
+    assert _wait(page, lambda: any(m["state"] == "start" for m in server.playback_frames()))
+    page.wait_for_timeout(200)
+    assert _mic_frames_over(page, server, 1000) > 3, "overlap-observe on, but no mic frames during the reply"
+    # The window is bracketed on the wire: frames flow only between start and cut.
+    page.evaluate("() => flushPlayback()")
+    assert _wait(page, lambda: "playback:cut" in server.frame_log)
+    assert server.frame_log.index("playback:start") < server.frame_log.index("playback:cut")
+
+
+def test_overlap_observe_still_drops_frames_during_stall_clips_and_chime(client):
+    page, server = client
+    _arm_open_mic(page, server)
+    _resync_config(page, server, True)
+    page.wait_for_function("() => stallWatchdog.enabled && stallWatchdog.buffers.length > 0", timeout=10000)
+    page.evaluate("() => { stallWatchdog._play(); playWakeChime(); }")
+    assert page.evaluate("() => assistantAudioActive()") is True
+    assert _mic_frames_over(page, server, 600) == 0
+    assert server.playback_frames() == []
+
+
+def test_overlap_observe_drops_frames_while_a_chime_overlaps_the_reply(client):
+    """The chime is not in the server's echo reference, so even mid-reply, with
+    overlap-observe on, its window sends nothing."""
+    page, server = client
+    _arm_open_mic(page, server)
+    _resync_config(page, server, True)
+    server.send_audio(6)
+    assert _wait(page, lambda: any(m["state"] == "start" for m in server.playback_frames()))
+    page.wait_for_timeout(200)
+    assert _mic_frames_over(page, server, 500) > 3, "premise: frames flow during the reply"
+    page.evaluate("() => playWakeChime()")
+    page.wait_for_timeout(60)  # frames already in flight
+    assert _mic_frames_over(page, server, 400) == 0, "mic frames sent during the chime"
+    assert _wait(page, lambda: _mic_frames_over(page, server, 200) > 0, 4000), "streaming never resumed"
+
+
+def test_ptt_press_during_a_reply_cuts_before_any_mic_frame(client):
+    """PTT unchanged: the press flushes playback (sending `cut`) before the first
+    mic frame flows, even with the overlap-observe instrument on."""
+    page, server = client
+    _resync_config(page, server, True)
+    server.send_audio(6)
+    assert _wait(page, lambda: any(m["state"] == "start" for m in server.playback_frames()))
+    assert "b" not in server.frame_log, "premise: no mic frame before the press"
+    _hold(page, "#ptt")
+    assert _wait(page, lambda: "b" in server.frame_log, 10000), "PTT hold streamed nothing"
+    page.mouse.up()
+    assert "playback:cut" in server.frame_log
+    assert server.frame_log.index("playback:cut") < server.frame_log.index("b")
+
+
+# ── barge-in: server-side cancel (floor-management slice 3) ───────────────
+#
+# A PTT press that lands on a reply sends {"type":"barge_in"} BEFORE it flushes
+# local playback. From then until the server's {"type":"audio_stop"}, binary
+# frames are the cancelled reply and must never be scheduled.
+
+
+def _count_scheduled_sources(page):
+    """Count every AudioBufferSourceNode.start() from here on (TTS chunks, stall clips, chime)."""
+    page.evaluate(
+        """() => {
+          window.__sourceStarts = 0;
+          const orig = AudioBufferSourceNode.prototype.start;
+          AudioBufferSourceNode.prototype.start = function (...a) { window.__sourceStarts++; return orig.apply(this, a); };
+        }""")
+
+
+def _scheduled(page):
+    return page.evaluate("() => window.__sourceStarts")
+
+
+def _wait_for_barge_cancel(page):
+    page.wait_for_function("() => bargeCancel === true", timeout=5000)
+
+
+def _wait_until_quiet(page):
+    """A just-created AudioContext reads as 'speaker active' until its clock passes the 0.35 s tail margin."""
+    assert _wait(page, lambda: page.evaluate("() => assistantAudioActive()") is False, 5000), "speaker never went quiet"
+
+
+def test_ptt_press_during_a_reply_sends_barge_in_before_it_flushes(client):
+    page, server = client
+    _wait_for_barge_cancel(page)
+    server.send_audio(6)
+    assert _wait(page, lambda: any(m["state"] == "start" for m in server.playback_frames()))
+    _hold(page, "#ptt")
+    assert _wait(page, lambda: "b" in server.frame_log, 10000), "PTT hold streamed nothing"
+    page.mouse.up()
+    log = server.frame_log
+    assert "barge_in" in log, log
+    assert log.count("barge_in") == 1
+    assert log.index("barge_in") < log.index("playback:cut") < log.index("b"), log
+
+
+def test_ptt_press_with_a_reply_pending_but_no_audio_yet_sends_barge_in(client):
+    page, server = client
+    _wait_for_barge_cancel(page)
+    server.send({"type": "transcription_completed", "transcript": "tell me a long story"})
+    page.wait_for_function("() => replyPending()", timeout=5000)
+    _wait_until_quiet(page)
+    _hold(page, "#ptt")
+    assert _wait(page, lambda: "barge_in" in server.frame_log), "no barge_in for a pending reply"
+    page.mouse.up()
+
+
+def test_ptt_press_with_nothing_playing_or_pending_sends_no_barge_in(client):
+    page, server = client
+    _wait_until_quiet(page)
+    _hold(page, "#ptt")
+    assert _wait(page, lambda: "b" in server.frame_log, 10000), "PTT hold streamed nothing"
+    page.mouse.up()
+    assert "barge_in" not in server.frame_log
+
+
+def test_audio_between_barge_in_and_audio_stop_is_never_scheduled(client):
+    page, server = client
+    _wait_for_barge_cancel(page)
+    server.answer_barge_in = False  # hold the gap open: no audio_stop yet
+    server.send_audio(6)
+    assert _wait(page, lambda: any(m["state"] == "start" for m in server.playback_frames()))
+    _hold(page, "#ptt")
+    assert _wait(page, lambda: "barge_in" in server.frame_log)
+    page.mouse.up()
+    _count_scheduled_sources(page)
+    # Stale tail of the cancelled reply, still on the wire.
+    server.send_audio(0.5)
+    server.send_audio(0.5)
+    page.wait_for_timeout(400)
+    assert _scheduled(page) == 0, "cancelled-reply audio was scheduled after barge_in"
+    assert [m["state"] for m in server.playback_frames()] == ["start", "cut"], "a dropped chunk still began playback"
+    # Control: once audio_stop lands, the next audio IS new and plays.
+    server.send({"type": "audio_stop"})
+    page.wait_for_function("() => bargeInDropping === false", timeout=3000)
+    server.send_audio(0.5)
+    assert _wait(page, lambda: _scheduled(page) == 1), "audio after audio_stop was not scheduled"
+    assert _wait(page, lambda: [m["state"] for m in server.playback_frames()][-1] == "start")
+
+
+def test_barge_in_drop_gate_releases_itself_when_the_server_never_answers(client):
+    """An older server (or VOICE_BARGE_CANCEL=off) ignores the frame; the next real reply must still play."""
+    page, server = client
+    _wait_for_barge_cancel(page)
+    server.answer_barge_in = False
+    server.send_audio(6)
+    assert _wait(page, lambda: any(m["state"] == "start" for m in server.playback_frames()))
+    _hold(page, "#ptt")
+    assert _wait(page, lambda: "barge_in" in server.frame_log)
+    page.mouse.up()
+    assert page.evaluate("() => bargeInDropping") is True
+    page.wait_for_function("() => bargeInDropping === false", timeout=4000)
+    _count_scheduled_sources(page)
+    server.send_audio(0.5)
+    assert _wait(page, lambda: _scheduled(page) == 1), "audio never resumed after the safety timeout"
+
+
+def test_audio_stop_from_the_server_flushes_this_screens_playback(client):
+    """A second screen's barge_in reaches this one as a broadcast audio_stop."""
+    page, server = client
+    server.send_audio(6)
+    assert _wait(page, lambda: any(m["state"] == "start" for m in server.playback_frames()))
+    server.send({"type": "audio_stop"})
+    assert _wait(page, lambda: "playback:cut" in server.frame_log), "audio_stop left the speaker playing"
+
+
+def test_server_without_barge_cancel_gets_no_barge_in_and_no_audio_is_dropped(client):
+    """VOICE_BARGE_CANCEL=off or an older server: the snapshot lacks barge_cancel, so PTT behaves as it always did."""
+    page, server = client
+    server.barge_cancel = False
+    page.evaluate("() => ws.send(JSON.stringify({type: 'config_get'}))")
+    page.wait_for_function("() => bargeCancel === false", timeout=5000)
+    server.send_audio(6)
+    assert _wait(page, lambda: any(m["state"] == "start" for m in server.playback_frames()))
+    _hold(page, "#ptt")
+    assert _wait(page, lambda: "b" in server.frame_log, 10000), "PTT hold streamed nothing"
+    page.mouse.up()
+    assert "barge_in" not in server.frame_log
+    assert page.evaluate("() => bargeInDropping") is False
+    _count_scheduled_sources(page)
+    server.send_audio(0.5)  # the very next audio is not swallowed
+    assert _wait(page, lambda: _scheduled(page) == 1), "audio was dropped although no barge_in was sent"
+
+
+# ── PTT hold: the client tells the server it holds the floor ──────────────
+# {"type":"ptt","state":"down"} on press, "up" on release BEFORE the tail silence
+# (the first zero-filled "b" run after the speech). Mouse/touch and Space both count.
+
+
+def test_ptt_button_sends_down_then_up_before_tail_silence(client):
+    page, server = client
+    _hold(page, "#ptt")
+    assert _wait(page, lambda: "b" in server.frame_log, 10000), "PTT hold streamed nothing"
+    page.mouse.up()
+    assert _wait(page, lambda: "ptt:up" in server.frame_log), server.frame_log
+    log = server.frame_log
+    assert log.count("ptt:down") == 1 and log.count("ptt:up") == 1, log
+    assert log.index("ptt:down") < log.index("b") < log.index("ptt:up"), log
+    # "up" precedes the tail silence: a binary run (the zeros) follows it
+    assert _wait(page, lambda: "b" in server.frame_log[server.frame_log.index("ptt:up"):]), server.frame_log
+
+
+def test_ptt_space_key_sends_down_then_up(client):
+    page, server = client
+    page.keyboard.down("Space")
+    assert _wait(page, lambda: "b" in server.frame_log, 10000), "Space hold streamed nothing"
+    page.keyboard.up("Space")
+    assert _wait(page, lambda: "ptt:up" in server.frame_log), server.frame_log
+    log = server.frame_log
+    assert log.index("ptt:down") < log.index("ptt:up"), log
+
+
+def test_index_html_sends_ptt_frames():
+    src = open(os.path.join(HERE, "index.html"), encoding="utf-8").read()
+    assert 'type: "ptt", state' in src
+    assert 'sendPtt("down")' in src and 'sendPtt("up")' in src

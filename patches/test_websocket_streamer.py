@@ -17,7 +17,7 @@ Run from repo root: python3 -m pytest patches/test_websocket_streamer.py -v
 `websockets` is installed in this dev venv, but the `speech_to_speech`
 package is not -- its handful of pipeline symbols websocket_streamer.py
 imports are stubbed into `sys.modules` before the import below, same
-hermetic pattern as `test_reflex_lane.py`/`test_brain_control.py`.
+hermetic pattern as `test_parrot_lane.py`/`test_brain_control.py`.
 `speech_to_speech.voice_clone` is aliased to the REAL `patches.voice_clone`
 module so `UploadManager` here is the actual deployed logic.
 
@@ -52,6 +52,7 @@ def _install_stubs():
         return m
 
     from patches import echo_gate as real_echo_gate
+    from patches import floor_state as real_floor_state
     from patches import phone_context as real_phone_context
     from patches import transcript_buffer as real_transcript_buffer
     from patches import voice_clone as real_voice_clone
@@ -67,7 +68,19 @@ def _install_stubs():
         is_control_message=lambda item, kind: False,
     )
     mod("speech_to_speech.pipeline.events", PipelineEvent=type("_PipelineEvent", (), {}))
-    mod("speech_to_speech.pipeline.messages", AUDIO_RESPONSE_DONE=object(), PIPELINE_END=object())
+    class _AudioOutput:
+        """Shape of upstream pipeline.messages.AudioOutput (audio + cancel_generation)."""
+
+        def __init__(self, audio, cancel_generation=None):
+            self.audio = audio
+            self.cancel_generation = cancel_generation
+
+    mod(
+        "speech_to_speech.pipeline.messages",
+        AUDIO_RESPONSE_DONE=object(),
+        PIPELINE_END=object(),
+        AudioOutput=_AudioOutput,
+    )
     mod(
         "speech_to_speech.pipeline.queue_types",
         AudioInItem=object,
@@ -85,6 +98,8 @@ def _install_stubs():
     # shipped EchoGate is inert when VOICE_ECHO_GATE is unset.
     sys.modules["speech_to_speech.echo_gate"] = real_echo_gate
     pkg.echo_gate = real_echo_gate
+    sys.modules["speech_to_speech.floor_state"] = real_floor_state
+    pkg.floor_state = real_floor_state
 
     class _StubWakewordGate:
         def __init__(self):
@@ -215,15 +230,17 @@ class _RecordingGate:
         self.enabled = True
         self.played = []
         self.fed = []
+        self.phases = []
         self.resets = 0
         self._drop = set(drop_indices)
 
     def note_playback(self, pcm):
         self.played.append(pcm)
 
-    def feed(self, pcm):
+    def feed(self, pcm, phase=None):
         idx = len(self.fed)
         self.fed.append(pcm)
+        self.phases.append(phase)
         return idx not in self._drop
 
     def reset(self):
@@ -975,3 +992,643 @@ def test_screen_frame_writes_independently_of_camera(monkeypatch, tmp_path):
     # limit -- it tracks _last_screen_write, not _last_cam_write.
     streamer._write_screen_frame(base64.b64encode(b"screen-frame").decode())
     assert screen_path.read_bytes() == b"screen-frame"
+
+
+# ── floor management slice 2: playback frames, overlap-observe routing ────
+#
+# The sequences below are driven through the real `_handle_client` receive
+# loop: WebSocket preserves frame order, so a text `playback` frame brackets
+# the binary mic frames around it exactly, and these tests pin that contract.
+
+import json  # noqa: E402
+
+
+def _playback(state, **extra):
+    return json.dumps({"type": "playback", "state": state, **extra})
+
+
+def _overlap_streamer(monkeypatch, *, flag=True, gate="observe"):
+    if flag:
+        monkeypatch.setenv("VOICE_OVERLAP_OBSERVE", "1")
+    else:
+        monkeypatch.delenv("VOICE_OVERLAP_OBSERVE", raising=False)
+    if gate:
+        monkeypatch.setenv("VOICE_ECHO_GATE", gate)
+    else:
+        monkeypatch.delenv("VOICE_ECHO_GATE", raising=False)
+    streamer = _make_streamer()
+    streamer.echo_gate = _RecordingGate()
+    streamer.should_listen.set()
+    return streamer
+
+
+def _chunk(i):
+    return bytes([i]) * CHUNK_BYTES
+
+
+def test_overlap_observe_playing_frames_are_never_queued(monkeypatch):
+    streamer = _overlap_streamer(monkeypatch)
+    frames = [_chunk(1), _playback("start", delay_ms=20), _chunk(2), _chunk(3), _playback("end"), _chunk(4)]
+
+    asyncio.run(streamer._handle_client(_FakeClient(frames)))
+
+    # should_listen was SET throughout, yet the two playing-phase chunks never queued.
+    assert _drain(streamer.input_queue)[:2] == [_chunk(1), _chunk(4)]
+    assert streamer.echo_gate.fed == [_chunk(1), _chunk(2), _chunk(3), _chunk(4)]
+    assert streamer.echo_gate.phases == [None, "playback", "playback", None]
+
+
+def test_overlap_observe_cut_also_ends_the_playing_phase(monkeypatch):
+    streamer = _overlap_streamer(monkeypatch)
+    frames = [_playback("start", delay_ms=0), _chunk(2), _playback("cut"), _chunk(3)]
+
+    asyncio.run(streamer._handle_client(_FakeClient(frames)))
+
+    assert _drain(streamer.input_queue)[:1] == [_chunk(3)]
+    assert streamer.echo_gate.phases == ["playback", None]
+
+
+def test_flag_off_routing_ignores_playback_frames(monkeypatch):
+    """Flag unset: byte-identical routing. The same frame sequence queues every
+    chunk and the gate never sees a phase."""
+    streamer = _overlap_streamer(monkeypatch, flag=False)
+    frames = [_chunk(1), _playback("start", delay_ms=20), _chunk(2), _chunk(3), _playback("end"), _chunk(4)]
+
+    asyncio.run(streamer._handle_client(_FakeClient(frames)))
+
+    assert streamer.overlap_observe is False
+    assert _drain(streamer.input_queue)[:4] == [_chunk(1), _chunk(2), _chunk(3), _chunk(4)]
+    assert streamer.echo_gate.phases == [None, None, None, None]
+
+
+def test_overlap_observe_is_inert_without_the_echo_gate(monkeypatch, caplog):
+    caplog.set_level("WARNING")
+    streamer = _overlap_streamer(monkeypatch, gate=None)
+    # `_overlap_streamer` swapped in a recording gate after construction; the
+    # decision under test was taken at construction, against the real gate.
+    assert streamer.overlap_observe is False
+    assert any("VOICE_OVERLAP_OBSERVE" in r.getMessage() and r.levelname == "WARNING" for r in caplog.records)
+    frames = [_playback("start", delay_ms=0), _chunk(2)]
+    asyncio.run(streamer._handle_client(_FakeClient(frames)))
+    assert _drain(streamer.input_queue)[:1] == [_chunk(2)]
+
+
+def test_overlap_observe_logs_one_info_line_per_window(monkeypatch, caplog):
+    caplog.set_level("INFO")
+    streamer = _overlap_streamer(monkeypatch)
+    frames = [_playback("start", delay_ms=0), _playback("end"), _playback("start", delay_ms=0), _playback("cut")]
+
+    asyncio.run(streamer._handle_client(_FakeClient(frames)))
+
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("overlap_observe ")]
+    import re
+
+    assert [re.match(r"overlap_observe window=(\d+) state=(\w+) client=\d+ t=\d+\.\d{3}$", ln).groups() for ln in lines] == [
+        ("1", "start"), ("1", "end"), ("2", "start"), ("2", "cut"),
+    ]
+    # The report tool parses the real emitter's lines (same contract, one place).
+    from examples import echo_gate_report as report
+
+    parsed = report.parse_windows("\n".join(lines))
+    assert [(w["n"], w["t1"] != float("inf")) for w in parsed] == [(1, True), (2, True)]
+
+
+def test_flag_off_logs_no_overlap_lines(monkeypatch, caplog):
+    caplog.set_level("INFO")
+    streamer = _overlap_streamer(monkeypatch, flag=False)
+    asyncio.run(streamer._handle_client(_FakeClient([_playback("start", delay_ms=0), _playback("end")])))
+    assert not [r for r in caplog.records if "overlap_observe window" in r.getMessage()]
+
+
+def test_playback_frames_drive_floor_state_and_disconnect_clears_it(monkeypatch):
+    streamer = _overlap_streamer(monkeypatch, flag=False)
+    seen = {}
+
+    class _Probe(_FakeClient):
+        def __aiter__(self):
+            async def gen():
+                yield _playback("start", delay_ms=0)
+                seen["playing"] = streamer.floor_state.any_client_playing()
+                yield _playback("end")
+                seen["after_end"] = streamer.floor_state.any_client_playing()
+                yield _playback("start", delay_ms=0)
+
+            return gen()
+
+    asyncio.run(streamer._handle_client(_Probe()))
+    assert seen == {"playing": True, "after_end": False}
+    # Disconnected mid-playback: the dead client must not read as still playing.
+    assert streamer.floor_state.any_client_playing() is False
+
+
+def test_playback_start_stamps_heard_with_the_clients_delay(monkeypatch):
+    streamer = _overlap_streamer(monkeypatch, flag=False)
+    calls = []
+    monkeypatch.setattr(websocket_streamer, "turn_stats", types.SimpleNamespace(mark=lambda *a: None, mark_heard=calls.append))
+    monkeypatch.setattr(websocket_streamer.time, "perf_counter", lambda: 500.0)
+
+    asyncio.run(streamer._handle_client(_FakeClient([_playback("start", delay_ms=250)])))
+
+    assert calls == [500.25]
+
+
+def test_playback_delay_is_untrusted_input(monkeypatch):
+    streamer = _overlap_streamer(monkeypatch, flag=False)
+    calls = []
+    monkeypatch.setattr(websocket_streamer, "turn_stats", types.SimpleNamespace(mark=lambda *a: None, mark_heard=calls.append))
+    monkeypatch.setattr(websocket_streamer.time, "perf_counter", lambda: 10.0)
+    bad = [None, "5", True, float("nan"), -50, 10**9]
+    frames = [json.dumps({"type": "playback", "state": "start", "delay_ms": v}) for v in bad]
+    frames.append('{"type":"playback","state":"start","delay_ms":Infinity}')  # json allows it in Python
+
+    asyncio.run(streamer._handle_client(_FakeClient(frames)))
+
+    assert calls == [10.0, 10.0, 10.0, 10.0, 10.0, 70.0, 10.0]  # clamp at 60 s; Infinity -> 0
+
+
+def test_playback_frame_with_unknown_state_is_ignored(monkeypatch):
+    streamer = _overlap_streamer(monkeypatch)
+    asyncio.run(streamer._handle_client(_FakeClient([_playback("rewind"), _chunk(1)])))
+    assert streamer.floor_state.any_client_playing() is False
+    assert _drain(streamer.input_queue)[:1] == [_chunk(1)]
+
+
+def test_send_loop_feeds_user_speech_state_and_audio_sent(monkeypatch):
+    streamer = _overlap_streamer(monkeypatch, flag=False)
+    client = _FakeClient()
+    streamer.clients.add(client)
+
+    class _Event(websocket_streamer.PipelineEvent):
+        def __init__(self, kind):
+            self.kind = kind
+
+        def model_dump(self):
+            return {"type": self.kind}
+
+    states = []
+
+    async def drive():
+        task = asyncio.create_task(streamer._send_loop())
+        streamer.text_output_queue = Queue()
+        streamer.text_output_queue.put(_Event("speech_started"))
+        await asyncio.sleep(0.1)
+        states.append(streamer.floor_state.user_speaking)
+        streamer.text_output_queue.put(_Event("speech_stopped"))
+        streamer.output_queue.put(b"\x01\x02" * 2000)
+        await asyncio.sleep(0.1)
+        states.append(streamer.floor_state.user_speaking)
+        streamer.stop_event.set()
+        await task
+
+    asyncio.run(drive())
+
+    assert states == [True, False]
+    assert streamer.floor_state.mutual_quiet_s() != float("inf")  # audio_sent and speech end were both stamped
+
+
+# ── server-side cancel on barge-in (VOICE_BARGE_CANCEL) ───────────────────
+#
+# A client `{"type":"barge_in"}` frame stops a reply that is still being
+# produced. Driven through the real `_handle_client` receive loop; a second
+# resident client keeps the first-client reset (which re-opens the mic and
+# drains the output queue on connect) from erasing the in-flight state the
+# test sets up.
+
+
+class _Scope:
+    """CancelScope's contract for the streamer: cancel() bumps the generation."""
+
+    def __init__(self):
+        self.generation = 0
+
+    def cancel(self):
+        self.generation += 1
+
+    def is_stale(self, gen):
+        return gen != self.generation
+
+
+def _barge_streamer(monkeypatch, *, scope=True, in_flight=True):
+    streamer = _make_streamer()
+    streamer.cancel_scope = _Scope() if scope else None
+    streamer.clients.add(_FakeClient())  # not the first client: no connect-time reset
+    streamer.sent_json = []
+    streamer.acks = []
+    monkeypatch.setattr(streamer, "broadcast_json", lambda payload: streamer.sent_json.append(payload))
+    monkeypatch.setattr(streamer, "_send_json_to", lambda cid, payload: streamer.acks.append(payload))
+    if in_flight:
+        streamer.should_listen.clear()
+        streamer.output_queue.put(b"\x01\x02" * 1600)
+        streamer.output_queue.put(b"\x03\x04" * 1600)
+        streamer._audio_buffer.extend(b"\x05\x06" * 100)
+    else:
+        streamer.should_listen.set()
+    return streamer
+
+
+def _barge_in_frame():
+    return json.dumps({"type": "barge_in"})
+
+
+def test_barge_in_cancels_drains_reopens_the_mic_and_tells_every_client(monkeypatch):
+    streamer = _barge_streamer(monkeypatch)
+
+    asyncio.run(streamer._handle_client(_FakeClient([_barge_in_frame(), _chunk(7)])))
+
+    assert streamer.cancel_scope.generation == 1
+    assert streamer.output_queue.empty()
+    assert not streamer._audio_buffer
+    assert streamer.should_listen.is_set()
+    assert streamer.sent_json == [{"type": "audio_stop"}]
+    assert streamer.acks == []
+    # The user's audio right behind the frame is not lost: the mic was already open for it.
+    assert _drain(streamer.input_queue)[:1] == [_chunk(7)]
+
+
+def test_barge_in_with_audio_still_queued_but_the_mic_open_still_cancels(monkeypatch):
+    streamer = _barge_streamer(monkeypatch)
+    streamer.should_listen.set()  # the mic is open but output is still queued
+
+    asyncio.run(streamer._handle_client(_FakeClient([_barge_in_frame()])))
+
+    assert streamer.cancel_scope.generation == 1
+    assert streamer.output_queue.empty()
+
+
+def test_barge_in_is_ignored_when_no_response_is_in_flight(monkeypatch):
+    streamer = _barge_streamer(monkeypatch, in_flight=False)
+
+    asyncio.run(streamer._handle_client(_FakeClient([_barge_in_frame(), _chunk(7)])))
+
+    assert streamer.cancel_scope.generation == 0
+    assert streamer.sent_json == []  # nobody else is told to stop
+    assert streamer.acks == [{"type": "audio_stop"}]  # the asker is released from its audio gate
+    assert _drain(streamer.input_queue)[:1] == [_chunk(7)]
+
+
+def test_barge_in_frame_is_inert_without_a_cancel_scope(monkeypatch):
+    """VOICE_BARGE_CANCEL=off: the server treats the frame as unknown, today's behaviour."""
+    streamer = _barge_streamer(monkeypatch, scope=False)
+
+    asyncio.run(streamer._handle_client(_FakeClient([_barge_in_frame(), _chunk(7)])))
+
+    assert streamer.output_queue.qsize() == 2
+    assert len(streamer._audio_buffer) == 200
+    assert not streamer.should_listen.is_set()
+    assert streamer.sent_json == [] and streamer.acks == []
+    assert _drain(streamer.input_queue) == []  # mic stays shut, exactly as before
+
+
+def test_barge_in_function_serves_a_server_side_caller(monkeypatch):
+    streamer = _barge_streamer(monkeypatch)
+
+    assert streamer._barge_in(None, "detector") is True
+
+    assert streamer.cancel_scope.generation == 1
+    assert streamer.should_listen.is_set()
+    assert streamer.sent_json == [{"type": "audio_stop"}]
+
+
+def test_send_loop_does_not_flush_audio_discarded_by_a_barge_in(monkeypatch):
+    """The half-built send buffer lives on the streamer: a cancel must not leave
+    it behind to be flushed to the client after audio_stop."""
+    streamer = _barge_streamer(monkeypatch)
+    client = _FakeClient()
+    streamer.clients.add(client)
+    streamer._barge_in(None, "test")
+
+    async def drive():
+        task = asyncio.create_task(streamer._send_loop())
+        await asyncio.sleep(0.1)
+        streamer.stop_event.set()
+        await task
+
+    asyncio.run(drive())
+
+    assert client.sent == []
+
+
+def test_barge_cancel_knob_defaults_on_and_off_values(monkeypatch):
+    monkeypatch.delenv("VOICE_BARGE_CANCEL", raising=False)
+    assert websocket_streamer.barge_cancel_enabled() is True
+    for value in ("off", "OFF", "0", "false", "no"):
+        monkeypatch.setenv("VOICE_BARGE_CANCEL", value)
+        assert websocket_streamer.barge_cancel_enabled() is False, value
+    for value in ("on", "1", "", "yes"):
+        monkeypatch.setenv("VOICE_BARGE_CANCEL", value)
+        assert websocket_streamer.barge_cancel_enabled() is True, value
+
+
+# ── AudioOutput unwrapping (VOICE_BARGE_CANCEL stamps every TTS output) ──
+
+_DONE = b"__RESPONSE_DONE__"  # the real upstream sentinel values
+_END = b"END"
+
+
+def _run_send_loop(streamer, items):
+    for item in items:
+        streamer.output_queue.put(item)
+
+    async def drive():
+        task = asyncio.create_task(streamer._send_loop())
+        await asyncio.sleep(0.1)
+        streamer.stop_event.set()
+        await task
+
+    asyncio.run(drive())
+
+
+def _wrapped_streamer(monkeypatch, gen=0):
+    monkeypatch.setattr(websocket_streamer, "AUDIO_RESPONSE_DONE", _DONE)
+    monkeypatch.setattr(websocket_streamer, "PIPELINE_END", _END)
+    streamer = _make_streamer()
+    streamer.cancel_scope = _Scope()
+    streamer.cancel_scope.generation = gen
+    client = _FakeClient()
+    streamer.clients.add(client)
+    streamer.should_listen.clear()
+    return streamer, client
+
+
+def test_send_loop_unwraps_audio_output_and_rearms_the_mic(monkeypatch):
+    import numpy as np
+
+    streamer, client = _wrapped_streamer(monkeypatch)
+    AO = sys.modules["speech_to_speech.pipeline.messages"].AudioOutput
+    pcm = np.arange(2000, dtype=np.int16)
+    _run_send_loop(
+        streamer,
+        [AO(audio=pcm, cancel_generation=0), AO(audio=b"\x01\x02" * 500, cancel_generation=0), AO(audio=_DONE, cancel_generation=0)],
+    )
+
+    assert b"".join(client.sent) == pcm.tobytes() + b"\x01\x02" * 500
+    assert streamer.should_listen.is_set()
+
+
+def test_send_loop_stale_done_still_rearms_the_mic(monkeypatch):
+    streamer, client = _wrapped_streamer(monkeypatch, gen=1)
+    AO = sys.modules["speech_to_speech.pipeline.messages"].AudioOutput
+    _run_send_loop(streamer, [AO(audio=_DONE, cancel_generation=0)])
+
+    assert streamer.should_listen.is_set()
+
+
+def test_send_loop_drops_stale_chunks_and_keeps_current_ones(monkeypatch):
+    streamer, client = _wrapped_streamer(monkeypatch, gen=2)
+    AO = sys.modules["speech_to_speech.pipeline.messages"].AudioOutput
+    _run_send_loop(
+        streamer,
+        [
+            AO(audio=b"\xaa\xaa" * 2000, cancel_generation=1),
+            AO(audio=b"\xbb\xbb" * 2000, cancel_generation=2),
+            AO(audio=_DONE, cancel_generation=2),
+        ],
+    )
+
+    assert b"".join(client.sent) == b"\xbb\xbb" * 2000
+    assert streamer.should_listen.is_set()
+
+
+def test_send_loop_unstamped_wrapper_is_never_treated_as_stale(monkeypatch):
+    streamer, client = _wrapped_streamer(monkeypatch, gen=5)
+    AO = sys.modules["speech_to_speech.pipeline.messages"].AudioOutput
+    _run_send_loop(streamer, [AO(audio=b"\x07\x07" * 2000, cancel_generation=None), AO(audio=_DONE)])
+
+    assert b"".join(client.sent) == b"\x07\x07" * 2000
+    assert streamer.should_listen.is_set()
+
+
+def test_send_loop_bare_bytes_without_a_scope_unchanged(monkeypatch):
+    """Barge-cancel off: bare bytes and a bare DONE, no cancel scope (also covered by
+    test_send_loop_audio_paths_all_record_playback)."""
+    streamer, client = _wrapped_streamer(monkeypatch)
+    streamer.cancel_scope = None
+    _run_send_loop(streamer, [b"\x09\x09" * 2000, _DONE])
+
+    assert b"".join(client.sent) == b"\x09\x09" * 2000
+    assert streamer.should_listen.is_set()
+
+
+def test_upstream_output_for_queue_wraps_as_the_streamer_expects():
+    """Contract with the REAL framework: only runs where speech_to_speech is installed."""
+    import subprocess
+
+    script = (
+        "from types import SimpleNamespace as N\n"
+        "import numpy as np\n"
+        "from speech_to_speech.baseHandler import BaseHandler\n"
+        "from speech_to_speech.pipeline.messages import AudioOutput, AUDIO_RESPONSE_DONE\n"
+        "src = N(cancel_generation=3)\n"
+        "for out in (b'\\x01\\x02', np.zeros(4, np.int16), AUDIO_RESPONSE_DONE):\n"
+        "    w = BaseHandler.output_for_queue(None, out, src)\n"
+        "    assert isinstance(w, AudioOutput) and w.cancel_generation == 3, w\n"
+        "assert w.audio == AUDIO_RESPONSE_DONE\n"
+    )
+    probe = subprocess.run([sys.executable, "-I", "-c", "import speech_to_speech.baseHandler"], capture_output=True)
+    if probe.returncode != 0:
+        import pytest
+
+        pytest.skip("real speech_to_speech framework not importable here")
+    run = subprocess.run([sys.executable, "-I", "-c", script], capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+
+
+# ── PTT hold: {"type":"ptt","state":"down"|"up"} (VOICE_PTT_HOLD) ─────────
+#
+# A pause inside a held push-to-talk turn must not end the turn. The upstream VAD
+# is not in this repo, so `_ModelVAD` models the one rule that matters here:
+# `min_silence_ms` of consecutive silent samples, after speech, finalises a turn
+# (live flag --min_silence_ms 300). It counts the samples it is FED -- which is
+# exactly why withholding a pause from it keeps the turn open. Loud chunk = speech.
+
+import json as _json  # noqa: E402
+
+import numpy as _np  # noqa: E402
+
+_SR = 16000
+_MIN_SILENCE_MS = 300
+
+
+def _speech(n_chunks, amp=6000):
+    return [(_np.full(512, amp, dtype=_np.int16)).tobytes() for _ in range(n_chunks)]
+
+
+def _silence(seconds):
+    return [bytes(CHUNK_BYTES) for _ in range(int(seconds * _SR / 512))]
+
+
+class _ModelVAD:
+    """Finalises a turn after _MIN_SILENCE_MS of fed silence following speech."""
+
+    def __init__(self):
+        self.turns = []
+        self._audio = []
+        self._speech_seen = False
+        self._silent = 0
+
+    def feed(self, chunk):
+        loud = bool(_np.abs(_np.frombuffer(chunk, dtype=_np.int16)).max() > 1000)
+        if loud:
+            self._speech_seen = True
+            self._silent = 0
+            self._audio.append(chunk)
+        elif self._speech_seen:
+            self._silent += 512
+            self._audio.append(chunk)
+            if self._silent * 1000 >= _MIN_SILENCE_MS * _SR:
+                self.turns.append(b"".join(self._audio))
+                self._audio, self._speech_seen, self._silent = [], False, 0
+
+    def feed_all(self, q):
+        for c in _drain(q):
+            if isinstance(c, bytes):
+                self.feed(c)
+
+
+def _ptt(state):
+    return _json.dumps({"type": "ptt", "state": state})
+
+
+def _run_session(frames, monkeypatch=None):
+    streamer = _make_streamer()
+    streamer.should_listen.set()
+    asyncio.run(streamer._handle_client(_FakeClient(frames)))
+    vad = _ModelVAD()
+    vad.feed_all(streamer.input_queue)
+    return streamer, vad
+
+
+def test_ptt_hold_keeps_one_turn_across_a_one_second_pause(monkeypatch):
+    monkeypatch.delenv("VOICE_PTT_HOLD", raising=False)
+    a, b = _speech(20, 6000), _speech(20, 7000)
+    frames = [_ptt("down"), b"".join(a), b"".join(_silence(1.0)), b"".join(b), _ptt("up")]
+    streamer, vad = _run_session(frames)
+    assert len(vad.turns) == 1, f"expected ONE turn, got {len(vad.turns)}"
+    assert b"".join(a) in vad.turns[0] and b"".join(b) in vad.turns[0]
+
+
+def test_ptt_up_ends_the_turn_without_client_tail_silence(monkeypatch):
+    monkeypatch.delenv("VOICE_PTT_HOLD", raising=False)
+    a = _speech(20)
+    streamer, vad = _run_session([_ptt("down"), b"".join(a), _ptt("up")])
+    assert len(vad.turns) == 1 and b"".join(a) in vad.turns[0]
+
+
+def test_ptt_silent_hold_queues_no_speech_and_ends_clean(monkeypatch):
+    monkeypatch.delenv("VOICE_PTT_HOLD", raising=False)
+    streamer, vad = _run_session([_ptt("down"), b"".join(_silence(2.0)), _ptt("up")])
+    assert vad.turns == []  # nothing was said: no turn, same as a silent hold today
+
+
+def test_client_that_never_sends_ptt_still_ends_on_min_silence():
+    a, b = _speech(20, 6000), _speech(20, 7000)
+    frames = [b"".join(a), b"".join(_silence(1.0)), b"".join(b)]
+    streamer, vad = _run_session(frames)
+    assert len(vad.turns) == 1 and vad.turns[0].startswith(b"".join(a))
+    # the pause ended turn 1; speech b is a second, still-open turn (not finalised yet)
+    assert b"".join(b) not in vad.turns[0]
+    # and every byte reached the queue unmodified
+    sent = b"".join(a) + b"".join(_silence(1.0)) + b"".join(b)
+    q = _make_streamer()
+    q.should_listen.set()
+    asyncio.run(q._handle_client(_FakeClient(frames)))
+    assert b"".join(c for c in _drain(q.input_queue) if isinstance(c, bytes)) == sent
+
+
+def test_kill_switch_ignores_ptt_frames(monkeypatch):
+    monkeypatch.setenv("VOICE_PTT_HOLD", "0")
+    a, b = _speech(20, 6000), _speech(20, 7000)
+    frames = [_ptt("down"), b"".join(a), b"".join(_silence(1.0)), b"".join(b), _ptt("up")]
+    streamer, vad = _run_session(frames)
+    assert len(vad.turns) == 1 and b"".join(b) not in vad.turns[0]  # pause cut the turn, as before
+
+
+def test_ptt_hold_cap_resumes_normal_vad():
+    from patches.websocket_streamer import PTT_HOLD_MAX_S, PttHold
+
+    now = [1000.0]
+    hold = PttHold(clock=lambda: now[0])
+    hold.down()
+    assert hold.active
+    now[0] += PTT_HOLD_MAX_S + 1
+    assert not hold.active
+    quiet = bytes(CHUNK_BYTES)
+    assert all(hold.admit(quiet) for _ in range(40)), "after the cap every chunk reaches the VAD"
+
+
+def test_ptt_hold_is_dropped_when_the_socket_closes_without_up(monkeypatch):
+    """No 'up' ever arrives: the hold dies with the connection, and the next connection's VAD is normal."""
+    monkeypatch.delenv("VOICE_PTT_HOLD", raising=False)
+    streamer = _make_streamer()
+    streamer.should_listen.set()
+    a = _speech(20)
+    asyncio.run(streamer._handle_client(_FakeClient([_ptt("down"), b"".join(a)])))  # closes mid-hold
+    _drain(streamer.input_queue)
+    b = _speech(20, 7000)
+    asyncio.run(streamer._handle_client(_FakeClient([b"".join(b), b"".join(_silence(1.0))])))
+    vad = _ModelVAD()
+    vad.feed_all(streamer.input_queue)
+    assert len(vad.turns) == 1 and b"".join(b) in vad.turns[0]
+
+
+def test_ptt_hold_withholds_a_noisy_pause_but_never_speech():
+    from patches.websocket_streamer import PttHold
+
+    rng = _np.random.default_rng(0)
+    hold = PttHold()
+    hold.down()
+    noise = lambda: rng.normal(0, 400, 512).astype(_np.int16).tobytes()  # room noise floor, RMS ~400
+    voiced = _speech(1, 6000)[0]
+    assert hold.admit(voiced)
+    passed = sum(hold.admit(noise()) for _ in range(30))  # a ~1 s pause
+    assert passed <= 4, "a long noisy pause must be withheld after a few chunks"
+    assert hold.admit(voiced), "speech after the pause always passes"
+
+
+def test_ptt_up_places_the_sub_chunk_remainder_before_the_silence_flush(monkeypatch):
+    """[down, 20 chunks + 320 samples, up, 60 chunks of silence]: the 320-sample
+    remainder is pre-'up' speech, so it must reach the queue BEFORE the zero flush,
+    never after it (where it would open the next turn)."""
+    monkeypatch.delenv("VOICE_PTT_HOLD", raising=False)
+    speech = b"".join(_speech(20)) + _np.full(320, 6000, dtype=_np.int16).tobytes()
+    streamer = _make_streamer()
+    streamer.should_listen.set()
+    frames = [_ptt("down"), speech, _ptt("up"), b"".join(_silence(2.0))[: 60 * CHUNK_BYTES]]
+    asyncio.run(streamer._handle_client(_FakeClient(frames)))
+    chunks = [c for c in _drain(streamer.input_queue) if isinstance(c, bytes)]
+    loud = [bool(_np.abs(_np.frombuffer(c, dtype=_np.int16)).max() > 1000) for c in chunks]
+    first_zero = loud.index(False)
+    assert sum(loud[:first_zero]) == 21, "the padded remainder is the 21st speech chunk"
+    assert not any(loud[first_zero:]), "no speech chunk may follow the first zero-flush chunk"
+
+
+def test_ptt_up_after_the_cap_expired_still_flushes():
+    from patches.websocket_streamer import PTT_HOLD_MAX_S, PttHold
+
+    now = [0.0]
+    hold = PttHold(clock=lambda: now[0])
+    hold.down()
+    now[0] += PTT_HOLD_MAX_S + 1
+    assert hold.admit(bytes(CHUNK_BYTES))  # expiry is noticed here
+    assert hold.up() is True, "the turn is still open: up must flush"
+    assert hold.up() is False, "and only once"
+
+
+def test_ptt_hold_admits_every_chunk_at_the_owners_real_mic_levels():
+    """Owner's live echo-gate log of PTT turns: 1 s window RMS 2-65 when quiet, 580-4800 in speech."""
+    from patches.websocket_streamer import PttHold
+
+    def gauss(rms):
+        return _np.random.default_rng(int(rms)).normal(0, rms, 512).clip(-32768, 32767).astype(_np.int16).tobytes()
+
+    for speech_rms in (580, 1500, 4800):
+        hold = PttHold()
+        hold.down()
+        for _ in range(20):
+            hold.admit(gauss(65))
+        assert all(hold.admit(gauss(speech_rms)) for _ in range(40)), f"speech at RMS {speech_rms} was withheld"
+        assert sum(hold.admit(gauss(65)) for _ in range(30)) <= 4, "the pause after speech is withheld"
+        # speech straight off the press, with no noise preceding it
+        hold2 = PttHold()
+        hold2.down()
+        assert all(hold2.admit(gauss(speech_rms)) for _ in range(40))

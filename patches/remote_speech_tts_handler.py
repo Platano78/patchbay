@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+from contextlib import contextmanager
 from math import gcd
 from queue import Queue
 from threading import Event
@@ -38,10 +39,10 @@ DEFAULT_INSTRUCTIONS = "Speak in a clear, natural, neutral adult voice."
 
 # A 200 response is not proof of a real utterance: the same empty-instructions bug
 # (and a mid-stream disconnect from the remote being stopped/restarted underneath
-# us) both look like "success" unless the byte count is sanity-checked. ~100ms of
-# 24kHz s16le mono audio. Chosen to clear a legitimately terse reply ("Okay." is
+# us) both look like "success" unless the byte count is sanity-checked. The floor
+# is 100ms of SOURCE audio (source_sample_rate * 2 // 10 bytes of s16le mono; 4800
+# at the 24kHz default). Chosen to clear a legitimately terse reply ("Okay." is
 # ~0.5-0.7s) while still catching a nothing-was-said response.
-RESPONSE_FLOOR_BYTES = 4800
 
 # Known pocket-tts preset voices (from pocket_tts_handler.py's docstring). Used only
 # for a best-effort boot-time sanity check -- voice can also be a local file path or
@@ -82,6 +83,9 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
         instructions: str = "",
         sample_rate: int = 16000,
         blocksize: int = 512,
+        source_sample_rate: int = REMOTE_SAMPLE_RATE,
+        stream_format: str = "",
+        runon_chars_per_s: float = 0.0,
         connect_timeout_s: float = 1.0,
         read_timeout_s: float = 10.0,
         max_duration_s: float = 15.0,
@@ -115,18 +119,23 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.instructions = (instructions or "").strip()
         self.sample_rate = sample_rate
         self.blocksize = blocksize
+        # Rate of the PCM the SERVER returns (24000 per the OpenAI pcm contract;
+        # some servers differ). Empty stream_format = field omitted from the request.
+        self.source_sample_rate = source_sample_rate
+        self.stream_format = (stream_format or "").strip()
+        self.runon_chars_per_s = runon_chars_per_s
         self.connect_timeout_s = connect_timeout_s
         self.read_timeout_s = read_timeout_s
         self.max_duration_s = max_duration_s
         self.failure_threshold = failure_threshold
         self.cooldown_s = cooldown_s
 
-        self._needs_resampling = self.sample_rate != REMOTE_SAMPLE_RATE
+        self._needs_resampling = self.sample_rate != self.source_sample_rate
         if self._needs_resampling:
-            g = gcd(self.sample_rate, REMOTE_SAMPLE_RATE)
+            g = gcd(self.sample_rate, self.source_sample_rate)
             self._resample_up = self.sample_rate // g
-            self._resample_down = REMOTE_SAMPLE_RATE // g
-            resample_ratio = REMOTE_SAMPLE_RATE / self.sample_rate
+            self._resample_down = self.source_sample_rate // g
+            resample_ratio = self.source_sample_rate / self.sample_rate
             self._target_chunk_size = max(1, int(self.blocksize * resample_ratio))
         else:
             self._resample_up = self._resample_down = 1
@@ -157,6 +166,9 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self._pocket_kwargs.setdefault("sample_rate", self.sample_rate)
         self._pocket_kwargs["cancel_scope"] = cancel_scope
         self._pocket_kwargs["speculative_turns"] = None
+        # The operator's own --pocket_tts_voice: what the fallback speaks when the
+        # live-selected (remote) voice is one pocket cannot load. See _pocket_voice.
+        self._pocket_default_voice = self._pocket_kwargs.get("voice")
 
         # Cheap, weight-free check that the fallback is constructible, whether or
         # not it is preloaded now: catches a broken fallback config at boot,
@@ -206,17 +218,44 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 voice,
             )
 
+    def _pocket_voice(self) -> tuple[Any, str]:
+        """(voice pocket should be built with, reason). A live voice change
+        (brain_control._set_voice_remote) writes the REMOTE voice name into
+        _pocket_kwargs; pocket can only load its presets, hf:// / file paths and
+        registered cloned voices, and raises on anything else -- which is silence.
+        Decided here, once, at the only place pocket is constructed."""
+        voice = self._pocket_kwargs.get("voice")
+        default = self._pocket_default_voice
+        if voice == default:
+            return voice, "configured pocket voice"
+        if isinstance(voice, str):
+            if voice in KNOWN_POCKET_VOICE_PRESETS:
+                return voice, "selected voice is a pocket preset"
+            if voice.startswith("hf://") or os.path.exists(voice):
+                return voice, "selected voice is a loadable path"
+            try:
+                from speech_to_speech import voice_clone
+
+                if voice_clone.is_name_format_valid(voice) and voice_clone.voice_path(voice).is_file():
+                    return str(voice_clone.voice_path(voice)), "selected voice is a registered cloned voice"
+            except ImportError:
+                pass
+        return default, f"selected voice {voice!r} is not loadable by pocket"
+
     def _construct_pocket(self) -> Any:
+        voice, why = self._pocket_voice()
         logger.info(
-            "remote-speech: constructing pocket fallback (%s)",
+            "remote-speech: constructing pocket fallback (%s); pocket fallback voice %r (%s)",
             "preloaded at startup" if self.fallback_preload else "first failover, cold start accepted",
+            voice,
+            why,
         )
         return self._pocket_handler_cls(
             Event(),
             queue_in=Queue(),
             queue_out=Queue(),
             setup_args=(self.should_listen,),
-            setup_kwargs=dict(self._pocket_kwargs),
+            setup_kwargs={**self._pocket_kwargs, "voice": voice},
         )
 
     def _pocket_instance(self) -> Any:
@@ -294,6 +333,36 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
         return resample_poly(audio, up=self._resample_up, down=self._resample_down)
 
+    @contextmanager
+    def _open_speech_stream(self, payload: dict[str, Any], timeout: httpx.Timeout) -> Iterator[httpx.Response]:
+        """POST the synthesis request. A base-mode server (e.g. Qwen3-TTS) answers
+        a request carrying `instructions` with HTTP 400 "--instruct is not
+        supported" and does not advertise that on /v1/audio/voices: remember it
+        for this backend and replay the SAME request once without `instructions`,
+        inside this synthesis attempt (no failure recorded, no pocket). Any other
+        400 -- or any other status -- is returned untouched for the caller's
+        raise_for_status()."""
+        url = f"{self.base_url}/v1/audio/speech"
+        with httpx.stream("POST", url, json=payload, timeout=timeout) as response:
+            if response.status_code == 400 and "instructions" in payload:
+                body = response.read().decode("utf-8", errors="replace").lower()
+                if "instruct" in body and "not supported" in body:
+                    logger.warning(
+                        "remote-speech: backend rejected `instructions` (%s) -- retrying once without them "
+                        "and not sending them again for a while",
+                        body[:200],
+                    )
+                    tts_capabilities.mark_instructions_unsupported(self)
+                else:
+                    yield response
+                    return
+            else:
+                yield response
+                return
+        retry_payload = {k: v for k, v in payload.items() if k != "instructions"}
+        with httpx.stream("POST", url, json=retry_payload, timeout=timeout) as response:
+            yield response
+
     def _stream_remote(self, text: str, affect: str | None = None) -> Iterator[TTSOut]:
         """Stream PCM audio from the remote server, resampled and blocked to match
         the pipeline's output contract. Raises on any failure (connect error, HTTP
@@ -313,6 +382,8 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
         }
         if self.voice:
             payload["voice"] = self.voice
+        if self.stream_format:
+            payload["stream_format"] = self.stream_format
         # Omitted (never sent as an empty string) unless there's something to
         # say AND the active backend actually wants it -- a backend that
         # declares accepts_instructions: false (e.g. a CustomVoice model) is
@@ -335,6 +406,8 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
         deadline = start + self.max_duration_s
         first_chunk = True
         total_bytes_received = 0
+        runon_cap_s = 2.0 + len(text) / self.runon_chars_per_s if self.runon_chars_per_s > 0 else None
+        floor_bytes = self.source_sample_rate * 2 // 10  # 100 ms of source audio
 
         # Connect timeout kept short and separate from the read (inter-chunk) timeout
         # so a stopped remote (ECONNREFUSED) fails instantly instead of hanging.
@@ -352,11 +425,19 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
         audio_buffer: list[np.ndarray] = []
         buffer_size = 0
         leftover = np.array([], dtype=np.int16)
+        yielded_any = False
 
-        with httpx.stream("POST", f"{self.base_url}/v1/audio/speech", json=payload, timeout=timeout) as response:
+        with self._open_speech_stream(payload, timeout) as response:
             response.raise_for_status()
             for raw_chunk in response.iter_bytes():
-                if time.monotonic() > deadline:
+                # A chunk that crosses the run-on cap is cut (below), not timed
+                # out, even if it arrived after the deadline: raising here would
+                # replay the already-spoken start via pocket.
+                runon_crossed = (
+                    runon_cap_s is not None
+                    and (total_bytes_received + len(raw_chunk)) / 2 / self.source_sample_rate > runon_cap_s
+                )
+                if time.monotonic() > deadline and not runon_crossed:
                     raise TimeoutError(
                         f"remote-speech synthesis exceeded {self.max_duration_s:.0f}s total-duration cap"
                     )
@@ -366,6 +447,23 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
                 if not raw_chunk:
                     continue
                 total_bytes_received += len(raw_chunk)
+                if runon_crossed:
+                    # Run-on guard: the start of this utterance has already been
+                    # played, so end it here -- no raise, no pocket (it would
+                    # re-speak the beginning), no failure recorded. If nothing
+                    # was played yet there is nothing to re-speak: fail over.
+                    if not yielded_any:
+                        raise RuntimeError(
+                            f"remote-speech run-on: first audio already exceeds the {runon_cap_s:.1f}s cap "
+                            "-- nothing was spoken, treating as a failed synthesis"
+                        )
+                    logger.warning(
+                        "remote-speech: run-on cut -- %d-char text capped at %.1fs, received %.1fs of audio",
+                        len(text),
+                        runon_cap_s,
+                        total_bytes_received / 2 / self.source_sample_rate,
+                    )
+                    return
                 if first_chunk:
                     logger.info("remote-speech TTFA: %.3fs", perf_counter() - start)
                     first_chunk = False
@@ -391,6 +489,13 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
 
                     n = (len(audio_int16) // self.blocksize) * self.blocksize
                     for i in range(0, n, self.blocksize):
+                        # A barge-in cancel must also stop the blocks of the chunk
+                        # already in hand, or they land in the output queue just
+                        # after the server drained it.
+                        if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
+                            logger.info("TTS generation cancelled (interruption)")
+                            return
+                        yielded_any = True
                         yield audio_int16[i : i + self.blocksize]
                     leftover = audio_int16[n:]
 
@@ -403,10 +508,10 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
         # that ended normally. Zero bytes is unconditionally a failure; anything
         # under the floor is treated the same way rather than played as a
         # legitimately-short reply.
-        if total_bytes_received < RESPONSE_FLOOR_BYTES:
+        if total_bytes_received < floor_bytes:
             raise RuntimeError(
                 f"remote-speech returned only {total_bytes_received} bytes of audio "
-                f"(floor is {RESPONSE_FLOOR_BYTES} bytes, ~100ms) -- treating as a failed synthesis"
+                f"(floor is {floor_bytes} bytes, ~100ms) -- treating as a failed synthesis"
             )
 
         if audio_buffer and buffer_size > 0:
@@ -418,12 +523,28 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
             audio_int16 = leftover
 
         for i in range(0, len(audio_int16), self.blocksize):
+            # Same barge-in rule as the in-loop blocks: a cancel that lands after the
+            # last in-loop check must not leak the tail of the cancelled reply.
+            if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
+                logger.info("TTS generation cancelled (interruption)")
+                return
             chunk = audio_int16[i : i + self.blocksize]
             if len(chunk) < self.blocksize:
                 chunk = np.pad(chunk, (0, self.blocksize - len(chunk)))
             yield chunk
 
+    def _input_cancelled(self, tts_input: TTSIn) -> bool:
+        """True when this input belongs to a generation a barge-in cancelled.
+
+        `_stream_remote` captures the CURRENT generation when it starts, so an input
+        queued before the cancel would otherwise be spoken under the new one."""
+        gen = getattr(tts_input, "cancel_generation", None)
+        return gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen)
+
     def process(self, tts_input: TTSIn) -> Iterator[TTSOut]:
+        if self._input_cancelled(tts_input):
+            logger.info("TTS input of a cancelled generation dropped")
+            return
         speculative_turns = getattr(self, "speculative_turns", None)
         if isinstance(tts_input, EndOfResponse):
             if speculative_turns and not speculative_turns.is_latest_after_reopen_grace(

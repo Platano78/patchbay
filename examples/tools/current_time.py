@@ -5,11 +5,11 @@ from datetime import datetime
 TOOL_DEF = {
     "type": "function",
     "name": "current_time",
-    "description": "Tell the user the current date and time. Use when asked what time or day it is.",
+    "description": "Tell the user the current date (including year) and time. Use when asked what time or day it is.",
     "parameters": {"type": "object", "properties": {}},
 }
 TIMEOUT_S = 2.0
 
 def run(_arg=None) -> str:
     now = datetime.now()
-    return now.strftime("It's %A, %B %d, %I:%M %p.")
+    return now.strftime("It's %A, %B %d, %Y, %I:%M %p.")

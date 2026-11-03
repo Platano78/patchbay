@@ -521,8 +521,9 @@ def test_decision_query_param_documents_the_keyword_requirement():
 
 def test_knowledge_results_get_a_larger_cap_than_one_line_tools():
     assert vt._RESULT_CHARS["knowledge_lookup"] > vt._MAX_RESULT_CHARS
-    # web_search and friends keep the tight default.
-    assert "web_search" not in vt._RESULT_CHARS
+    # web_search has its own (smaller) cap; the other one-line tools keep the tight default.
+    assert vt._MAX_RESULT_CHARS < vt._RESULT_CHARS["web_search"] < vt._RESULT_CHARS["knowledge_lookup"]
+    assert "get_weather" not in vt._RESULT_CHARS
 
 
 def test_execute_does_not_truncate_knowledge_results_to_the_short_cap():
@@ -896,3 +897,13 @@ def test_dropin_shadowing_builtin_warns_and_still_wins(monkeypatch, caplog):
     assert by_name["get_weather"] is shadow_def, "drop-in must still win over the built-in"
     warnings = [r for r in caplog.records if r.levelname == "WARNING"]
     assert any("get_weather" in r.getMessage() for r in warnings)
+
+
+def test_knowledge_lookup_says_it_is_not_a_reminder_system():
+    # Patchbay ships no reminder tool; without this the model offers to
+    # "set a reminder" via knowledge_lookup. Remove if a reminder tool lands.
+    descriptions = {t["name"]: t["description"] for t in vt.TOOL_DEFS}
+    assert descriptions["knowledge_lookup"].endswith(
+        " This searches saved notes only and is not a reminder system; "
+        "there is no way to set reminders - say so."
+    )

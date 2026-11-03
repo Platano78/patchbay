@@ -32,16 +32,26 @@ every request.
 
 ## Turn-taking belongs to the server
 
-The server ends a turn when **its own VAD** sees `min_silence_ms` of quiet. It has no concept of a
-client-side control — a push-to-talk button, a tap-to-stop, anything. It will therefore end a turn
-mid-hold if the speaker pauses, and it ships with `min_silence_ms=64`, which is shorter than an
-ordinary pause between words.
+The server ends a turn when **its own VAD** sees `min_silence_ms` of quiet. The VAD has no concept
+of a client-side control — a push-to-talk button, a tap-to-stop, anything — so a client that holds
+the floor must say so with the `ptt` message (below). Without it, the server ends a turn mid-hold
+whenever the speaker pauses for `min_silence_ms` (300 ms on the reference deployment; the upstream
+default of 64 ms is shorter than an ordinary pause between words).
 
-A client whose UI implies the user owns the turn boundary has two jobs. Raise `min_silence_ms`
-server-side so natural pauses do not end a turn — note this is global and shared with every other
-client. And end the turn deliberately by **sending silence**: the VAD counts samples, not wall-clock
-time, so writing `min_silence_ms` worth of zero bytes closes the turn immediately, at the moment
-the user chose, rather than at whatever pause the VAD noticed first.
+**`ptt` hold.** Send `{"type":"ptt","state":"down"}` when the user presses and
+`{"type":"ptt","state":"up"}` when they release. While a connection's hold is `down`, silence does
+not end the turn: the server withholds the pauses from the VAD, so speech before and after a pause
+is one turn. On `up` the server ends the turn at once by feeding the VAD silence, the same path
+silence takes. A hold the client never releases is dropped when the socket closes, and in any case
+after 120 s, after which the VAD behaves normally. A hold with no speech in it produces no turn,
+as before. Servers with `VOICE_PTT_HOLD=0`, and older servers, ignore the frames, so sending them is
+always safe. A client that never sends `ptt` (wake word, open mic, native clients) gets exactly the
+old behaviour: the VAD alone ends turns.
+
+Still true: a client may end a turn deliberately by **sending silence** — the VAD counts samples,
+not wall-clock time, so writing `min_silence_ms` worth of zero bytes closes the turn at the moment
+the user chose. The webclient sends `up` first and then about one second of zeros, so it works
+against servers without the hold.
 
 ## Audio
 
@@ -107,6 +117,9 @@ Only `config_get` is needed for a minimal client. The rest are optional capabili
 | `phone_context` | `lat`, `lon`, `accuracy`, `tz`, `battery_pct`, `charging` | Ambient device context, so tools can answer "what's the weather" without asking where you are. Opt-in. Server-side kill switch: `VOICE_PHONE_CONTEXT=off`. |
 | `camera_frame` | `data`: base64 JPEG | Latest camera frame for the `look` tool. Rate-limited server-side to 1/s, capped at 2 MB. |
 | `screen_frame` | `data`: base64 JPEG | Same, for screen share. |
+| `playback` | `state`: `start`, `end` or `cut`; `delay_ms` (`start` only) | Optional, metadata only, no audio. Tells the server when this client's speaker is actually playing a reply: `start` when the first chunk of a reply is scheduled (`delay_ms` = how far in the future it will sound), `end` once the last chunk has played out, `cut` when playback was stopped early (barge-in). Gives the server a heard-latency figure (`TURN_HEARD` in its log) and, with `VOICE_OVERLAP_OBSERVE`, brackets the window in which this client's mic frames are measured instead of queued. Frames are ordered with the audio on the same socket, so a mic frame sent after `end`/`cut` is never read as playing-phase. Servers that do not know it ignore it. The stall-fill clips and the wake chime never send it. |
+| `ptt` | `state`: `down` or `up` | Push-to-talk hold. `down` on press, `up` on release (before any tail silence). While `down`, the server's silence rule cannot end the turn; `up` ends it. See "Turn-taking belongs to the server". Per connection; dropped on socket close or after 120 s. Ignored by servers without the feature. |
+| `barge_in` | — | Send when the user takes the floor while a reply is playing or still being produced (a push-to-talk press does), **before** you flush your own playback and before the first mic frame. The server cancels the reply in flight — the LLM stream, the speech synthesis and the queued audio — re-opens the microphone, and answers with `audio_stop`. Nothing in flight: the server changes nothing and still answers `audio_stop`. From the moment you send it, **drop every binary frame you receive until `audio_stop` arrives**: frames are ordered on the socket, so everything before it is the cancelled reply and everything after it is new audio. Send it, and start dropping, only when the last `config_state` carried `barge_cancel: true`; otherwise behave as if the frame did not exist. Also release the drop after about 1.5 s in case an `audio_stop` is lost. |
 | `voice_clone_begin` / `voice_clone_chunk` / `voice_clone_end` | see `webclient/index.html` | Custom voice upload. Skip unless you need it. |
 
 `config_set` keys, as handled by `_config_set` in `patches/brain_control.py`:
@@ -155,12 +168,13 @@ clients are expected to keep working; the reference client logs and drops them.
 | `type` | Fields | Meaning |
 |---|---|---|
 | `transcription_completed` | `transcript` | The user's turn, as recognised. Marks turn commit. |
-| `partial_transcription` | `delta` | Incremental transcript text. Append, don't replace. |
+| `partial_transcription` | `delta`, optional `turn_id`, `turn_revision` | The whole transcript so far for the turn, despite the name. **Replace** the live text, don't append. Drop a partial whose turn is older than the newest seen, whose `turn_revision` is older than the newest seen for the same turn, or whose turn is already final. |
 | `assistant_text` | `text`, `tools` | The reply. **A tool-calling turn emits an empty-`text` frame carrying `tools` first**, then a second frame with the real answer — don't render the first as an empty reply. |
 | `wakeword_state` | `state` (`awake`/`asleep`/`off`), `phrase`, `score` | Wake-gate state. |
-| `config_state` | full config snapshot | Answer to `config_get`; also broadcast on some changes (above). Its `wake_word` block (or `null` when the server has no gate) carries `enabled`, `state`, `phrase`, `model`, `models`, and `available`; when `available` is `false` — no detector installed — it also carries `unavailable_reason`, a sentence to show the user, and `config_set {wake_word: true}` will be refused. |
+| `config_state` | full config snapshot | Answer to `config_get`; also broadcast on some changes (above). Its `barge_cancel` boolean is `true` only when the server cancels a reply on `barge_in` (`VOICE_BARGE_CANCEL` not `off`); send `barge_in` only when the last snapshot said so, and treat an absent key as `false`. Its `overlap_observe` boolean is `true` only when the server runs the overlap-observe instrument (`VOICE_OVERLAP_OBSERVE` with the echo gate scoring): an open-mic client may then also stream mic frames while a reply plays (a client that does not stays correct, it simply feeds the server less). Its `wake_word` block (or `null` when the server has no gate) carries `enabled`, `state`, `phrase`, `model`, `models`, and `available`; when `available` is `false` — no detector installed — it also carries `unavailable_reason`, a sentence to show the user, and `config_set {wake_word: true}` will be refused. |
 | `config_ack` | `ok`, `error`, plus a full snapshot on success | Answer to `config_set`. On `ok`, treat as `config_state`. May carry `chat_reset: true` — the server dropped its history, so mirror that. |
 | `history_replay` | `entries[]` with `ts`, `user`, `assistant` | Prior turns, sent on connect. Apply only to empty local state; a reconnect without a client restart already has them. |
+| `audio_stop` | — | Stop playing and discard anything scheduled or buffered: the reply in flight was cancelled. Broadcast to every client when any client (or a server-side detector) interrupts a reply, so a second screen goes quiet too; also the answer to your own `barge_in`, in which case it is the marker after which binary frames are new audio again. |
 | `token_usage` | `input_tokens`, `output_tokens` | Diagnostics. |
 | `cockpit_state`, `search_links` | — | Cockpit UI panels. Ignorable. |
 | `voice_clone_progress` / `voice_clone_result` | — | Voice upload progress. Ignorable. |

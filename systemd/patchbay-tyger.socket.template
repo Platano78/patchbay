@@ -1,0 +1,24 @@
+# Template: user socket unit for the tyger sidecar (services/tyger/README.md). On demand: systemd listens, and
+# starts patchbay-tyger.service on the first connection. Not installed automatically.
+#
+# Install (user units, no sudo):
+#   sed -e 's|${TYGER_PORT}|8797|' systemd/patchbay-tyger.socket.template > ~/.config/systemd/user/patchbay-tyger.socket
+#   (render patchbay-tyger.service.template beside it, see that file)
+#   systemctl --user daemon-reload && systemctl --user enable --now patchbay-tyger.socket
+#
+# Variables to substitute:
+#   ${TYGER_PORT}   - port the pipeline's VOICE_TYGER_URL points at (default 8797)
+#
+# The sidecar has no authentication. 127.0.0.1 keeps it to this machine; to serve other devices on your LAN
+# replace it with this machine's LAN address (not 0.0.0.0) and read "Who can connect" in services/tyger/README.md.
+
+[Unit]
+Description=patchbay tyger sidecar (socket, starts on first connection)
+
+[Socket]
+ListenStream=127.0.0.1:${TYGER_PORT}
+# One server process handles every connection (the default, spelled out): the sidecar batches conversations on the GPU.
+Accept=no
+
+[Install]
+WantedBy=sockets.target

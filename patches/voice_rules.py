@@ -21,6 +21,7 @@ like ``think_filter.py`` -- importable and unit-testable standalone.
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import Any
 
 DEFAULT_RULES = (
@@ -29,7 +30,10 @@ DEFAULT_RULES = (
     "Never end your reply with a promise to do something later. If "
     "answering needs a tool, call the tool now, in this same turn; if no "
     "tool is needed, give the answer directly. Saying you will check, look "
-    "up, or get back to the user without actually doing it is a failure."
+    "up, or get back to the user without actually doing it is a failure. "
+    "If a request is missing something you need (which device, what to "
+    "remind about, when), ask one short question instead of calling a tool "
+    "or guessing."
 )
 
 
@@ -90,3 +94,37 @@ def apply_system_rules(messages: list[dict[str, Any]], rules: str = RULES) -> li
     new_messages = list(messages)
     new_messages[system_index] = {**system_message, "content": new_content}
     return new_messages
+
+
+def _parse_date_anchor(raw: str | None) -> bool:
+    """``VOICE_DATE_ANCHOR`` parsing: unset/blank -> on; ``"off"``
+    (case-insensitive, stripped) -> off; any other value -> on."""
+    return (raw or "").strip().lower() != "off"
+
+
+DATE_ANCHOR = _parse_date_anchor(os.environ.get("VOICE_DATE_ANCHOR"))
+
+
+def date_line(now: datetime | None = None) -> str:
+    """``Today's date is Saturday, October 24, 2026.`` -- day granularity
+    only, on purpose: the system message is a cacheable prefix on
+    llama.cpp/vLLM, so a value that changed every minute would invalidate
+    the prompt cache on every turn. Time of day is the current_time tool's
+    job. Uses the pipeline host's local time."""
+    now = now or datetime.now()
+    return f"Today's date is {now:%A}, {now:%B} {now.day}, {now.year}."
+
+
+def apply_date_anchor(
+    messages: list[dict[str, Any]],
+    now: datetime | None = None,
+    enabled: bool = DATE_ANCHOR,
+) -> list[dict[str, Any]]:
+    """Append today's date to the system message with
+    :func:`apply_system_rules`' exact contract (copy, never mutate; create a
+    system message if none; idempotent for the same line). Must be called
+    per request, not cached at startup, so a session spanning midnight gets
+    the new date. Without it a model falls back on its training-era year."""
+    if not enabled:
+        return messages
+    return apply_system_rules(messages, date_line(now))

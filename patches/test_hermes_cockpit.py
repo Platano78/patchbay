@@ -7,7 +7,7 @@ Run from repo root: python3 -m pytest patches/test_hermes_cockpit.py -v
 The real ``speech_to_speech`` package is not installed in this repo; the two
 symbols hermes_cockpit.py imports from it are stubbed into ``sys.modules``
 before the import below, same hermetic pattern as
-``test_reflex_lane.py``/``test_brain_control.py``. ``PipelineEvent`` is
+``test_parrot_lane.py``/``test_brain_control.py``. ``PipelineEvent`` is
 aliased to the REAL ``pydantic.BaseModel`` (not a fake) since
 ``CockpitStateEvent``/``SearchLinksEvent`` rely on real pydantic field
 semantics.

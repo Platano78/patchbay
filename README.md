@@ -48,7 +48,7 @@ Start with [SETUP.md](SETUP.md); agents acting for you start with
         │  WebSocket  ws://<host>:8765
         ▼
  speech-to-speech pipeline (patched)
-   ├─ STT   — parakeet-tdt
+   ├─ STT   — parakeet-tdt (default; remote-transcription opt-in, see *STT backends*)
    ├─ LLM   — OpenAI-compatible chat-completions endpoint ("brain")
    └─ TTS   — pocket (default; remote-speech opt-in, see *TTS backends*)
         ▲
@@ -81,6 +81,18 @@ Start with [SETUP.md](SETUP.md); agents acting for you start with
   per-brain override (persisted to a sidecar file, see `VOICE_MODEL_OVERRIDES_FILE`
   below) that beats the configured default until you clear it — it never edits
   `brains.json` itself.
+- A brain entry may also carry `"chat_template_kwargs": {"flag": value, ...}`
+  — extra chat-template flags your model understands (for example a
+  conversational-mode switch). They are merged over the defaults Patchbay
+  sends (`enable_thinking: false`, plus `reasoning_effort` if the entry sets
+  one), your keys winning. On a hosted lane, or the official OpenAI
+  endpoint, nothing is sent by default, so only your keys go out (plus
+  `enable_thinking: false` and the effort if the entry also sets a valid
+  `reasoning_effort`).
+  Anything that is not an object with string keys is logged and ignored. A
+  template flag that adds its own brevity instruction overlaps
+  `VOICE_SYSTEM_RULES`; set `VOICE_SYSTEM_RULES=off` if you want only the
+  model's.
 
 ### Finding your local model server
 
@@ -312,6 +324,8 @@ TalkingHead-compatible GLB and add one line to `AVATAR_REGISTRY` in
 
 ## Optional integrations
 
+A separate, optional GPU service for turn-taking (a sidecar with its own venv; needs a CUDA or ROCm GPU with 4 GB free) lives in [`services/tyger/`](services/tyger/README.md).
+
 The patch pack reads a few env vars for optional local-service integrations.
 All are optional with localhost defaults — ignore them if you don't run those
 services; the core voice agent (LLM brain + STT + TTS) works without any of
@@ -376,18 +390,22 @@ the behaviour described.
 |---|---|---|
 | `VOICE_STREAM_MAX_S` | `120.0` | hard ceiling on a single LLM streaming response, in seconds. Exists because an HTTP read timeout does not bound *total* duration — a model trickling one token at a time can hold the thread open indefinitely without ever tripping a read timeout. `off` disables |
 | `VOICE_MAX_TOKENS` | `1024` | `max_tokens` sent with every LLM request. A spoken answer never needs more, and it bounds a runaway generation. `off` disables |
-| `VOICE_TOOL_CALL_CAP` | `8` | maximum tool calls the model may make in one turn before it is cut off, so a tool loop cannot run forever |
+| `VOICE_TOOL_CALL_CAP` | `8` | maximum tool-call **rounds** in one turn (one model response may hold several calls; each response counts once) before it is cut off, so a tool loop cannot run forever; `0`/`off` disables |
 | `VOICE_TOOL_FILLER_EVERY` | `3` | how often a spoken filler ("Let me check.") plays during a tool chain — every Nth round, so rounds 1, 4, 7… A long chain doesn't chatter |
-| `VOICE_ECHO_GATE` | *(unset — off)* | server-side echo/speech discrimination, so the assistant does not hear itself. `on` gates, `observe` scores and logs without ever dropping audio, `off`/unset disables. Start with `observe` and read the logs before enabling |
+| `VOICE_ECHO_GATE` | *(unset — off)* | server-side echo/speech discrimination, so the assistant does not hear itself. `on` gates, `observe` scores and logs without ever dropping audio, `off`/unset disables. Start with `observe` and read the logs before enabling; `journalctl -u patchbay -o cat | python3 examples/echo_gate_report.py` summarises those logs and says whether any echo was ever measured |
+| `VOICE_BARGE_CANCEL` | *(on)* | when a push-to-talk press lands on a reply, the browser tells the server (`barge_in`) and the server stops producing it: the LLM stream, the speech synthesis and the queued audio are cancelled, so the old reply never resumes after the new question. What the model had already said is kept in its chat history. `off` restores the earlier behaviour, where only the browser's own playback stopped |
+| `VOICE_PTT_HOLD` | *(on)* | the browser tells the server when push-to-talk is held (`ptt` `down`/`up`); while held, the server withholds pauses from its silence rule so a pause mid-thought does not end the turn, and `up` ends it. Dropped after 120 s or when the socket closes. Clients that never send `ptt` are unaffected. `0` ignores the frames, restoring silence-only turn ends |
+| `VOICE_OVERLAP_OBSERVE` | *(unset — off)* | a measurement instrument, not a feature: set to `1` (needs `VOICE_ECHO_GATE=observe` or `on`, otherwise it logs a warning and stays inert) and an open-mic client **streams the microphone to the server during replies** (the same data path the wake-word gate already receives while asleep). The server scores those frames with the echo gate, labelled `phase=playback`, and never sends them to the pipeline, so nothing changes in how the assistant listens or answers. Read the result with `examples/echo_gate_report.py`, which then also prints a per-playback-window table. Remove it after the collection session. Push-to-talk is unaffected |
 | `VOICE_HERMES_ANNOUNCE` | *(on)* | speak a short notice when a Hermes delegation completes. `off` disables |
-| `VOICE_REFLEX` | *(unset)* | set to `1` to enable the reflex lane — a fast path that answers a few intents without a full LLM round trip |
-| `VOICE_PARROT` | *(unset)* | sets the **startup** state of **parrot mode**, a diagnostic: every turn is spoken back to you verbatim with no LLM involved, so you can hear whether the whole audio path — synthesis, streaming, playback, avatar — actually works. Not a conversational mode; the assistant will only ever repeat you. Set to `1` to start armed; leave unset to start disarmed. Toggle it live from the settings panel's Connection section afterwards — no restart needed, so you never have to kill the conversation you're diagnosing. Short-circuits a turn before the reflex lane ever sees it (a reflex answer would hide the very path you are testing); turn it off again to restore normal conversation |
+| `VOICE_PARROT` | *(unset)* | sets the **startup** state of **parrot mode**, a diagnostic: every turn is spoken back to you verbatim with no LLM involved, so you can hear whether the whole audio path — synthesis, streaming, playback, avatar — actually works. Not a conversational mode; the assistant will only ever repeat you. Set to `1` to start armed; leave unset to start disarmed. Toggle it live from the settings panel's Connection section afterwards — no restart needed, so you never have to kill the conversation you're diagnosing. Short-circuits a turn before the LLM sees it; turn it off again to restore normal conversation |
 | `VOICE_CAMERA_FRAME` | `/dev/shm/voice_camera_frame.jpg` | where a client-pushed camera frame is written for the vision tool to read |
 | `VOICE_SCREEN_FRAME` | `/dev/shm/voice_screen_frame.jpg` | same, for a shared screen frame |
 | `VOICE_WS_ORIGINS` | *(unset — no-Origin clients + same-Host origins only)* | comma-separated allowlist of page origins permitted to open the WebSocket, fully overriding the default. The entry `-` also admits clients that send no `Origin` header (scripts, health probes). See *Who can connect* above — this is the control for cross-site WebSocket hijacking, which a VPN cannot stop |
 | `VOICE_ALLOWED_HOSTS` | *(unset — IP addresses, `localhost`, this machine's own names incl. its Tailscale name, and `VOICE_WS_ORIGINS` hostnames are allowed)* | comma-separated list of extra hostnames accepted in the `Host` header of both the pipeline's WebSocket and the cockpit's HTTP server — the DNS-rebinding guard. Hostnames named in `VOICE_WS_ORIGINS` or listed here are trusted; the single value `*` turns the check off entirely (any Host accepted). See *Who can connect* above |
 | `VOICE_SYSTEM_RULES` | *(built-in text)* | overrides the pipeline-level system instruction appended to every request for every brain. It is a pipeline invariant, not a persona — it exists because some models collapse answer length as history grows. `off` disables |
+| `VOICE_DATE_ANCHOR` | *(on)* | appends `Today's date is <Weekday>, <Month> <D>, <YYYY>.` (the pipeline host's local date, no clock time, recomputed every request) to the system message, so the model does not guess its training-era year. `off` disables |
 | `VOICE_AFFECT` | *(unset — off)* | per-turn delivery conditioning. The brain prefixes each reply with a short note — `[affect: what this moment is - how it should sound]` — which is stripped before the text is spoken or shown, and sent to the TTS server as that one request's `instructions` field. `on` enables the note; `words` additionally asks the brain to write the reply in the register its own note names. Needs a TTS backend that accepts `instructions` (a `remote-speech` server that does not declare `accepts_instructions: false`); an operator-set speech style always takes precedence over it. Off by default and byte-identical to absent when off. Measured effect is delivery — pacing and register — not laughter or other paralinguistic events |
+| `VOICE_VOCAB_FILE` | `~/speech-to-speech/vocab.txt` | vocabulary for the post-transcription **vocab snap** (next section). Missing file = feature off; `off` disables even if the file exists |
 | `VOICE_PERSONA_FILE` | `~/speech-to-speech/persona.json` | where personas set from the panel are stored (config sidecar, survives a framework reinstall) |
 | `VOICE_TOOL_FILLERS` | *(seven built-ins)* | pipe-separated (`\|`) list of spoken fillers, since a phrase may contain a comma. `off` disables |
 | `VOICE_WAKE_WORD` | *(unset — off)* | boot default for the join-deaf wake-word gate. The settings panel can toggle it live without a restart. Needs `openwakeword` + `onnxruntime` in the pipeline's venv (SETUP.md step 6 — its pre-trained models, `hey_jarvis` included, are CC BY-NC-SA 4.0, non-commercial); without them the setting is ignored with a warning and the panel's toggle is greyed out with the reason |
@@ -403,6 +421,39 @@ Secret-bearing vars (`HA_TOKEN` and friends) should not be set as
 `systemd/patchbay.service.template`); the vars reach the process
 identically either way.
 
+## Vocabulary snap (optional)
+
+Speech recognisers mangle names they have never seen: "VoxCPM" comes back as "Vox EPM". If you
+give the pipeline a list of the terms you use, it repairs those in the final transcript before the
+assistant reads it, and the cockpit transcript shows the corrected text.
+
+Create `~/speech-to-speech/vocab.txt` (or point `VOICE_VOCAB_FILE` at another path): one entry per
+line, in the spelling you want, `#` starts a comment line. A line may also list **aliases**, the
+known ways the recogniser mishears the term, separated by `|`:
+
+```
+# project names
+Patchbay
+Parakeet-TDT
+VoxCPM | vox epm
+fork-pi | fork pie | fork pi
+```
+
+It is **off until that file exists**, and edits are picked up without a restart. Aliases are matched
+exactly (ignoring case, spaces and punctuation) and always rewritten to the first spelling (an alias may be at most three spoken words). Without
+an alias, a span of one to three spoken words is rewritten only when it is a close match for a term,
+or equals it once case, spaces and punctuation are ignored (so "patch bay" becomes "Patchbay"). It is
+deliberately conservative:
+
+- terms shorter than four letters are ignored;
+- spans containing ordinary common English words are not fuzzy-matched;
+- a fuzzy match is refused when one string contains the other, so "Qwen 3" or "Heralds" never become
+  "Qwen" or "Herald" (list a real mishearing of that shape as an alias);
+- a lowercase single word that equals a term apart from case ("crate", "herald") is left as spoken;
+- anything ambiguous is left as spoken.
+
+Each rewrite is logged at INFO as `vocab snap: 'Vox EPM' -> 'VoxCPM'`.
+
 ## Voice tools
 
 The voice agent's LLM can call a small set of server-side tools (defined in
@@ -413,10 +464,12 @@ The voice agent's LLM can call a small set of server-side tools (defined in
 | `get_weather` | Current conditions for a place | Open-Meteo (public web API) |
 | `web_search` | Search the public web; results also appear as clickable links on screen | DuckDuckGo (`ddgs`) |
 | `knowledge_lookup` | Search your own notes, projects, and research | QMD MCP (`QMD_MCP_URL`) |
-| `set_mood` | Set the interface/avatar mood | none — client-side visual only |
+| `decision_lookup` *(optional)* | Look up a recorded design decision and its rationale ("why did we…") | Faulkner-DB (`FAULKNER_API_URL`) |
+| `set_mood` | Set the interface/avatar mood — only when the user asks for an expression or mood change | none — client-side visual only |
 | `delegate_to_hermes` *(optional)* | Hand off a long-running / multi-step task to Hermes | Hermes shim (`HERMES_SHIM_URL`) |
 | `hermes_status` *(optional)* | Report Hermes' status (summary, last result, recent steps, or pending approvals) | Hermes MCP (`HERMES_MCP_URL`) |
 | `send_to_hermes` *(optional)* | Send a quick free-form message / follow-up to Hermes | Hermes MCP (`messages_send` → `HERMES_TARGET`) |
+| `confirm_action` *(only with `VOICE_CONFIRM_TOOLS`)* | Lets the model retry a consequential tool once the user has said yes — see *Confirming consequential actions* below | none |
 
 Hermes is a separate, self-hosted service (see *Agent lane (optional)*
 above) — most installs never run it, and these three tools simply stay
@@ -433,7 +486,7 @@ request".
 
 Arming is **availability-probed once at pipeline start**: the weather, search,
 and mood tools are always armed; `knowledge_lookup` is armed only if the QMD MCP
-endpoint answers a probe; the three Hermes tools are armed only if the Hermes MCP
+endpoint answers a probe, and `decision_lookup` only if Faulkner-DB does; the three Hermes tools are armed only if the Hermes MCP
 endpoint answers a probe. This keeps a self-hoster without those services from
 arming dead tools the LLM would call and then narrate as failures. Set
 `VOICE_TOOLS=<comma-list>` to pin the set explicitly (no probing — only listed
@@ -442,17 +495,105 @@ pipeline to re-arm** after bringing a service up or down. The settings UI's
 "N armed" count shows the result. `web_search` results also surface as a
 clickable **Links card** in the cockpit.
 
+When a tool times out or fails, the model is told so and instructed not to
+guess or retry; the web-search and weather results carry a "Checked at" time.
+If the reply after a tool call comes back empty, the agent says a short
+"Sorry, I didn't get an answer for that." instead of going silent. Each executed
+tool logs one INFO line (name, milliseconds, first 200 characters of the result).
+
 ### Add your own tools
 
 Set `VOICE_TOOLS_DIR=/path/to/dir` to drop in extra tools without editing repo
 files — one `.py` per tool exposing a `TOOL_DEF` dict and a `run()` callable
-(see `examples/tools/` for seven ready-to-copy tools: `current_time` (clock), `model_server_status`, `service_health`, `gpu_status`, `news_headlines`, `home_assistant` (needs `HA_URL`/`HA_TOKEN` in the pipeline's environment) and `look` (camera vision — needs a multimodal endpoint); where a file has EDIT-ME constants, set them for your own endpoints). This **executes your Python on your
+(see `examples/tools/` for eight ready-to-copy tools: clock, model-server status,
+service health, GPU status, news headlines, camera vision (needs a multimodal
+endpoint), Home Assistant control, and a read-only web page reader that refuses
+non-public addresses — edit each file's EDIT-ME constants for your own
+endpoints). This **executes your Python on your
 box**, so treat the directory with the same trust as editing config. Drop-ins
 arm unconditionally when the directory is set (unless `VOICE_TOOLS` pins the
 list); a broken file is skipped with a logged warning rather than crashing the
-pipeline. No restart needed to pick up changes — the settings panel's
+pipeline.
+
+A drop-in may also set module-level constants to override the defaults:
+`TIMEOUT_S` (seconds before the call is abandoned), `ARG_KEY` / `ARG_LABEL`
+(which parameter carries the argument, and how to name it when asking for it),
+`TOOL_LABEL` (how the tool is named aloud), `REQUIRED` (whether a missing
+argument is refused), `RESULT_CHARS` (how much of the result reaches the model —
+the default suits a one-line spoken answer, raise it for a tool returning a
+document excerpt), `TIME_SENSITIVE = True` (default `False`: a successful result
+gets ` (Checked at 3:42 PM today.)` appended, so a stale answer left in the
+conversation is recognisable later — set it for tools about "now", like scores
+or traffic), and `CONSEQUENTIAL = True` (the tool is refused until the
+user confirms it; see below). No restart needed to pick up changes — the settings panel's
 "Reload tools" button re-probes and re-arms live (also
 `{"type":"config_set", "reload_tools":true}` over the WS).
+
+### Confirming consequential actions
+
+Some tools do something you would not want done on a misheard word — spend
+money, send a message, delete something. Set `VOICE_CONFIRM_TOOLS` to a
+pipe-separated list of tool names (or mark a drop-in `CONSEQUENTIAL = True`) and
+those tools are **refused on the first call**: the agent is told to explain what
+will happen and ask you outright. Only after you agree, and the agent calls
+`confirm_action` naming that tool, does a retry go through.
+
+The authorisation is deliberately narrow. It is tied to the exact argument that
+was refused, so approving one message does not approve a different one, and it
+is **used once** — an immediate repeat is refused again. Nothing is confirmed
+that was not refused first, and `confirm_action` itself is never gated.
+
+**Nothing is gated by default.** With `VOICE_CONFIRM_TOOLS` unset, no tool
+requires confirmation and `confirm_action` is not even offered to the model, so
+this costs nothing until you ask for it. `VOICE_CONFIRM_TOOLS=off` disables the
+mechanism outright, including for drop-ins that declare themselves consequential.
+
+## STT backends
+
+`parakeet-tdt` is the default and runs on the pipeline host — nothing here
+changes if you never touch `--stt`.
+
+`remote-transcription` is an **opt-in** backend for any server implementing
+OpenAI's `POST /v1/audio/transcriptions` protocol (a Whisper-API server,
+OpenAI itself, ...), so the speech-to-text model can live on another machine
+and the pipeline host only makes HTTP calls. Point
+`--remote_transcription_base_url` at such a server and pass
+`--stt remote-transcription`:
+
+```bash
+~/speech-to-speech-main/.venv/bin/speech-to-speech \
+  --mode websocket --ws_host 127.0.0.1 --ws_port 8765 \
+  --stt remote-transcription \
+  --remote_transcription_base_url http://<your-stt-server>:<port> \
+  --remote_transcription_model <model-id-your-server-expects> \
+  --tts pocket --pocket_tts_device cpu \
+  --llm_backend chat-completions \
+  --responses_api_base_url <your-base-url> \
+  --responses_api_api_key dummy \
+  --model_name <your-model-name> \
+  --responses_api_stream
+```
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `--remote_transcription_base_url` | *(unset)* | required with this backend; startup is refused without it |
+| `--remote_transcription_model` | `whisper-1` | the `model` form field |
+| `--remote_transcription_language` | *(unset)* | the `language` form field; unset lets the server decide |
+| `--remote_transcription_progressive_timeout_s` | `1.0` | per-operation (connect/read) timeout for a live partial request, not a total deadline; a partial already in flight can delay a following final by up to this long |
+| `--remote_transcription_final_timeout_s` | `15.0` | per-operation (connect/read) timeout for the final request, not a total deadline (a server that trickles bytes can hold the call longer) |
+| `--remote_transcription_progressive_window_s` | `15.0` | a live partial uploads only the last N seconds of the utterance |
+
+Audio goes up as a 16 kHz mono PCM16 WAV in a multipart upload; the reply is
+read as JSON (`text`, and `language` if the server returns one). Live partials
+re-send the audio so far on the same endpoint (at most one in flight; a
+partial that arrives while one is running, or after the final started, is
+skipped) and follow `--enable_live_transcription` (on by default).
+
+**There is no local fallback.** If the server is down, slow or returns an
+error, that turn's transcript is empty and an error is logged — the pipeline
+does not load a local model behind your back. A failed health check at startup
+(`GET <base_url>/health`) only logs a warning, so the pipeline still boots when
+the STT server comes up later.
 
 ## TTS backends
 
@@ -488,6 +629,15 @@ BRAINS_JSON=$PWD/brains.json \
   --model_name <your-model-name> \
   --responses_api_stream
 ```
+
+**Servers that don't match the OpenAI defaults.** Three optional flags, all
+inert unless set: `--remote_speech_source_sample_rate <hz>` (the rate of the PCM
+the server returns; default 24000), `--remote_speech_stream_format <value>`
+(sent as `stream_format`, whitespace trimmed; some servers only stream incrementally when
+it is set), and `--remote_speech_runon_chars_per_s <n>` (run-on guard, off at 0:
+audio longer than `2 + len(text)/n` seconds is cut where it stands once audio has
+started playing, with no `pocket` replay and no circuit-breaker failure; if
+nothing has played yet, it falls back to `pocket` like any failed synthesis).
 
 **The expression/prosody handle.** `remote-speech`'s `instructions` field is
 the reason this backend exists: unlike `pocket` (good default prosody, no
@@ -698,6 +848,7 @@ localhost, so it is safe to run on the same box as a live agent.
 
 This project borrows ideas as well as code, and gladly says so:
 
+- [`speakrail/speakrail`](https://github.com/speakrail/speakrail) (Apache-2.0) — the lexical backchannel test (a short reply over the assistant tiled entirely from acknowledgement phrases), reimplemented in `patches/backchannel.py`; the duck-then-decide barge-in design it pairs with.
 - [`huggingface/speech-to-speech`](https://github.com/huggingface/speech-to-speech) (Apache-2.0) — the STT/LLM/TTS pipeline this cockpit drives.
 - [`met4citizen/TalkingHead`](https://github.com/met4citizen/TalkingHead) + HeadAudio by Mika Suominen (MIT) — the 3D avatar + audio-driven lip-sync approach, the ready-head roster, and the Blender avatar pipelines that shaped this project's avatar architecture.
 - Ready Player Me, AvatarSDK, Avaturn, VRoid Studio, and the MakeHuman/MPFB community — creators of the bundled example heads.

@@ -8,6 +8,36 @@ import pytest
 _MISSING = [m for m in ("httpx", "numpy", "openai", "pydantic") if importlib.util.find_spec(m) is None]
 
 
+# Patch-pack modules that s2s_pipeline.py imports as `speech_to_speech.<...>` but that a framework
+# install which has not had apply.sh run since they were added does not contain yet. Tests that
+# drive the real s2s_pipeline against the real framework (mostly in subprocess probes, which cannot
+# see this file's pytest hooks) call alias_unapplied_pack_modules() first, so a stale install does
+# not fail them with ModuleNotFoundError. A module the install already has is left alone.
+_PACK_MODULES = (
+    (
+        "speech_to_speech.arguments_classes.remote_transcription_stt_arguments",
+        "patches.remote_transcription_stt_arguments",
+    ),
+    (
+        "speech_to_speech.STT.remote_transcription_stt_handler",
+        "patches.remote_transcription_stt_handler",
+    ),
+)
+
+
+def alias_unapplied_pack_modules():
+    import importlib
+    import sys
+
+    for installed_name, pack_name in _PACK_MODULES:
+        try:
+            if importlib.util.find_spec(installed_name) is not None:
+                continue
+        except (ImportError, ValueError):
+            pass  # parent package missing/stubbed: alias anyway
+        sys.modules[installed_name] = importlib.import_module(pack_name)
+
+
 def pytest_configure(config):
     if _MISSING:
         pytest.exit(

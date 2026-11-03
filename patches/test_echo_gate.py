@@ -1010,3 +1010,63 @@ def test_log_every_rejects_every_non_finite_spelling(monkeypatch, value):
     `_env_number` already catches. Pinned so that stays true."""
     monkeypatch.setenv("VOICE_ECHO_GATE_LOG_EVERY", value)
     assert eg.EchoGate()._log_every == eg._DEFAULT_LOG_EVERY
+
+
+# ── (floor-management slice 2) feed(phase=...) labels the calib line ─────
+
+
+def _observe_gate_with_ref(monkeypatch):
+    monkeypatch.setenv("VOICE_ECHO_GATE", "observe")
+    gate = eg.EchoGate()
+    tts = _noise_pcm(SEND * 4, seed=21)
+    for chunk in _chunks(tts, SEND):
+        gate.note_playback(chunk)
+    return gate, tts
+
+
+def test_calib_line_has_no_phase_by_default(monkeypatch, caplog):
+    """No phase argument: the line is byte-identical to the slice-1 format
+    (the report tool's input contract and every existing parser stay valid)."""
+    caplog.set_level("INFO")
+    gate, tts = _observe_gate_with_ref(monkeypatch)
+    gate.feed(_echo_frame(tts, 0, 0))
+    msgs = [r.getMessage() for r in _calib_records(caplog)]
+    assert msgs
+    for m in msgs:
+        assert "phase" not in m
+        assert m.endswith(tuple(f"reason={r}" for r in ("no_ref", "silence", "acquiring", "no_window", "scored")))
+
+
+def test_calib_line_carries_phase_when_given(monkeypatch, caplog):
+    caplog.set_level("INFO")
+    gate, tts = _observe_gate_with_ref(monkeypatch)
+    gate.feed(_echo_frame(tts, 0, 0), phase="playback")
+    msgs = [r.getMessage() for r in _calib_records(caplog)]
+    assert msgs and all(m.endswith(" phase=playback") for m in msgs)
+    assert _calib_fields(_calib_records(caplog)[-1])["phase"] == "playback"
+
+
+def test_phase_is_per_call_and_does_not_stick(monkeypatch, caplog):
+    caplog.set_level("INFO")
+    gate, tts = _observe_gate_with_ref(monkeypatch)
+    gate.feed(_echo_frame(tts, 0, 0), phase="playback")
+    gate.feed(_echo_frame(tts, 0, 1))
+    msgs = [r.getMessage() for r in _calib_records(caplog)]
+    assert msgs[0].endswith(" phase=playback") and "phase" not in msgs[-1]
+
+
+def test_phase_does_not_change_scoring_and_keeps_mic_coordinates_continuous(monkeypatch):
+    """Playback-phase frames advance _mic_total like any other frame, and the
+    verdict stream is the same with or without the label."""
+    tts = _noise_pcm(SEND * 8, seed=22)
+    results = []
+    for phase in (None, "playback"):
+        monkeypatch.setenv("VOICE_ECHO_GATE", "1")
+        gate = eg.EchoGate()
+        for chunk in _chunks(tts, SEND):
+            gate.note_playback(chunk)
+        k = _lock_on_echo(gate, tts)
+        verdicts = [gate.feed(_echo_frame(tts, 0, i), phase=phase) for i in range(k, k + 6)]
+        results.append((verdicts, gate._mic_total))
+    assert results[0] == results[1]
+    assert not any(results[0][0])  # still ON-mode drops a pure echo

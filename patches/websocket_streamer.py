@@ -3,6 +3,7 @@ import base64
 import ipaddress
 import json
 import logging
+import math
 import os
 import socket
 import ssl
@@ -17,6 +18,7 @@ import numpy as np
 from websockets.asyncio.server import ServerConnection
 
 from speech_to_speech import phone_context
+from speech_to_speech.floor_state import FloorState
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import PipelineEvent
 from speech_to_speech.pipeline.messages import AUDIO_RESPONSE_DONE, PIPELINE_END
@@ -27,6 +29,17 @@ from speech_to_speech.voice_clone import UploadManager
 from speech_to_speech.wakeword_gate import WakewordGate
 
 logger = logging.getLogger(__name__)
+
+# With VOICE_BARGE_CANCEL on, upstream's BaseHandler.output_for_queue wraps every
+# stamped bytes/ndarray output -- sentinels included -- as AudioOutput. A framework
+# that predates the class never wraps, so an unmatchable placeholder is correct.
+try:
+    from speech_to_speech.pipeline.messages import AudioOutput
+except ImportError:  # pragma: no cover - only on a framework without cancel generations
+
+    class AudioOutput:  # type: ignore[no-redef]
+        pass
+
 
 # Echo gate (default OFF, see echo_gate.py). Imported defensively: unlike the
 # other patch modules this one is new, so a box whose patch pack predates it
@@ -39,11 +52,12 @@ except Exception:  # pragma: no cover - only on a box missing the module
 
     class EchoGate:  # type: ignore[no-redef]
         enabled = False
+        mode = "off"
 
         def note_playback(self, pcm: bytes) -> None:
             pass
 
-        def feed(self, pcm: bytes) -> bool:
+        def feed(self, pcm: bytes, phase: str | None = None) -> bool:
             return True
 
         def reset(self) -> None:
@@ -74,6 +88,103 @@ _WSS_KEYFILE = os.environ.get("VOICE_WS_KEYFILE")
 # Kept as a raw string at module level and parsed inside _run_server's TLS try-block
 # so a typo'd port doesn't raise at import time -- same fail-soft rule as a bad cert.
 _WSS_PORT_RAW = os.environ.get("VOICE_WSS_PORT", "8443")
+
+
+_OVERLAP_TRUTHY = {"1", "true", "yes", "on"}
+_BARGE_CANCEL_OFF = {"off", "0", "false", "no"}
+
+
+def barge_cancel_enabled() -> bool:
+    """VOICE_BARGE_CANCEL: server-side cancel of an in-flight reply when the
+    client sends {"type":"barge_in"}. Default ON; off/0/false/no restores the
+    behaviour from before the cancel existed (the pipeline never sees a scope)."""
+    return os.environ.get("VOICE_BARGE_CANCEL", "").strip().lower() not in _BARGE_CANCEL_OFF
+_PLAYBACK_DELAY_MAX_MS = 60_000.0
+
+
+def ptt_hold_enabled() -> bool:
+    """VOICE_PTT_HOLD: honour a client's {"type":"ptt"} down/up frames so server
+    VAD silence cannot end a turn while the key is held. Default ON; off/0/false/no
+    ignores the frames and restores VAD-only turn ends."""
+    return os.environ.get("VOICE_PTT_HOLD", "").strip().lower() not in _BARGE_CANCEL_OFF
+
+
+PTT_HOLD_MAX_S = 120.0  # a hold older than this is dropped; the VAD then behaves normally
+PTT_QUIET_PASS_CHUNKS = 4  # quiet chunks (32 ms each) still fed during a hold: 128 ms, below any min_silence_ms in use
+PTT_QUIET_RMS_FLOOR = 150.0  # int16 RMS at or below which a chunk is never speech
+PTT_QUIET_RMS_FACTOR = 3.0  # ... or within this factor of the quietest chunk seen this hold (a noise floor)
+PTT_QUIET_RMS_CEIL = 450.0  # the line never rises above this: the owner's real speech starts at RMS ~580, their quiet is 2-65
+CHUNK = 512 * 2  # bytes in one VAD chunk (512 int16 samples)
+PTT_UP_FLUSH_CHUNKS = 32  # ~1 s of zeros fed on "up": the same silence flush the client sends today
+
+
+class PttHold:
+    """Per-connection push-to-talk hold. While `active`, `admit` withholds the
+    pauses of a turn from the VAD (the VAD counts samples of silence, so a
+    pause it never receives cannot end the turn); speech always passes.
+    `down`/`up` come from the client's own frames; a hold the client never
+    releases expires after PTT_HOLD_MAX_S. A connection that never calls
+    `down` sees `admit` return True for every chunk."""
+
+    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._since: float | None = None
+        self._expired = False  # cap hit with no "up" yet: the turn is still open, so up() must still flush
+        self._quiet_run = 0
+        self._floor = float("inf")
+
+    @property
+    def active(self) -> bool:
+        if self._since is None:
+            return False
+        if self._clock() - self._since > PTT_HOLD_MAX_S:
+            logger.warning("ptt hold exceeded %.0fs without 'up'; dropping it, VAD resumes", PTT_HOLD_MAX_S)
+            self.reset()
+            self._expired = True
+            return False
+        return True
+
+    def down(self) -> None:
+        self._expired = False
+        self._since = self._clock()
+        self._quiet_run = 0
+        self._floor = float("inf")
+
+    def up(self) -> bool:
+        """Release the hold. True if one was active (the caller then flushes silence)."""
+        was = self._since is not None or self._expired  # an expired hold still has an open turn to close
+        self.reset()
+        self._expired = False
+        return was
+
+    def reset(self) -> None:
+        self._expired = False
+        self._since = None
+        self._quiet_run = 0
+        self._floor = float("inf")
+
+    def admit(self, chunk: bytes) -> bool:
+        """Should this 512-sample chunk reach the VAD?"""
+        if not self.active:
+            return True
+        samples = np.frombuffer(chunk, dtype=np.int16).astype(np.float64)
+        rms = float(np.sqrt(np.mean(samples * samples))) if samples.size else 0.0
+        self._floor = min(self._floor, rms)
+        if rms > max(PTT_QUIET_RMS_FLOOR, min(PTT_QUIET_RMS_FACTOR * self._floor, PTT_QUIET_RMS_CEIL)):
+            self._quiet_run = 0
+            return True
+        self._quiet_run += 1
+        return self._quiet_run <= PTT_QUIET_PASS_CHUNKS
+
+
+def _playback_delay_s(value: Any) -> float:
+    """Client-reported scheduling delay of a `playback` start frame, in
+    seconds. Untrusted input: anything that is not a finite number is 0, and
+    the rest is clamped to [0, 60 s] so a bad client can only skew its own
+    latency figure."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return 0.0
+    return min(max(float(value), 0.0), _PLAYBACK_DELAY_MAX_MS) / 1000.0
 
 
 def _origin_allowed_same_host(origin: str | None, host_header: str | None) -> bool:
@@ -284,6 +395,7 @@ class WebSocketStreamer:
         host: str = "0.0.0.0",
         port: int = 8765,
         control_callback: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        cancel_scope: Any = None,
     ) -> None:
         self.stop_event = stop_event
         self.input_queue = input_queue  # clients -> VAD
@@ -293,6 +405,13 @@ class WebSocketStreamer:
         self.host = host
         self.port = port
         self.control_callback = control_callback  # config_get/config_set handler (brain + persona control)
+        # Barge-in cancel (VOICE_BARGE_CANCEL): the pipeline's CancelScope, or None
+        # when the knob is off -- then `barge_in` frames are ignored like any
+        # unknown frame and nothing below changes behaviour.
+        self.cancel_scope = cancel_scope
+        # Audio waiting to reach 100 ms before it is sent. Lives on the instance
+        # so a barge-in can discard it along with the queue.
+        self._audio_buffer = bytearray()
         self.clients: set[ServerConnection] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.server: Any = None
@@ -307,6 +426,24 @@ class WebSocketStreamer:
         # barge-in can work. Default OFF -- with VOICE_ECHO_GATE unset this is
         # an inert pass-through and costs nothing on either path.
         self.echo_gate = EchoGate()
+        # Who holds the floor: per-client playback (from the client's
+        # `playback` frames) plus the user's speech state. Observe-only.
+        self.floor_state = FloorState()
+        # Overlap observe (VOICE_OVERLAP_OBSERVE, default off): mic frames sent
+        # while a client is playing a reply are scored by the echo gate under
+        # phase=playback and never queued. Meaningful only with the gate
+        # scoring, so without VOICE_ECHO_GATE it stays inert.
+        self.overlap_observe = False
+        if os.environ.get("VOICE_OVERLAP_OBSERVE", "").strip().lower() in _OVERLAP_TRUTHY:
+            if getattr(self.echo_gate, "mode", "off") != "off":
+                self.overlap_observe = True
+            else:
+                logger.warning(
+                    "VOICE_OVERLAP_OBSERVE is set but VOICE_ECHO_GATE is off; overlap observe stays inert "
+                    "(set VOICE_ECHO_GATE=observe to use it)"
+                )
+        self._overlap_windows = 0  # window counter for the overlap_observe log lines
+        self._overlap_window_of: dict[int, int] = {}  # client id -> its open window
         # Custom voice cloning: chunk frames are buffered here (bytes only,
         # no model work) keyed by client identity; only `voice_clone_begin`
         # (validation) and `voice_clone_end` (assembled bytes + the actual
@@ -449,6 +586,7 @@ class WebSocketStreamer:
         logger.info(f"Client {client_id} connected")
         self.clients.add(websocket)
         recv_buffer = bytearray()
+        ptt_hold = PttHold()  # per connection: dies with the socket, never shared
 
         # Enable listening when first client connects
         if len(self.clients) == 1:
@@ -517,6 +655,14 @@ class WebSocketStreamer:
                             )
                         continue
 
+                    # Overlap observe: while this client reports it is playing a
+                    # reply, its mic frames feed the echo gate (phase=playback)
+                    # and never reach input_queue, whatever should_listen says.
+                    # Only reachable with VOICE_OVERLAP_OBSERVE effective.
+                    if self.overlap_observe and self.floor_state.is_playing(client_id):
+                        self._feed_playback_phase(recv_buffer, message)
+                        continue
+
                     if self.should_listen.is_set():
                         # Split into 512-sample (1024 bytes) chunks for VAD.
                         # Keep a per-client remainder buffer so no samples are dropped
@@ -531,6 +677,9 @@ class WebSocketStreamer:
                             # bleeding back through the mic. Inert (returns
                             # True immediately) unless VOICE_ECHO_GATE is set.
                             if not self._echo_pass(chunk):
+                                continue
+                            # PTT hold: pauses inside a held turn never reach the VAD.
+                            if not ptt_hold.admit(chunk):
                                 continue
                             self.input_queue.put(chunk)
                             num_chunks += 1
@@ -555,6 +704,28 @@ class WebSocketStreamer:
                         ok = await asyncio.to_thread(phone_context.update, msg)
                         if not ok:
                             logger.debug(f"Client {client_id}: phone_context update rejected")
+                    elif msg.get("type") == "playback":
+                        self._handle_playback(client_id, msg)
+                    elif msg.get("type") == "barge_in" and self.cancel_scope is not None:
+                        self._barge_in(client_id, "client")
+                    elif msg.get("type") == "ptt" and ptt_hold_enabled():
+                        if msg.get("state") == "down":
+                            ptt_hold.down()
+                        elif msg.get("state") == "up":
+                            if ptt_hold.up() and self.should_listen.is_set():
+                                # Pre-"up" audio still in recv_buffer (a <512-sample remainder)
+                                # goes first, zero-padded to a whole chunk through the echo gate
+                                # (no hold: it was just released), so no speech trails the flush.
+                                if recv_buffer:
+                                    tail = bytes(recv_buffer) + bytes(CHUNK - len(recv_buffer))
+                                    recv_buffer.clear()
+                                    if self._echo_pass(tail):
+                                        self.input_queue.put(tail)
+                                # End the turn the way silence does today: feed the VAD
+                                # silence. Frames are handled in order, so every chunk the
+                                # client sent before "up" is already queued ahead of this.
+                                for _ in range(PTT_UP_FLUSH_CHUNKS):
+                                    self.input_queue.put(bytes(CHUNK))
                     elif msg.get("type") == "voice_clone_chunk":
                         result = await asyncio.to_thread(self._voice_clone_chunk, client_id, msg.get("data"))
                         if result is not None:
@@ -573,7 +744,10 @@ class WebSocketStreamer:
             logger.error(f"Client {client_id} error: {type(e).__name__}: {e}", exc_info=True)
         finally:
             self.clients.discard(websocket)
+            ptt_hold.reset()
             self._voice_uploads.abort(client_id)
+            self.floor_state.drop_client(client_id)
+            self._overlap_window_of.pop(client_id, None)
             logger.info(f"Client {client_id} disconnected (finally block)")
 
             if len(self.clients) == 0:
@@ -768,6 +942,120 @@ class WebSocketStreamer:
             logger.debug("echo gate feed failed; passing audio", exc_info=True)
             return True
 
+    def _feed_playback_phase(self, recv_buffer: bytearray, message: bytes) -> None:
+        """Split a playback-phase mic frame into the same 512-sample chunks the
+        VAD path uses and score each under phase=playback. Nothing is queued.
+        A scoring failure drops the chunk: it was never going to be queued."""
+        chunk_size_bytes = 512 * 2
+        recv_buffer.extend(message)
+        while len(recv_buffer) >= chunk_size_bytes:
+            chunk = bytes(recv_buffer[:chunk_size_bytes])
+            del recv_buffer[:chunk_size_bytes]
+            try:
+                self.echo_gate.feed(chunk, phase="playback")
+            except Exception:
+                logger.debug("echo gate playback-phase feed failed", exc_info=True)
+
+    def _handle_playback(self, client_id: int, msg: dict[str, Any]) -> None:
+        """A client's `playback` frame: its speaker started, finished or was
+        cut off mid-reply. Metadata only; never touches audio or the pipeline.
+        `start` also stamps the reply as heard (TURN_HEARD)."""
+        state = msg.get("state")
+        if state == "start":
+            self.floor_state.playback_start(client_id)
+            try:
+                turn_stats.mark_heard(time.perf_counter() + _playback_delay_s(msg.get("delay_ms")))
+            except Exception:
+                logger.debug("turn_stats.mark_heard failed", exc_info=True)
+            if self.overlap_observe:
+                self._overlap_windows += 1
+                self._overlap_window_of[client_id] = self._overlap_windows
+        elif state in ("end", "cut"):
+            self.floor_state.playback_stop(client_id)
+        else:
+            logger.debug(f"Client {client_id}: ignoring playback frame with state {state!r}")
+            return
+        if self.overlap_observe:
+            window = self._overlap_window_of.get(client_id)
+            if window is not None:
+                logger.info(
+                    "overlap_observe window=%d state=%s client=%s t=%.3f", window, state, client_id, time.time()
+                )
+                if state != "start":
+                    del self._overlap_window_of[client_id]
+
+    def _response_in_flight(self) -> bool:
+        """A reply is being produced or is still on its way to the client:
+        the mic is closed (should_listen clear) or audio is still queued."""
+        return (not self.should_listen.is_set()) or (not self.output_queue.empty()) or bool(self._audio_buffer)
+
+    def _drain_output(self) -> int:
+        """Discard queued TTS output and the half-built send buffer. PIPELINE_END
+        is kept so a shutdown that is already under way still reaches the loop."""
+        dropped = 0
+        keep_end = False
+        while True:
+            try:
+                item = self.output_queue.get_nowait()
+            except Empty:
+                break
+            if isinstance(item, bytes) and item == PIPELINE_END:
+                keep_end = True
+            else:
+                dropped += 1
+        if keep_end:
+            self.output_queue.put(PIPELINE_END)
+        self._audio_buffer.clear()
+        return dropped
+
+    def _send_json_to(self, client_id: int | None, payload: dict[str, Any]) -> None:
+        """Best-effort JSON to one client (by id), thread-safe like broadcast_json."""
+        try:
+            if self.loop is None:
+                return
+            data = json.dumps(payload)
+            targets = [c for c in self.clients if id(c) == client_id]
+
+            async def _send() -> None:
+                await asyncio.gather(*[self._send_or_drop(c, data) for c in targets], return_exceptions=True)
+
+            asyncio.run_coroutine_threadsafe(_send(), self.loop)
+        except Exception:
+            logger.debug("_send_json_to failed", exc_info=True)
+
+    def _barge_in(self, client_id: int | None, reason: str = "client") -> bool:
+        """Cancel the reply in flight so a new utterance can take the floor.
+
+        The ONE place a cancel happens: the client's {"type":"barge_in"} frame calls
+        it, and a server-side detector can call it with its own `reason`. Call it on
+        the event-loop thread (it touches the send buffer the loop owns).
+
+        With a reply in flight: cancel the scope (the LM stream, LMOutputProcessor
+        and TTS see their generation go stale), drop queued output, re-open the mic,
+        and tell every client to stop with {"type":"audio_stop"}. With nothing in
+        flight the pipeline is left alone; the asking client is still answered with
+        audio_stop so it can resume accepting audio. Returns True if it cancelled."""
+        if self.cancel_scope is None:
+            return False
+        if not self._response_in_flight():
+            logger.debug("barge_in (%s) from %s ignored: no response in flight", reason, client_id)
+            self._send_json_to(client_id, {"type": "audio_stop"})
+            return False
+        self.cancel_scope.cancel()
+        dropped = self._drain_output()
+        self.should_listen.set()
+        logger.info("barge_in (%s) from %s: reply cancelled, %d queued audio items dropped", reason, client_id, dropped)
+        self.broadcast_json({"type": "audio_stop"})
+        return True
+
+    def _note_floor_event(self, payload: dict[str, Any]) -> None:
+        """Feed the user's speech state from the pipeline's VAD events."""
+        kind = payload.get("type")
+        if kind == "speech_started":
+            self.floor_state.user_speech_started()
+        elif kind == "speech_stopped":
+            self.floor_state.user_speech_stopped()
+
     async def _broadcast_audio(self, data: bytes) -> None:
         """Send one chunk of TTS audio to every client, and record it as the
         echo gate's playback reference.
@@ -778,6 +1066,7 @@ class WebSocketStreamer:
         hole in the reference, and the echo from that hole would correlate
         against nothing and be passed through as if it were user speech.
         Funnelling the sends makes that omission impossible to reintroduce."""
+        self.floor_state.audio_sent()
         try:
             self.echo_gate.note_playback(data)
         except Exception:
@@ -788,13 +1077,17 @@ class WebSocketStreamer:
         """Send audio and text from queues to all connected clients."""
         # Buffer audio until we have at least 100ms worth (3200 bytes = 1600 samples at 16kHz int16)
         MIN_AUDIO_BYTES = 3200
-        audio_buffer = bytearray()
+        audio_buffer = self._audio_buffer  # shared with _barge_in; only ever mutated in place
 
         while not self.stop_event.is_set():
             try:
                 # Check for audio
                 try:
                     audio_chunk = self.output_queue.get_nowait()
+                    gen = None
+                    if isinstance(audio_chunk, AudioOutput):
+                        gen = audio_chunk.cancel_generation
+                        audio_chunk = audio_chunk.audio
                     if isinstance(audio_chunk, bytes) and audio_chunk == PIPELINE_END:
                         if audio_buffer and self.clients:
                             data = bytes(audio_buffer)
@@ -815,6 +1108,11 @@ class WebSocketStreamer:
                         continue
 
                     if isinstance(audio_chunk, PipelineControlMessage):
+                        continue
+
+                    # A chunk from a cancelled generation is the server-side cancel: drop it.
+                    # Sentinels returned above, so a stale reply can never leave the mic closed.
+                    if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
                         continue
 
                     if self.clients:
@@ -851,6 +1149,7 @@ class WebSocketStreamer:
                         if self.clients:
                             if isinstance(text_message, PipelineEvent):
                                 payload = text_message.model_dump()
+                                self._note_floor_event(payload)
                                 self._transcript_buffer.feed(payload, time.time())
                                 await asyncio.gather(
                                     *[self._send_or_drop(client, json.dumps(payload)) for client in self.clients],

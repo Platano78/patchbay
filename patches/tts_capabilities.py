@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Callable, Optional
 
 import httpx
@@ -33,6 +33,13 @@ _PROBE_TIMEOUT_S = 3.0
 # the network. Keyed per-backend (see `_cache` below), so a backend swap is
 # never served a stale answer even mid-TTL.
 _CACHE_TTL_S = 60.0
+
+# How long a backend's refusal of `instructions` (HTTP 400 "--instruct is not
+# supported", seen on Qwen3-TTS base-mode servers that never advertise it on
+# /v1/audio/voices) overrides what the probe says. Long enough that a refusing
+# server is not asked every turn; finite so a server later switched to a model
+# that accepts them (probe now says true) is not muted permanently.
+_INSTRUCT_REJECT_TTL_S = 600.0
 
 # Sentinel cache key for the local in-process backend -- it has no base_url,
 # but still needs a cache slot (see `_select_prober`).
@@ -62,6 +69,28 @@ class _CacheEntry:
 # thread ask the same question about the same backend.
 _lock = threading.Lock()
 _cache: dict[str, _CacheEntry] = {}
+_instruct_rejected_at: dict[str, float] = {}
+
+
+def mark_instructions_unsupported(handler: Any) -> None:
+    """Remember that this backend answered a request carrying `instructions`
+    with a refusal. Applied on top of every later probe answer for
+    `_INSTRUCT_REJECT_TTL_S`, then the probe is trusted again."""
+    key, _ = _select_prober(handler)
+    if key is None:
+        return
+    with _lock:
+        _instruct_rejected_at[key] = time.monotonic()
+
+
+def _with_overrides(key: str, caps: TTSCapabilities, now: float) -> TTSCapabilities:
+    rejected_at = _instruct_rejected_at.get(key)
+    if rejected_at is None:
+        return caps
+    if now - rejected_at >= _INSTRUCT_REJECT_TTL_S:
+        del _instruct_rejected_at[key]
+        return caps
+    return replace(caps, accepts_instructions=False)
 
 
 def get_capabilities(handler: Any) -> TTSCapabilities:
@@ -79,7 +108,7 @@ def get_capabilities(handler: Any) -> TTSCapabilities:
     with _lock:
         entry = _cache.get(key)
         if entry is not None and (now - entry.last_probe_at) < _CACHE_TTL_S:
-            return entry.last_good if entry.last_good is not None else _EMPTY
+            return _with_overrides(key, entry.last_good if entry.last_good is not None else _EMPTY, now)
 
     try:
         caps: Optional[TTSCapabilities] = prober()
@@ -96,7 +125,7 @@ def get_capabilities(handler: Any) -> TTSCapabilities:
         # mid-conversation.
         last_good = caps if caps is not None else (entry.last_good if entry is not None else None)
         _cache[key] = _CacheEntry(last_probe_at=now, last_good=last_good)
-        return last_good if last_good is not None else _EMPTY
+        return _with_overrides(key, last_good if last_good is not None else _EMPTY, now)
 
 
 def _select_prober(handler: Any) -> tuple[Optional[str], Optional[Callable[[], TTSCapabilities]]]:

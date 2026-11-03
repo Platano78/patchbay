@@ -64,6 +64,29 @@ class RemoteSpeechTTSHandlerArguments:
             "server's 24kHz PCM response is resampled to this rate."
         },
     )
+    remote_speech_source_sample_rate: int = field(
+        default=24000,
+        metadata={
+            "help": "Sample rate in Hz of the s16le mono PCM the SERVER returns (24000 per the "
+            "OpenAI pcm contract; some servers return e.g. 48000). Resampled to "
+            "remote_speech_sample_rate."
+        },
+    )
+    remote_speech_stream_format: str = field(
+        default="",
+        metadata={
+            "help": "Optional `stream_format` field, sent in the request body, whitespace trimmed (some servers "
+            "only stream incrementally when it is set, e.g. 'audio'). Empty (the default): omitted."
+        },
+    )
+    remote_speech_runon_chars_per_s: float = field(
+        default=0.0,
+        metadata={
+            "help": "Run-on guard, off at 0. When > 0, an utterance whose received audio exceeds "
+            "2 + len(text)/this seconds is cut off where it stands once audio has started (one warning; no pocket "
+            "fallback, since the start was already spoken, and not counted as a failure)."
+        },
+    )
     remote_speech_blocksize: int = field(
         default=512,
         metadata={"help": "Size of audio blocks to yield for streaming. Default is 512."},

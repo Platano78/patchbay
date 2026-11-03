@@ -39,6 +39,10 @@ VOICE_AGENT_PORT = 8765
 TCP_LISTEN_STATE = "0A"
 # Dynamic endpoints: their body reflects live state, so they must never be stored.
 MODEL_PATHS = ("/models", "/v1/models")
+# Optional install-local file the page fetches on load (index.html seedPersonaVoices). When it is
+# not there the answer is an empty JSON object, not a 404: an absent seed is the normal case, and a
+# 404 would put a failed-request error in every browser console for nothing.
+PERSONA_VOICES_PATH = "/persona-voices.json"
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -84,15 +88,35 @@ class Handler(SimpleHTTPRequestHandler):
         if ha_deck is not None and ha_deck.enabled() and path == "/ha/states":
             ha_deck.handle_states(self)
             return
+        if path == PERSONA_VOICES_PATH and self._persona_voices_absent():
+            self._serve_empty_json()
+            return
         super().do_GET()
 
     def do_HEAD(self):
         if self._reject_host():
             return
-        if urlsplit(self.path).path in MODEL_PATHS:
+        path = urlsplit(self.path).path
+        if path in MODEL_PATHS:
             self._serve_models(head=True)
             return
+        if path == PERSONA_VOICES_PATH and self._persona_voices_absent():
+            self._serve_empty_json(head=True)
+            return
         super().do_HEAD()
+
+    @staticmethod
+    def _persona_voices_absent():
+        return not os.path.isfile(os.path.join(HERE, "persona-voices.json"))
+
+    def _serve_empty_json(self, head=False):
+        body = b"{}"
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()  # also sends Cache-Control: no-store
+        if not head:
+            self.wfile.write(body)
 
     def do_POST(self):
         if self._reject_host():

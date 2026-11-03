@@ -251,6 +251,12 @@ class TestResolveEntity(unittest.TestCase):
     def test_miss_returns_none(self):
         self.assertIsNone(ha._resolve_entity("nonexistent gadget"))
 
+    def test_several_entities_return_ambiguous(self):
+        ha._ALIASES["living room lights"] = "light.living"
+        res = ha._resolve_entity("lights")
+        self.assertIsInstance(res, ha._Ambiguous)
+        self.assertEqual(res.aliases, ["kitchen lights", "living room lights"])
+
 
 # ---------------------------------------------------------------------------
 # run() — full flow, urllib mocked.
@@ -267,13 +273,98 @@ class TestRunMissingToken(HAToolTestCase):
 
 
 class TestRunUnparseable(HAToolTestCase):
-    def test_unparseable_returns_capabilities(self):
+    UNCLEAR = "Didn't catch which device. Ask the user which one; don't guess or retry."
+    COMPOUND = "That's more than one action. Call this tool once per device or action."
+
+    def test_unparseable_asks_which_device(self):
         fake = self._patch_urlopen(_FakeHA())
-        result = ha.run("what's the weather like")
-        self.assertEqual(
-            result, "I can turn things on or off, set brightness or color, or run scenes."
-        )
+        self.assertEqual(ha.run("what's the weather like"), self.UNCLEAR)
         self.assertEqual(fake.calls, [])
+
+    def test_vague_entity_asks_which_device(self):
+        fake = self._patch_urlopen(_FakeHA())
+        for cmd in ("turn it on", "turn those lights off", "toggle everything"):
+            self.assertEqual(ha.run(cmd), self.UNCLEAR, cmd)
+        self.assertEqual(fake.calls, [])
+
+    def test_compound_says_split(self):
+        fake = self._patch_urlopen(_FakeHA())
+        for cmd in ("turn on the lamp and play music", "turn on the lamp then close the blinds"):
+            self.assertEqual(ha.run(cmd), self.COMPOUND, cmd)
+        self.assertEqual(fake.calls, [])
+
+    def test_tool_def_wording_is_verbatim(self):
+        self.assertTrue(
+            ha.TOOL_DEF["description"].endswith(
+                " Only call this when the user has named the device, or it is "
+                "unmistakable from the conversation which one they mean. If they "
+                "say 'it' or 'that' without naming a device, ask which device "
+                "instead of guessing."
+            )
+        )
+        self.assertTrue(
+            ha.TOOL_DEF["parameters"]["properties"]["command"]["description"].endswith(
+                " It must contain the device name the user said; never invent "
+                "or assume a device name."
+            )
+        )
+
+
+class TestAmbiguousDevice(HAToolTestCase):
+    STATES = [
+        _state_entry("light.kitchen", "Kitchen Lights"),
+        _state_entry("light.living", "Living Room Lights"),
+    ]
+
+    def _posts(self, fake):
+        return [c for c in fake.calls if c[0] == "POST"]
+
+    def test_two_entities_sharing_a_token_is_ambiguous_and_acts_on_none(self):
+        fake = self._patch_urlopen(_FakeHA(states=self.STATES))
+        result = ha.run("turn on the lights")
+        self.assertEqual(
+            result,
+            "More than one device matches 'lights': kitchen lights, living room lights. "
+            "Ask the user which one.",
+        )
+        self.assertEqual(self._posts(fake), [])
+
+    def test_lists_at_most_four_sorted(self):
+        states = [_state_entry(f"light.l{i}", f"Room {c} Lamp") for i, c in enumerate("fedcba")]
+        fake = self._patch_urlopen(_FakeHA(states=states))
+        result = ha.run("turn on the room")
+        self.assertEqual(
+            result,
+            "More than one device matches 'room': room a lamp, room b lamp, "
+            "room c lamp, room d lamp. Ask the user which one.",
+        )
+        self.assertEqual(self._posts(fake), [])
+
+    def test_ambiguity_does_not_force_an_alias_refresh(self):
+        fake = self._patch_urlopen(_FakeHA(states=self.STATES))
+        ha.run("turn on the lights")
+        fetches = [c for c in fake.calls if c[0] == "GET" and c[1].endswith("/api/states")]
+        self.assertEqual(len(fetches), 1, "only the initial load, no refresh")
+        self.assertEqual(ha._ALIASES_REFRESHED_AT, 0.0)
+
+    def test_single_candidate_superset_still_acts(self):
+        fake = self._patch_urlopen(_FakeHA(states=self.STATES))
+        self.assertEqual(ha.run("turn on the living room"), "Okay, turning on living room lights.")
+        self.assertEqual(len(self._posts(fake)), 1)
+
+    def test_two_aliases_for_one_entity_is_not_ambiguous(self):
+        states = [
+            _state_entry("light.kitchen", "Kitchen Lights"),
+            _state_entry("light.kitchen", "Kitchen Ceiling Lights"),
+        ]
+        self._patch_urlopen(_FakeHA(states=states))
+        self.assertEqual(ha.run("turn on the kitchen"), "Okay, turning on kitchen lights.")
+
+    def test_exact_alias_still_wins_over_wider_matches(self):
+        states = self.STATES + [_state_entry("group.lights", "Lights")]
+        fake = self._patch_urlopen(_FakeHA(states=states))
+        self.assertEqual(ha.run("turn on the lights"), "Okay, turning on lights.")
+        self.assertEqual(len(self._posts(fake)), 1)
 
 
 class TestAliasRefreshOnMiss(HAToolTestCase):

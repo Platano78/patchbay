@@ -6,7 +6,7 @@ Run from repo root: python3 -m pytest patches/test_lm_output_processor.py -v
 The real ``speech_to_speech`` package is not installed in this repo, so the
 symbols lm_output_processor.py imports from it are stubbed into
 ``sys.modules`` before the import below -- same hermetic pattern as
-``test_brain_control.py``/``test_reflex_lane.py``. ``openai`` IS a real,
+``test_brain_control.py``/``test_parrot_lane.py``. ``openai`` IS a real,
 installed dependency, so ``RealtimeConversationItemFunctionCallOutput`` is
 imported for real rather than stubbed -- tests assert against its actual
 ``.output`` attribute.
@@ -118,6 +118,7 @@ def _install_stubs():
         ResponseFailedEvent=_Msg,
         TokenUsageEvent=_Msg,
     )
+    mod("speech_to_speech.pipeline.cancel_scope", CancelScope=type("_CancelScope", (), {}))
     mod("speech_to_speech.pipeline.handler_types", LLMOut=object, TTSIn=object)
     mod(
         "speech_to_speech.pipeline.messages",
@@ -503,6 +504,123 @@ def test_filler_cadence_applies_even_when_rounds_are_refused(monkeypatch):
     assert len(picks) == 2  # rounds 1 and 4 (default cadence of 3)
 
 
+# ── no filler when the model already spoke this tool round ───────────────
+#
+# The base class flushes pre-tool text as its own chunks BEFORE the
+# tool-carrying chunk (whose text is empty), so "already spoke" has to span
+# chunks; a tool chunk carrying its own text is handled too.
+
+
+def _filler_picks(monkeypatch, every="1"):
+    monkeypatch.setenv("VOICE_TOOL_FILLER_EVERY", every)
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: "ok")
+    picks = []
+    monkeypatch.setattr(lm_output_processor, "_pick_filler", lambda: picks.append(1) or "filler text")
+    return picks
+
+
+def _tool_chunk(rc, n, turn_id="turn-1", text=""):
+    return _chunk(tools=[_FakeToolCall("weather", f"call_{turn_id}_{n}")], runtime_config=rc, turn_id=turn_id, text=text)
+
+
+def _say_chunk(rc, text, turn_id="turn-1"):
+    return _chunk(tools=[], runtime_config=rc, turn_id=turn_id, text=text)
+
+
+def test_no_filler_when_text_arrives_in_the_same_chunk_as_the_tools(monkeypatch):
+    picks = _filler_picks(monkeypatch)
+    proc = _make_processor()
+    rc = _FakeRuntimeConfig()
+
+    outputs = list(proc.process(_tool_chunk(rc, 1, text="Let me check.")))
+
+    assert picks == []
+    assert [o.text for o in outputs] == ["Let me check."]
+
+
+def test_no_filler_when_text_arrived_in_an_earlier_chunk_of_the_round(monkeypatch):
+    picks = _filler_picks(monkeypatch)
+    proc = _make_processor()
+    rc = _FakeRuntimeConfig()
+
+    spoken = list(proc.process(_say_chunk(rc, "Let me check.")))
+    outputs = list(proc.process(_tool_chunk(rc, 1)))
+
+    assert [o.text for o in spoken] == ["Let me check."]
+    assert picks == []
+    assert outputs == []
+
+
+def test_filler_still_plays_when_the_model_said_nothing(monkeypatch):
+    picks = _filler_picks(monkeypatch)
+    proc = _make_processor()
+    rc = _FakeRuntimeConfig()
+
+    outputs = list(proc.process(_tool_chunk(rc, 1)))
+
+    assert picks == [1]
+    assert [o.text for o in outputs] == ["filler text"]
+
+
+def test_whitespace_only_text_does_not_count_as_spoken(monkeypatch):
+    picks = _filler_picks(monkeypatch)
+    proc = _make_processor()
+    rc = _FakeRuntimeConfig()
+
+    list(proc.process(_say_chunk(rc, "   ")))
+    list(proc.process(_tool_chunk(rc, 1)))
+
+    assert picks == [1]
+
+
+def test_whitespace_only_text_on_the_tool_chunk_does_not_suppress_the_filler(monkeypatch):
+    picks = _filler_picks(monkeypatch)
+    proc = _make_processor()
+    rc = _FakeRuntimeConfig()
+
+    list(proc.process(_tool_chunk(rc, 1, text="   ")))
+
+    assert picks == [1]
+
+
+def test_text_from_a_previous_round_does_not_suppress_the_next_rounds_filler(monkeypatch):
+    picks = _filler_picks(monkeypatch)
+    proc = _make_processor()
+    rc = _FakeRuntimeConfig()
+
+    list(proc.process(_say_chunk(rc, "Let me check.")))
+    list(proc.process(_tool_chunk(rc, 1)))  # round 1: model spoke -> no filler
+    assert picks == []
+    list(proc.process(_tool_chunk(rc, 2)))  # round 2: silent -> filler
+
+    assert picks == [1]
+
+
+def test_a_new_turn_does_not_inherit_the_previous_turns_speech(monkeypatch):
+    picks = _filler_picks(monkeypatch)
+    proc = _make_processor()
+    rc = _FakeRuntimeConfig()
+
+    list(proc.process(_say_chunk(rc, "Sure thing.", turn_id="turn-a")))
+    list(proc.process(_tool_chunk(rc, 1, turn_id="turn-b")))
+
+    assert picks == [1]
+
+
+def test_suppressed_round_still_counts_toward_filler_cadence(monkeypatch):
+    # Cadence 3: rounds 1, 4 are filler rounds. Round 1 is suppressed because
+    # the model spoke; round 4 (silent) must still play one.
+    picks = _filler_picks(monkeypatch, every="3")
+    proc = _make_processor()
+    rc = _FakeRuntimeConfig()
+
+    list(proc.process(_say_chunk(rc, "Let me check.")))
+    for n in range(1, 5):
+        list(proc.process(_tool_chunk(rc, n)))
+
+    assert picks == [1]
+
+
 # ── visual-tool / no-audio filler gates untouched on cadence-selected rounds
 
 
@@ -777,17 +895,25 @@ def test_affect_second_marker_in_same_turn_updates_it(monkeypatch):
 
 def test_tool_filler_never_carries_affect(monkeypatch):
     monkeypatch.setattr(lm_output_processor.voice_affect, "ENABLED", True)
+    monkeypatch.setenv("VOICE_TOOL_FILLER_EVERY", "1")
     monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: "ok")
     proc = _make_processor()
     rc = _FakeRuntimeConfig()
-    chunk = _chunk(
-        tools=[_FakeToolCall("weather", "call-1")],
-        runtime_config=rc,
-        turn_id="turn-1",
-        text="[affect: curious] let me check that.",
+    # Round 1 carries the model's own affect-tagged text (so it needs no
+    # filler); round 2 is silent, gets the filler, and the turn's affect is
+    # still on file from round 1.
+    list(
+        proc.process(
+            _chunk(
+                tools=[_FakeToolCall("weather", "call-1")],
+                runtime_config=rc,
+                turn_id="turn-1",
+                text="[affect: curious] let me check that.",
+            )
+        )
     )
 
-    outputs = list(proc.process(chunk))
+    outputs = list(proc.process(_chunk(tools=[_FakeToolCall("weather", "call-2")], runtime_config=rc, turn_id="turn-1")))
 
     filler_outputs = [o for o in outputs if o.text != "let me check that."]
     assert filler_outputs, "expected a filler TTSInput in the output"
@@ -826,3 +952,195 @@ def test_affect_marker_split_across_chunks_never_leaks_fragment_to_assistant_tex
     assert out2[0].affect is not None and "amused" in out2[0].affect
     event2 = tq.get_nowait()
     assert "[affect" not in event2.text and "]" not in event2.text
+
+
+# ── barge-in cancel: chunks of a cancelled generation never reach the TTS ──
+
+
+class _Scope:
+    """CancelScope's contract here: is_stale(gen) is `gen != current generation`."""
+
+    def __init__(self, generation=1):
+        self.generation = generation
+
+    def is_stale(self, gen):
+        return gen != self.generation
+
+
+def _text_chunk(generation, text="Hello there."):
+    return lm_output_processor.LLMResponseChunk(
+        text=text,
+        tools=[],
+        runtime_config=_FakeRuntimeConfig(),
+        turn_id="turn-1",
+        turn_revision=0,
+        cancel_generation=generation,
+        language_code=None,
+        response=None,
+        speech_stopped_at_s=None,
+    )
+
+
+def _eor(generation):
+    return lm_output_processor.EndOfResponse(turn_id="turn-1", turn_revision=0, cancel_generation=generation, error=None)
+
+
+def test_stale_chunk_is_dropped_before_text_or_tts():
+    out_q = Queue()
+    proc = _make_processor(cancel_scope=_Scope(generation=1), text_output_queue=out_q)
+
+    assert list(proc.process(_text_chunk(generation=0))) == []
+    assert out_q.empty()  # the client transcript does not get the cancelled reply's text either
+
+
+def test_current_generation_chunk_still_reaches_the_tts():
+    out_q = Queue()
+    proc = _make_processor(cancel_scope=_Scope(generation=1), text_output_queue=out_q)
+
+    produced = list(proc.process(_text_chunk(generation=1)))
+
+    assert [p.text for p in produced] == ["Hello there."]
+    assert not out_q.empty()
+
+
+def test_stale_end_of_response_is_dropped_so_it_cannot_reopen_the_mic():
+    proc = _make_processor(cancel_scope=_Scope(generation=1))
+
+    assert list(proc.process(_eor(generation=0))) == []
+    assert len(list(proc.process(_eor(generation=1)))) == 1
+
+
+def test_chunks_without_a_generation_are_never_stale():
+    """Parrot-lane and cockpit injections carry cancel_generation=None."""
+    proc = _make_processor(cancel_scope=_Scope(generation=5))
+
+    assert len(list(proc.process(_text_chunk(generation=None)))) == 1
+    assert len(list(proc.process(_eor(generation=None)))) == 1
+
+
+def test_without_a_cancel_scope_nothing_is_dropped():
+    """VOICE_BARGE_CANCEL=off: the processor is wired with no scope and behaves as before."""
+    proc = _make_processor()
+
+    assert len(list(proc.process(_text_chunk(generation=0)))) == 1
+    assert len(list(proc.process(_eor(generation=0)))) == 1
+
+
+# ── empty follow-up guard ────────────────────────────────────────────────
+#
+# A generation that follows a tool round and ends with no speakable text and no
+# further tool calls would leave dead air. The processor speaks one short line.
+
+
+def _eor_for(turn_id="turn-1", error=None):
+    return lm_output_processor.EndOfResponse(turn_id=turn_id, turn_revision=0, cancel_generation=None, error=error)
+
+
+def _drive(proc, *messages):
+    """Feed messages in order; return the flat list of everything yielded."""
+    out = []
+    for m in messages:
+        out.extend(proc.process(m))
+    return out
+
+
+def _followup_proc(monkeypatch):
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: "ok")
+    monkeypatch.setattr(lm_output_processor, "_pick_filler", lambda: None)
+    return _make_processor(text_prompt_queue=Queue()), _FakeRuntimeConfig()
+
+
+def _fallbacks(outputs):
+    return [o for o in outputs if getattr(o, "text", None) == lm_output_processor._EMPTY_FOLLOWUP_LINE]
+
+
+def test_empty_followup_after_tool_round_speaks_fallback_once(monkeypatch, caplog):
+    proc, rc = _followup_proc(monkeypatch)
+    with caplog.at_level("WARNING", logger=lm_output_processor.logger.name):
+        out = _drive(proc, _tool_chunk(rc, 1), _eor_for(), _eor_for())  # tool gen ends; follow-up is empty
+    assert len(_fallbacks(out)) == 1
+    warns = [r.getMessage() for r in caplog.records if "empty follow-up" in r.getMessage()]
+    assert len(warns) == 1 and "turn-1" in warns[0] and "weather" in warns[0]
+    # the fallback precedes the EndOfResponse that closes the follow-up
+    assert out.index(_fallbacks(out)[0]) < max(i for i, o in enumerate(out) if isinstance(o, _EndOfResponse))
+    # and it does not repeat on a later, unrelated generation
+    assert _fallbacks(_drive(proc, _eor_for())) == []
+
+
+def test_whitespace_only_followup_counts_as_empty(monkeypatch):
+    proc, rc = _followup_proc(monkeypatch)
+    out = _drive(proc, _tool_chunk(rc, 1), _eor_for(), _say_chunk(rc, "  "), _eor_for())
+    assert len(_fallbacks(out)) == 1
+
+
+def test_text_followup_after_tool_round_has_no_fallback(monkeypatch):
+    proc, rc = _followup_proc(monkeypatch)
+    out = _drive(proc, _tool_chunk(rc, 1), _eor_for(), _say_chunk(rc, "It is sunny."), _eor_for())
+    assert _fallbacks(out) == []
+
+
+def test_followup_that_only_calls_tools_has_no_fallback_until_the_chain_ends(monkeypatch):
+    proc, rc = _followup_proc(monkeypatch)
+    out = _drive(proc, _tool_chunk(rc, 1), _eor_for(), _tool_chunk(rc, 2), _eor_for())
+    assert _fallbacks(out) == []
+    # the chain's final generation is empty -> now it fires
+    assert len(_fallbacks(_drive(proc, _eor_for()))) == 1
+
+
+def test_text_only_turn_has_no_fallback(monkeypatch):
+    proc, rc = _followup_proc(monkeypatch)
+    out = _drive(proc, _say_chunk(rc, "Hello."), _eor_for())
+    assert _fallbacks(out) == []
+    assert _fallbacks(_drive(proc, _eor_for())) == []  # empty text-only generation: still nothing
+
+
+def test_no_fallback_when_response_does_not_want_audio(monkeypatch):
+    proc, rc = _followup_proc(monkeypatch)
+    monkeypatch.setattr(lm_output_processor, "response_wants_audio", lambda response: False)
+    out = _drive(proc, _tool_chunk(rc, 1), _eor_for(), _eor_for())
+    assert _fallbacks(out) == []
+
+
+# ── empty-follow-up guard: revision bump + transcript ───────────────────
+
+class _Spec:
+    def __init__(self, rev=0):
+        self.rev = rev
+
+    def is_latest_after_reopen_grace(self, tid, rev):
+        return rev == self.rev
+
+
+def test_dropped_stale_revision_eor_clears_the_guard(monkeypatch):
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: "ok")
+    monkeypatch.setattr(lm_output_processor, "_pick_filler", lambda: None)
+    spec = _Spec(0)
+    proc = _make_processor(speculative_turns=spec, text_prompt_queue=Queue())
+    rc = _FakeRuntimeConfig()
+    out = _drive(proc, _tool_chunk(rc, 1), _eor_for())
+    spec.rev = 1  # same turn_id, newer revision: the rev-0 follow-up is dropped
+    out += _drive(proc, _eor_for())
+    out += _drive(proc, lm_output_processor.EndOfResponse(turn_id="turn-1", turn_revision=1, cancel_generation=None, error=None))
+    assert _fallbacks(out) == [], "a silent regeneration at a newer revision is not a follow-up"
+
+
+def test_awaiting_state_is_keyed_on_turn_revision(monkeypatch):
+    proc, rc = _followup_proc(monkeypatch)
+    _drive(proc, _tool_chunk(rc, 1), _eor_for())
+    other_rev = lm_output_processor.EndOfResponse(turn_id="turn-1", turn_revision=7, cancel_generation=None, error=None)
+    assert _fallbacks(_drive(proc, other_rev)) == []
+
+
+def test_fallback_reaches_the_cockpit_transcript_but_not_chat_history(monkeypatch):
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: "ok")
+    monkeypatch.setattr(lm_output_processor, "_pick_filler", lambda: None)
+    out_q = Queue()
+    proc = _make_processor(text_prompt_queue=Queue(), text_output_queue=out_q)
+    rc = _FakeRuntimeConfig()
+    _drive(proc, _tool_chunk(rc, 1), _eor_for(), _eor_for())
+    events = []
+    while not out_q.empty():
+        events.append(out_q.get())
+    texts = [getattr(e, "text", None) for e in events]
+    assert texts.count(lm_output_processor._EMPTY_FOLLOWUP_LINE) == 1
+    assert len(rc.chat.buffer) == 1  # only the tool output; the fallback line is not history

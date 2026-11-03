@@ -532,6 +532,11 @@ class EchoGate:
         self._cand_lag: int | None = None
         self._cand_hits = 0
         self._weak_hits = 0
+        # Label of the frame being scored (feed's `phase` kwarg), appended to
+        # its calibration line. None -- the default -- adds nothing, so the
+        # line stays byte-identical for every caller that passes no phase.
+        # Written and read only on feed()'s own thread.
+        self._phase: str | None = None
         # Guards _ref_buffer/_last_playback_ts/_ref_total across
         # note_playback() (send-loop thread) vs feed() (audio-loop thread).
         # The lag state (_locked_lag/_cand_*/_weak_hits/_mic_total) is touched
@@ -573,15 +578,20 @@ class EchoGate:
             if len(self._ref_buffer) > cap_bytes:
                 del self._ref_buffer[: len(self._ref_buffer) - cap_bytes]
 
-    def feed(self, pcm: bytes) -> bool:
+    def feed(self, pcm: bytes, phase: str | None = None) -> bool:
         """Feed one chunk of incoming mic PCM. Returns True to pass it on to
         VAD/ASR, False to drop it as echo. Never raises -- any scoring
         failure fails open (returns True) for the rest of the session.
 
         In observe mode the full scoring path still runs (and logs), but the
-        verdict is discarded and everything passes."""
+        verdict is discarded and everything passes.
+
+        ``phase`` only labels the observe-mode calibration line (`` phase=<phase>``
+        appended); it changes no scoring. The streamer passes ``"playback"``
+        for mic frames that arrive while the client is playing a reply."""
         if not self.enabled or self._fail_open:
             return True
+        self._phase = phase
         try:
             passed = self._score(pcm)
             return True if self.mode == _OBSERVE else passed
@@ -589,6 +599,8 @@ class EchoGate:
             logger.exception("echo gate scoring failed; failing open (passing all audio) for the rest of the session")
             self._fail_open = True
             return True
+        finally:
+            self._phase = None
 
     def _score(self, pcm: bytes) -> bool:
         import numpy as np  # lazy: see module docstring
@@ -732,7 +744,8 @@ class EchoGate:
         be replayed offline against rho without re-deriving the policy."""
         age_ms = (time.monotonic() - last_ts) * 1000.0 if last_ts else float("inf")
         calib_logger.info(
-            "echo_gate_calib t=%.3f mic=%d rms=%.1f refage_ms=%.0f rho=%.4f lock=%s lag=%s lag_ms=%s verdict=%s thr=%.2f reason=%s",
+            "echo_gate_calib t=%.3f mic=%d rms=%.1f refage_ms=%.0f rho=%.4f lock=%s lag=%s lag_ms=%s verdict=%s thr=%.2f reason=%s"
+            + ("" if self._phase is None else " phase=%s"),
             time.time(),
             mic_start,
             rms,
@@ -744,6 +757,7 @@ class EchoGate:
             "pass" if would_pass else "drop",
             self.threshold,
             reason,
+            *(() if self._phase is None else (self._phase,)),
         )
 
     @staticmethod

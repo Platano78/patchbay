@@ -44,6 +44,9 @@ from speech_to_speech.arguments_classes.qwen3_tts_arguments import Qwen3TTSHandl
 from speech_to_speech.arguments_classes.remote_speech_tts_arguments import (
     RemoteSpeechTTSHandlerArguments,
 )
+from speech_to_speech.arguments_classes.remote_transcription_stt_arguments import (
+    RemoteTranscriptionSTTHandlerArguments,
+)
 from speech_to_speech.arguments_classes.responses_api_language_model_arguments import (
     ResponsesApiLanguageModelHandlerArguments,
 )
@@ -111,6 +114,7 @@ class ParsedArguments:
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments
     remote_speech_tts_handler_kwargs: RemoteSpeechTTSHandlerArguments
+    remote_transcription_stt_handler_kwargs: Optional[RemoteTranscriptionSTTHandlerArguments] = None
 
 
 def rename_args(args: Any, prefix: str) -> None:
@@ -170,6 +174,7 @@ def parse_arguments() -> ParsedArguments:
             KokoroTTSHandlerArguments,
             Qwen3TTSHandlerArguments,
             RemoteSpeechTTSHandlerArguments,
+            RemoteTranscriptionSTTHandlerArguments,
         )
     )
 
@@ -220,7 +225,17 @@ def parse_arguments() -> ParsedArguments:
         kokoro_tts_handler_kwargs=by_type[KokoroTTSHandlerArguments],
         qwen3_tts_handler_kwargs=by_type[Qwen3TTSHandlerArguments],
         remote_speech_tts_handler_kwargs=by_type[RemoteSpeechTTSHandlerArguments],
+        remote_transcription_stt_handler_kwargs=by_type[RemoteTranscriptionSTTHandlerArguments],
     )
+
+
+def _patch_version() -> str:
+    """The source revision apply.sh recorded next to this module, or "unknown"."""
+    try:
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "PATCH_VERSION")) as f:
+            return f.read().strip() or "unknown"
+    except OSError:
+        return "unknown"
 
 
 def setup_logger(log_level: str) -> None:
@@ -238,6 +253,12 @@ def setup_logger(log_level: str) -> None:
         h.addFilter(pipeline_filter)
 
     logger = logging.getLogger(__name__)
+
+    # httpx logs one INFO line per request (~116k/week from the LLM stream
+    # alone); that buries everything else.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+    logger.info("Patchbay patch pack %s", _patch_version())
 
     # torch compile logs
     if log_level == "debug":
@@ -321,6 +342,7 @@ def prepare_all_args(
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
     remote_speech_tts_handler_kwargs: RemoteSpeechTTSHandlerArguments,
+    remote_transcription_stt_handler_kwargs: Optional[RemoteTranscriptionSTTHandlerArguments] = None,
 ) -> None:
     prepare_module_args(
         module_kwargs,
@@ -337,6 +359,7 @@ def prepare_all_args(
         kokoro_tts_handler_kwargs,
         qwen3_tts_handler_kwargs,
         remote_speech_tts_handler_kwargs,
+        *([remote_transcription_stt_handler_kwargs] if remote_transcription_stt_handler_kwargs is not None else []),
     )
 
     rename_args(whisper_stt_handler_kwargs, "stt")
@@ -352,6 +375,8 @@ def prepare_all_args(
     rename_args(kokoro_tts_handler_kwargs, "kokoro")
     rename_args(qwen3_tts_handler_kwargs, "qwen3_tts")
     rename_args(remote_speech_tts_handler_kwargs, "remote_speech")
+    if remote_transcription_stt_handler_kwargs is not None:
+        rename_args(remote_transcription_stt_handler_kwargs, "remote_transcription")
 
 
 def initialize_queues_and_events() -> dict[str, Any]:
@@ -369,6 +394,23 @@ def initialize_queues_and_events() -> dict[str, Any]:
         "lm_processed_queue": Queue[TTSInItem](),  # NEW: LLM -> LM processor -> TTS
         "text_output_queue": Queue[TextEventItem](),  # NEW: for text messages to WebSocket
     }
+
+
+class VocabSnappingNotifier(TranscriptionNotifier):
+    """TranscriptionNotifier that repairs project vocabulary in the FINAL transcript first.
+
+    The notifier is the one place every final user transcript passes in the non-realtime modes
+    (websocket included): it puts the TranscriptionCompletedEvent the cockpit displays on
+    text_output_queue AND appends the user message to runtime_config.chat for the brain. Snapping the
+    incoming message here changes both. No vocab file = identity (see vocab_snap.py).
+    """
+
+    def process(self, transcription):  # type: ignore[override]
+        # Imported at call time, like voice_tools below: the patch pack's own modules are not
+        # importable until apply.sh has copied them, and tests import this file without that.
+        from speech_to_speech import vocab_snap
+
+        yield from super().process(vocab_snap.snap_stt_output(transcription))
 
 
 def _build_pipeline_handlers(
@@ -399,7 +441,9 @@ def _build_pipeline_handlers(
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
     remote_speech_tts_handler_kwargs: RemoteSpeechTTSHandlerArguments,
+    remote_transcription_stt_handler_kwargs: Optional[RemoteTranscriptionSTTHandlerArguments] = None,
     speculative_turns: SpeculativeTurnTracker | None = None,
+    cancel_scope: CancelScope | None = None,
 ) -> list[Any]:
     """Build the shared handler chain: VAD → STT → TranscriptionNotifier → LM → LMOutputProcessor → TTS.
 
@@ -417,7 +461,7 @@ def _build_pipeline_handlers(
         setup_kwargs=vars(vad_handler_kwargs),
     )
 
-    transcription_notifier = TranscriptionNotifier(
+    transcription_notifier = VocabSnappingNotifier(
         stop_event,
         queue_in=stt_output_queue,
         queue_out=text_prompt_queue,  # type: ignore[arg-type]
@@ -435,6 +479,7 @@ def _build_pipeline_handlers(
         paraformer_stt_handler_kwargs,
         mlx_audio_whisper_stt_handler_kwargs,
         parakeet_tdt_stt_handler_kwargs,
+        remote_transcription_stt_handler_kwargs,
     )
 
     # Parrot mode (diagnostic instrument, B6). ALWAYS inserted -- see
@@ -443,20 +488,8 @@ def _build_pipeline_handlers(
     # would destroy the conversation it exists to diagnose. VOICE_PARROT=1
     # only sets the startup state; disarmed is a pure passthrough, one queue
     # hop per turn.
-    #
-    # Pre-LLM reflex lane (Slice 2). Default OFF: only inserted when VOICE_REFLEX=1,
-    # so a plain restart is behaviourally identical to the un-gated chain. When on,
-    # ReflexGate consumes ParrotGate's output and forwards normal turns to a fresh
-    # queue the LM now reads; reflex-resolved turns are answered by injecting onto
-    # lm_response_queue and never reach the LM.
-    #
-    # ParrotGate sits BEFORE ReflexGate: an armed parrot turn never reaches
-    # reflex, so it can't be misanswered from the HA tool instead of echoed.
-    # Both gates may be present in the chain; only one (at most) ever answers
-    # a given turn.
     from speech_to_speech.parrot_lane import ParrotGate
 
-    voice_reflex_enabled = os.environ.get("VOICE_REFLEX") == "1"
     parrot_to_next_queue: Queue[TextPromptItem] = Queue()
     parrot_gate = ParrotGate(
         stop_event,
@@ -465,28 +498,13 @@ def _build_pipeline_handlers(
         setup_kwargs={
             "lm_response_queue": lm_response_queue,
             "armed": os.environ.get("VOICE_PARROT") == "1",
-            "reflex_present": voice_reflex_enabled,
         },
     )
-    lm_input_queue: Queue[TextPromptItem] = parrot_to_next_queue
-
-    reflex_gate: Any | None = None
-    if voice_reflex_enabled:
-        from speech_to_speech.reflex_lane import ReflexGate
-
-        reflex_to_lm_queue: Queue[TextPromptItem] = Queue()
-        reflex_gate = ReflexGate(
-            stop_event,
-            queue_in=parrot_to_next_queue,
-            queue_out=reflex_to_lm_queue,
-            setup_kwargs={"lm_response_queue": lm_response_queue},
-        )
-        lm_input_queue = reflex_to_lm_queue
 
     lm = get_llm_handler(
         module_kwargs,
         stop_event,
-        lm_input_queue,
+        parrot_to_next_queue,
         lm_response_queue,
         language_model_handler_kwargs,
         responses_api_language_model_handler_kwargs,
@@ -500,6 +518,9 @@ def _build_pipeline_handlers(
             "text_output_queue": text_output_queue,
             "speculative_turns": speculative_turns,
             "text_prompt_queue": text_prompt_queue,
+            # Websocket-mode barge-in only (None elsewhere: realtime mode drops stale
+            # chunks through its own service).
+            "cancel_scope": cancel_scope,
         },
     )
 
@@ -519,8 +540,6 @@ def _build_pipeline_handlers(
 
     handlers: list[Any] = [vad, stt, transcription_notifier, lm, lm_processor, tts]
     handlers.insert(3, parrot_gate)  # between transcription_notifier and lm
-    if reflex_gate is not None:
-        handlers.insert(4, reflex_gate)  # between parrot_gate and lm
     return handlers
 
 
@@ -543,6 +562,7 @@ def _build_realtime_pipeline_unit(
     kokoro_tts_handler_kwargs: KokoroTTSHandlerArguments,
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
     remote_speech_tts_handler_kwargs: RemoteSpeechTTSHandlerArguments,
+    remote_transcription_stt_handler_kwargs: Optional[RemoteTranscriptionSTTHandlerArguments] = None,
 ) -> "PipelineUnit":
     """Build one isolated realtime pipeline (own queues, events, service, handlers).
 
@@ -567,6 +587,7 @@ def _build_realtime_pipeline_unit(
     kokoro_tts_kw = deepcopy(kokoro_tts_handler_kwargs)
     qwen3_tts_kw = deepcopy(qwen3_tts_handler_kwargs)
     remote_speech_tts_kw = deepcopy(remote_speech_tts_handler_kwargs)
+    remote_transcription_stt_kw = deepcopy(remote_transcription_stt_handler_kwargs)
 
     should_listen = Event()
     response_playing = Event()
@@ -642,6 +663,7 @@ def _build_realtime_pipeline_unit(
         kokoro_tts_handler_kwargs=kokoro_tts_kw,
         qwen3_tts_handler_kwargs=qwen3_tts_kw,
         remote_speech_tts_handler_kwargs=remote_speech_tts_kw,
+        remote_transcription_stt_handler_kwargs=remote_transcription_stt_kw,
         speculative_turns=speculative_turns,
     )
     for h in handlers:
@@ -681,6 +703,7 @@ def build_pipeline(
     qwen3_tts_handler_kwargs: Qwen3TTSHandlerArguments,
     remote_speech_tts_handler_kwargs: RemoteSpeechTTSHandlerArguments,
     queues_and_events: dict[str, Any],
+    remote_transcription_stt_handler_kwargs: Optional[RemoteTranscriptionSTTHandlerArguments] = None,
 ) -> ThreadManager:
     stop_event = queues_and_events["stop_event"]
     should_listen = queues_and_events["should_listen"]
@@ -694,6 +717,28 @@ def build_pipeline(
     text_output_queue = (
         None  # Only set for websocket/realtime modes; kept None otherwise to avoid unbounded queue growth
     )
+
+    # Barge-in cancel (websocket mode only, VOICE_BARGE_CANCEL, default on): hand the
+    # pipeline's CancelScope to the LM, the TTS, the LM output processor and the
+    # streamer so a client `barge_in` frame can stop a reply that is still being
+    # produced. Off: no handler ever sees a scope, which is the pre-cancel behaviour.
+    barge_scope = None
+    if module_kwargs.mode == "websocket":
+        from speech_to_speech.connections.websocket_streamer import barge_cancel_enabled
+
+        if barge_cancel_enabled():
+            barge_scope = queues_and_events["cancel_scope"]
+            for kw in (
+                language_model_handler_kwargs,
+                responses_api_language_model_handler_kwargs,
+                kokoro_tts_handler_kwargs,
+                qwen3_tts_handler_kwargs,
+                pocket_tts_handler_kwargs,
+                remote_speech_tts_handler_kwargs,
+                chat_tts_handler_kwargs,
+                facebook_mms_tts_handler_kwargs,
+            ):
+                vars(kw)["cancel_scope"] = barge_scope
 
     comms_handlers: list[Any] = []
     websocket_streamer_ref: Any = None
@@ -719,6 +764,7 @@ def build_pipeline(
             text_output_queue=text_output_queue,
             host=websocket_streamer_kwargs.ws_host,
             port=websocket_streamer_kwargs.ws_port,
+            cancel_scope=barge_scope,
         )
         comms_handlers = [websocket_streamer]
         websocket_streamer_ref = websocket_streamer
@@ -745,6 +791,7 @@ def build_pipeline(
                 kokoro_tts_handler_kwargs=kokoro_tts_handler_kwargs,
                 qwen3_tts_handler_kwargs=qwen3_tts_handler_kwargs,
                 remote_speech_tts_handler_kwargs=remote_speech_tts_handler_kwargs,
+                remote_transcription_stt_handler_kwargs=remote_transcription_stt_handler_kwargs,
             )
             for i in range(pool_size)
         ]
@@ -831,6 +878,8 @@ def build_pipeline(
         kokoro_tts_handler_kwargs=kokoro_tts_handler_kwargs,
         qwen3_tts_handler_kwargs=qwen3_tts_handler_kwargs,
         remote_speech_tts_handler_kwargs=remote_speech_tts_handler_kwargs,
+        remote_transcription_stt_handler_kwargs=remote_transcription_stt_handler_kwargs,
+        cancel_scope=barge_scope,
     )
 
     if (
@@ -884,6 +933,7 @@ def get_stt_handler(
     paraformer_stt_handler_kwargs: ParaformerSTTHandlerArguments,
     mlx_audio_whisper_stt_handler_kwargs: MLXAudioWhisperSTTHandlerArguments,
     parakeet_tdt_stt_handler_kwargs: ParakeetTDTSTTHandlerArguments,
+    remote_transcription_stt_handler_kwargs: Optional[RemoteTranscriptionSTTHandlerArguments] = None,
 ) -> BaseHandler[STTIn, STTOut]:
     from speech_to_speech.STT.base_stt_handler import BaseSTTHandler
 
@@ -967,9 +1017,29 @@ def get_stt_handler(
                 setup_kwargs=setup_kwargs,
             )
         )
+    elif module_kwargs.stt == "remote-transcription":
+        from speech_to_speech.STT.remote_transcription_stt_handler import RemoteTranscriptionSTTHandler
+
+        if remote_transcription_stt_handler_kwargs is None:
+            raise ValueError("--stt remote-transcription needs its argument class (remote_transcription_* flags)")
+        setup_kwargs = {
+            **vars(remote_transcription_stt_handler_kwargs),
+            "enable_live_transcription": module_kwargs.enable_live_transcription,
+            "live_transcription_update_interval": module_kwargs.live_transcription_update_interval,
+        }
+
+        return with_speculative_turns(
+            RemoteTranscriptionSTTHandler(
+                stop_event,
+                queue_in=spoken_prompt_queue,
+                queue_out=text_prompt_queue,
+                setup_kwargs=setup_kwargs,
+            )
+        )
     else:
         raise ValueError(
-            "The STT should be either whisper, whisper-mlx, mlx-audio-whisper, faster-whisper, parakeet-tdt, or paraformer."
+            "The STT should be either whisper, whisper-mlx, mlx-audio-whisper, faster-whisper, parakeet-tdt, "
+            "paraformer, or remote-transcription."
         )
 
 
@@ -1143,6 +1213,7 @@ def main() -> None:
         args.kokoro_tts_handler_kwargs,
         args.qwen3_tts_handler_kwargs,
         args.remote_speech_tts_handler_kwargs,
+        args.remote_transcription_stt_handler_kwargs,
     )
 
     # Validate after prepare_all_args(): --local_mac_optimal_settings mutates
@@ -1189,6 +1260,7 @@ def main() -> None:
         args.qwen3_tts_handler_kwargs,
         args.remote_speech_tts_handler_kwargs,
         queues_and_events,
+        args.remote_transcription_stt_handler_kwargs,
     )
 
     # Set up graceful shutdown handler
