@@ -14,7 +14,7 @@ voice switch itself stays in `BrainControl` (it owns `_set_voice`).
 clone/delete UI paths together.
 
 Stdlib + httpx at import time (numpy/scipy only when a filler is rendered), and
-no `speech_to_speech` imports at module level, so `scripts/render_fillers.py`
+no `speech_to_speech` imports at module level, so `examples/render_fillers.py`
 can load it by path.
 """
 
@@ -167,7 +167,7 @@ def clean_save_name(name: Any) -> str:
     return text
 
 
-# ── filler rendering (shared with scripts/render_fillers.py) ─────────────────
+# ── filler rendering (shared with examples/render_fillers.py) ─────────────────
 
 
 def _filler_clips():

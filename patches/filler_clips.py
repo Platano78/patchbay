@@ -6,7 +6,7 @@ its own.
 
 Two jobs:
 
-1. CACHE. ``scripts/render_fillers.py`` renders each filler phrase once, per
+1. CACHE. ``examples/render_fillers.py`` renders each filler phrase once, per
    persona voice, to ``<VOICE_FILLER_DIR>/<voice>/<slug>.pcm`` (raw s16le mono at
    the pipeline output rate). When a phrase is picked and a clip exists for the
    TTS handler's current voice, the clip goes straight onto the audio output
@@ -22,7 +22,7 @@ Two jobs:
    filler already played this turn, or after the user spoke again / barged in.
    Clips go to the audio queue only: nothing here touches chat history.
 
-Stdlib only, and no ``speech_to_speech`` imports, so ``scripts/render_fillers.py``
+Stdlib only, and no ``speech_to_speech`` imports, so ``examples/render_fillers.py``
 can load it by path.
 """
 

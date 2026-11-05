@@ -1,4 +1,4 @@
-"""scripts/render_fillers.py against a fake speech server, plus pinning its pool
+"""examples/render_fillers.py against a fake speech server, plus pinning its pool
 parsing to lm_output_processor's.
 
 Run from repo root: python3 -m pytest patches/test_render_fillers.py -v
@@ -17,7 +17,7 @@ import pytest
 
 from patches import filler_clips as fc
 
-_p = Path(__file__).resolve().parent.parent / "scripts" / "render_fillers.py"
+_p = Path(__file__).resolve().parent.parent / "examples" / "render_fillers.py"
 _spec = importlib.util.spec_from_file_location("render_fillers", _p)
 rf = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rf)

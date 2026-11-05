@@ -248,7 +248,7 @@ shared by both OpenAI-style handlers) instead of `responses-api`.
   (pipe-`|`-separated phrases, since a phrase may itself contain a comma),
   and the special value `off` disables the filler entirely.
   `VOICE_TOOL_FILLERS` phrases can be pre-rendered per persona voice
-  (`scripts/render_fillers.py` -> `filler_clips.py`'s cache): a picked phrase
+  (`examples/render_fillers.py` -> `filler_clips.py`'s cache): a picked phrase
   with a clip for the TTS handler's current voice goes straight onto the audio
   queue, otherwise it is spoken through the TTS exactly as above. The same
   module adds the turn-end filler (`VOICE_TURN_FILLER=on`, pool

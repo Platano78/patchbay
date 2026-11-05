@@ -456,7 +456,7 @@ def test_execute_without_a_controller_is_a_plain_message():
     assert "isn't available" in vt.execute("restore_voice", {})
 
 
-# ── filler core shared with scripts/render_fillers.py ────────────────────────
+# ── filler core shared with examples/render_fillers.py ────────────────────────
 
 
 def test_render_voice_fillers_skips_existing(tmp_path, server):
