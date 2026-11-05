@@ -1144,3 +1144,105 @@ def test_fallback_reaches_the_cockpit_transcript_but_not_chat_history(monkeypatc
     texts = [getattr(e, "text", None) for e in events]
     assert texts.count(lm_output_processor._EMPTY_FOLLOWUP_LINE) == 1
     assert len(rc.chat.buffer) == 1  # only the tool output; the fallback line is not history
+
+
+# ── pre-rendered fillers + turn filler pool (filler_clips.py) ────────────
+
+
+def _filler_env(monkeypatch, tmp_path, voice="ryan", phrase="Let me check."):
+    from patches import filler_clips as fc
+
+    monkeypatch.setenv("VOICE_FILLER_DIR", str(tmp_path))
+    p = fc.clip_path(voice, phrase, tmp_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"\x01\x00" * 800)
+    sink: Queue = Queue()
+    monkeypatch.setattr(fc.FILLERS, "_sink", sink)
+    monkeypatch.setattr(fc.FILLERS, "_voice_getter", lambda: voice)
+    monkeypatch.setattr(fc.FILLERS, "_last_turn_filler_at", float("-inf"))
+    return fc, sink
+
+
+def _tts_texts(proc, rc):
+    return [o.text for o in proc.process(_chunk(tools=[_FakeToolCall("weather", "c1")], runtime_config=rc)) if hasattr(o, "text") and o.text]
+
+
+def test_tool_filler_uses_the_cached_clip_when_one_exists(monkeypatch, tmp_path):
+    fc, sink = _filler_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: "ok")
+    monkeypatch.setattr(lm_output_processor, "_pick_filler", lambda: "Let me check.")
+    rc = _FakeRuntimeConfig()
+    texts = _tts_texts(_make_processor(), rc)
+    assert texts == []  # no TTSInput: the clip is the filler
+    assert isinstance(sink.get_nowait(), fc.FillerClip) and sink.empty()
+    # history holds the tool output only, same as the TTS path: the filler is never recorded
+    assert [c for c, _ in rc.chat.tool_outputs] == ["c1"]
+
+
+def test_tool_filler_falls_back_to_tts_without_a_clip(monkeypatch, tmp_path):
+    fc, sink = _filler_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: "ok")
+    monkeypatch.setattr(lm_output_processor, "_pick_filler", lambda: "Looking that up.")  # not rendered
+    assert _tts_texts(_make_processor(), _FakeRuntimeConfig()) == ["Looking that up."]
+    assert sink.empty()
+
+
+def test_tool_filler_falls_back_to_tts_in_another_voice(monkeypatch, tmp_path):
+    fc, sink = _filler_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(fc.FILLERS, "_voice_getter", lambda: "the-butler")
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: "ok")
+    monkeypatch.setattr(lm_output_processor, "_pick_filler", lambda: "Let me check.")
+    assert _tts_texts(_make_processor(), _FakeRuntimeConfig()) == ["Let me check."]
+
+
+def test_tool_filler_stands_down_after_a_turn_filler(monkeypatch, tmp_path):
+    fc, sink = _filler_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: "ok")
+    picks = []
+    monkeypatch.setattr(lm_output_processor, "_pick_filler", lambda: picks.append(1) or "Let me check.")
+    fc.FILLERS._last_turn_filler_at = fc.FILLERS._clock()  # the turn filler just played
+    assert _tts_texts(_make_processor(), _FakeRuntimeConfig()) == []
+    assert picks == [] and sink.empty()
+
+
+def test_tool_filler_with_no_cache_dir_is_todays_behaviour(monkeypatch, tmp_path):
+    from patches import filler_clips as fc
+
+    monkeypatch.setenv("VOICE_FILLER_DIR", str(tmp_path / "missing"))
+    monkeypatch.setattr(fc.FILLERS, "_sink", Queue())
+    monkeypatch.setattr(fc.FILLERS, "_voice_getter", lambda: "ryan")
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: "ok")
+    monkeypatch.setattr(lm_output_processor, "_pick_filler", lambda: "One sec.")
+    assert _tts_texts(_make_processor(), _FakeRuntimeConfig()) == ["One sec."]
+
+
+def test_turn_pool_defaults_to_the_tool_pool(monkeypatch):
+    monkeypatch.delenv("VOICE_TURN_FILLERS", raising=False)
+    monkeypatch.setattr(lm_output_processor, "_TOOL_FILLERS", ("A.", "B."))
+    assert lm_output_processor._parse_turn_fillers() == ("A.", "B.")
+
+
+def test_turn_pool_env_overrides_and_off(monkeypatch):
+    monkeypatch.setattr(lm_output_processor, "_TOOL_FILLERS", ("A.", "B."))
+    monkeypatch.setenv("VOICE_TURN_FILLERS", "Mm.|Okay.")
+    assert lm_output_processor._parse_turn_fillers() == ("Mm.", "Okay.")
+    monkeypatch.setenv("VOICE_TURN_FILLERS", "off")
+    assert lm_output_processor._parse_turn_fillers() == ()
+    monkeypatch.setenv("VOICE_TURN_FILLERS", " | ")
+    assert lm_output_processor._parse_turn_fillers() == ("A.", "B.")
+
+
+def test_turn_picker_never_repeats_back_to_back_and_shares_state_with_tool_picker(monkeypatch):
+    monkeypatch.setattr(lm_output_processor, "_TOOL_FILLERS", ("A.", "B."))
+    monkeypatch.setattr(lm_output_processor, "_TURN_FILLERS", ("A.", "B."))
+    monkeypatch.setattr(lm_output_processor, "_last_tool_filler", None)
+    picks = []
+    for i in range(40):
+        picks.append(lm_output_processor._pick_turn_filler() if i % 2 else lm_output_processor._pick_filler())
+    assert all(a != b for a, b in zip(picks, picks[1:]))
+
+
+def test_turn_filler_picker_is_registered_with_filler_clips():
+    from patches import filler_clips as fc
+
+    assert fc.FILLERS._picker is lm_output_processor._pick_turn_filler

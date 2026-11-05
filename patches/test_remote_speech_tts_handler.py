@@ -512,7 +512,7 @@ def _make_capturing_handler_cls(captured: list, pcm_bytes: bytes, voices_respons
             self.wfile.write(pcm_bytes)
 
         def do_GET(self):
-            if self.path != "/v1/audio/voices" or voices_response is None:
+            if self.path.split("?")[0] != "/v1/audio/voices" or voices_response is None:
                 self.send_response(404)
                 self.end_headers()
                 return

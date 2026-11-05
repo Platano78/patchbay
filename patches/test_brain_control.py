@@ -50,7 +50,7 @@ def _install_stubs():
     pkg = mod("speech_to_speech")
     mod("speech_to_speech.LLM")
     mod("speech_to_speech.LLM.base_openai_compatible_language_model", BaseOpenAICompatibleHandler=type("_Stub", (), {}))
-    vt = mod("speech_to_speech.voice_tools", get_tool_defs=lambda: [], execute=lambda name, kwargs: "")
+    vt = mod("speech_to_speech.voice_tools", get_tool_defs=lambda: [], execute=lambda name, kwargs: "", set_voice_controller=lambda c: None)
     pkg.voice_tools = vt
     sys.modules["speech_to_speech.voice_clone"] = real_voice_clone
     pkg.voice_clone = real_voice_clone
@@ -2322,7 +2322,9 @@ def test_state_payload_carries_local_backend_capabilities(tmp_path, monkeypatch)
     assert state["accepts_instructions"] is False
 
 
-def test_voice_clone_begin_refuses_when_active_backend_cannot_clone(tmp_path):
+def test_voice_clone_begin_refuses_when_active_backend_cannot_clone(tmp_path, monkeypatch):
+    # Remote cloning (voice_design.py) is on by default; with it off the old refusal stands.
+    monkeypatch.setenv("VOICE_DESIGN_TOOLS", "off")
     # A remote-speech handler dialing a port nothing listens on: the capability
     # probe fails fast (connection refused) and, having never succeeded, falls
     # back to the empty default -- can_clone=False, same as any other backend
@@ -2385,7 +2387,9 @@ def test_config_set_voice_without_audition_key_still_auditions(tmp_path, monkeyp
     assert called == ["javert"]  # audition called -- default behaviour preserved
 
 
-def test_voice_clone_end_refuses_when_active_backend_cannot_clone(tmp_path):
+def test_voice_clone_end_refuses_when_active_backend_cannot_clone(tmp_path, monkeypatch):
+    # Remote cloning (voice_design.py) is on by default; with it off the old refusal stands.
+    monkeypatch.setenv("VOICE_DESIGN_TOOLS", "off")
     handler = _make_remote_speech_handler(_closed_port_url())
     bc = _make_brain_control(tmp_path, tts_handler=handler)
 

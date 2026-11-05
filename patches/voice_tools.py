@@ -79,6 +79,10 @@ _SEARCH_TIMEOUT_S = 10.0
 _MOOD_TIMEOUT_S = 2.0
 _HERMES_DELEGATE_TIMEOUT_S = 3.0
 _HERMES_STATUS_TIMEOUT_S = 2.0
+# design_voice: the server call itself is capped at 45 s (voice_design.DESIGN_TIMEOUT_S);
+# the tool bound sits just above it so the call's own error wins the race.
+_VOICE_DESIGN_TIMEOUT_S = 50.0  # keep equal to voice_design.TOOL_DEADLINE_S
+_VOICE_SAVE_TIMEOUT_S = 15.0
 _SEND_TIMEOUT_S = 6.0
 
 _MOODS = ("neutral", "happy", "excited", "thinking", "concerned", "playful", "serious")
@@ -172,6 +176,26 @@ _CONFIRM_REFUSAL = (
 def set_cockpit(cockpit: Any) -> None:
     global _cockpit
     _cockpit = cockpit
+
+
+# The BrainControl that owns voice switching; the three voice-design tools call
+# into it. Registered by BrainControl.__init__ BEFORE it arms tools, because
+# arming asks it whether design applies to the active TTS backend.
+_voice_controller: Optional[Any] = None
+
+
+def set_voice_controller(controller: Any) -> None:
+    global _voice_controller
+    _voice_controller = controller
+
+
+def _voice_design_armed() -> bool:
+    """Design tools are offered only with VOICE_DESIGN_TOOLS on (default) and a
+    controller whose TTS backend can do it (the remote speech server)."""
+    try:
+        return _voice_controller is not None and bool(_voice_controller.voice_design_available())
+    except Exception:
+        return False
 
 # Every tool call runs on its OWN daemon thread (see _run_bounded), never on a
 # shared pool: a timed-out call cannot be cancelled, so on a pool one hung
@@ -404,6 +428,62 @@ TOOL_DEFS: list[dict] = [
     },
     {
         "type": "function",
+        "name": "design_voice",
+        "description": (
+            "Change your own speaking voice to a newly designed one. Call this "
+            "ONLY when the user explicitly asks you to change, imitate, or "
+            "adopt a voice style, e.g. 'talk like a grumpy old lighthouse "
+            "keeper' or 'use a calm female voice'. Never call it on your own "
+            "initiative, and not for ordinary requests to read something "
+            "dramatically. It takes a few seconds. When it returns, your next "
+            "words are already in the new voice: answer briefly in character "
+            "and keep using that voice for the rest of the conversation."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "The voice to create, as a short description of the "
+                        "speaker: age, gender, accent, character, mood. "
+                        "e.g. 'a grumpy old lighthouse keeper with a gravelly "
+                        "voice'. 3 to 300 characters."
+                    ),
+                }
+            },
+            "required": ["description"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "save_voice",
+        "description": (
+            "Permanently save the voice you are currently speaking in under a "
+            "name. Call this ONLY when the user asks to keep or save the "
+            "current voice, e.g. 'keep this voice, call it Keeper'. Works only "
+            "for a voice made with design_voice or cloned from a recording."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "The name to save the voice under, e.g. 'Keeper'."}
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "restore_voice",
+        "description": (
+            "Go back to your previous voice, from before the last design_voice. "
+            "Call this ONLY when the user asks you to return to your normal or "
+            "previous voice, e.g. 'go back to your normal voice'."
+        ),
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "type": "function",
         "name": "confirm_action",
         "description": (
             "Confirm a consequential action the user just explicitly approved. "
@@ -429,6 +509,7 @@ CORE_TOOLS = ("get_weather", "web_search", "set_mood")
 QMD_TOOLS = ("knowledge_lookup",)
 FAULKNER_TOOLS = ("decision_lookup",)
 HERMES_TOOLS = ("delegate_to_hermes", "hermes_status", "send_to_hermes")
+VOICE_DESIGN_TOOLS = ("design_voice", "save_voice", "restore_voice")
 
 
 def _probe(url: str, payload: dict) -> bool:
@@ -819,6 +900,8 @@ def get_tool_defs() -> list[dict]:
     faulkner_ok = _probe_health(_FAULKNER_URL)
     if faulkner_ok:
         names.update(FAULKNER_TOOLS)
+    if _voice_design_armed():
+        names.update(VOICE_DESIGN_TOOLS)
 
     armed = [t for t in TOOL_DEFS if t["name"] in names] + dropins
     _ARMED_NAMES = {t["name"] for t in armed}
@@ -1241,6 +1324,24 @@ def _run_set_mood(mood: str) -> str:
     return f"Mood set to {mood}. Do not mention or announce the mood change — just continue the conversation naturally."
 
 
+def _run_design_voice(description: str) -> str:
+    if _voice_controller is None:
+        return "Voice design isn't available right now."
+    return _voice_controller.design_voice(description)
+
+
+def _run_save_voice(name: str) -> str:
+    if _voice_controller is None:
+        return "Voice saving isn't available right now."
+    return _voice_controller.save_voice(name)
+
+
+def _run_restore_voice(_arg: Any) -> str:
+    if _voice_controller is None:
+        return "Voice switching isn't available right now."
+    return _voice_controller.restore_voice()
+
+
 def _run_delegate_to_hermes(task: str) -> str:
     if _cockpit is None:
         return "Hermes isn't connected right now."
@@ -1314,6 +1415,16 @@ _DISPATCH = {
         "Hermes message",
         True,
     ),
+    "design_voice": (
+        _run_design_voice,
+        _VOICE_DESIGN_TIMEOUT_S,
+        "description",
+        "a description of the voice",
+        "voice design",
+        True,
+    ),
+    "save_voice": (_run_save_voice, _VOICE_SAVE_TIMEOUT_S, "name", "a name for the voice", "voice save", True),
+    "restore_voice": (_run_restore_voice, _VOICE_SAVE_TIMEOUT_S, None, "", "voice restore", False),
     # 2.0s: confirm_action does no I/O — it only swaps two in-memory tokens.
     "confirm_action": (
         _run_confirm_action,

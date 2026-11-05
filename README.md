@@ -407,7 +407,15 @@ the behaviour described.
 | `VOICE_AFFECT` | *(unset — off)* | per-turn delivery conditioning. The brain prefixes each reply with a short note — `[affect: what this moment is - how it should sound]` — which is stripped before the text is spoken or shown, and sent to the TTS server as that one request's `instructions` field. `on` enables the note; `words` additionally asks the brain to write the reply in the register its own note names. Needs a TTS backend that accepts `instructions` (a `remote-speech` server that does not declare `accepts_instructions: false`); an operator-set speech style always takes precedence over it. Off by default and byte-identical to absent when off. Measured effect is delivery — pacing and register — not laughter or other paralinguistic events |
 | `VOICE_VOCAB_FILE` | `~/speech-to-speech/vocab.txt` | vocabulary for the post-transcription **vocab snap** (next section). Missing file = feature off; `off` disables even if the file exists |
 | `VOICE_PERSONA_FILE` | `~/speech-to-speech/persona.json` | where personas set from the panel are stored (config sidecar, survives a framework reinstall) |
-| `VOICE_TOOL_FILLERS` | *(seven built-ins)* | pipe-separated (`\|`) list of spoken fillers, since a phrase may contain a comma. `off` disables |
+| `VOICE_TOOL_FILLERS` | *(seven built-ins)* | pipe-separated (`\|`) list of spoken fillers, since a phrase may contain a comma. `off` disables. If `scripts/render_fillers.py` has rendered a phrase in the active voice, the clip plays instantly; otherwise the phrase is spoken through the TTS as before |
+| `VOICE_TURN_FILLER` | `off` | `on` plays one short filler from the same pool when a turn has ended and no reply audio has started `VOICE_TURN_FILLER_DELAY_MS` later. Only for turns that were transcribed (an unanswered or blank turn gets none), only from a pre-rendered clip in the active voice (no clip, no filler), never after reply audio started, never on top of a tool filler (and a tool filler skips if a turn filler just played), cancelled by new speech or a barge-in. Not recorded anywhere: audio only. A client that cannot tolerate a clip before the reply connects with `?turn_filler=0` on its websocket URL and is skipped |
+| `VOICE_TURN_FILLER_DELAY_MS` | `600` | the wait above |
+| `VOICE_TURN_FILLERS` | *(the tool pool)* | pool for the turn filler, same format as `VOICE_TOOL_FILLERS` (`Mm.\|One sec.\|Okay.\|Let me see.` suits a turn that is not a tool call) |
+| `VOICE_DESIGN_TOOLS` | `on` | With the remote speech backend and a voicegate-style server (`/v1/voices/design`, `/v1/voices/clone`): arms the LLM tools `design_voice` ("talk like a grumpy lighthouse keeper" switches to a freshly designed voice for the rest of the conversation), `save_voice` ("keep this voice, call it Keeper") and `restore_voice` ("go back to your normal voice"), renders the new voice's fillers in the background, and routes the panel's voice-clone recording to the server (the result is a `designed:<id>` voice, listed and deletable under custom voices). `off` removes all of it; the local pocket clone path is never affected. Implementation: `patches/voice_design.py` |
+| `VOICE_FILLER_DIR` | `~/.cache/patchbay/fillers` | clip cache, `<dir>/<voice>/<phrase-slug>.pcm` (raw s16le mono at the pipeline output rate). Filled by `scripts/render_fillers.py` |
+| `VOICE_SMART_TURN` | `off` | end-of-turn classifier on the speech server (`smart-turn`, same host as `--remote_transcription_base_url`). `act`: when the silence rule ends an open-mic turn, ask the classifier first; if the turn sounds unfinished, keep listening up to `VOICE_SMART_TURN_HOLD_MS` and, if speech resumes, treat it as the same turn. `shadow`: only log `SMART_TURN_SHADOW complete=… p=… latency_ms=… turn_s=…`, never change anything. Costs up to 250 ms per open-mic turn end in `act`; any error or timeout behaves as if off. Push-to-talk turns are never classified |
+| `VOICE_SMART_TURN_THRESHOLD` | `0.5` | probability above which the server calls a turn complete |
+| `VOICE_SMART_TURN_HOLD_MS` | `1200` | how long `act` keeps listening after an unfinished-sounding turn before ending it anyway |
 | `VOICE_WAKE_WORD` | *(unset — off)* | boot default for the join-deaf wake-word gate. The settings panel can toggle it live without a restart. Needs `openwakeword` + `onnxruntime` in the pipeline's venv (SETUP.md step 6 — its pre-trained models, `hey_jarvis` included, are CC BY-NC-SA 4.0, non-commercial); without them the setting is ignored with a warning and the panel's toggle is greyed out with the reason |
 | `VOICE_WAKE_WORD_MODEL` | `hey_jarvis` | openWakeWord model name, or a path to a custom `.onnx`. Drop a trained model into openWakeWord's models directory and it appears in the panel's dropdown |
 | `VOICE_WAKE_WORD_THRESHOLD` | `0.5` | detection score gate. Near-misses at or above `0.25` log at INFO so a real attempt that fell short still leaves evidence to calibrate against |
@@ -420,6 +428,17 @@ Secret-bearing vars (`HA_TOKEN` and friends) should not be set as
 `EnvironmentFile=` (see the commented block in
 `systemd/patchbay.service.template`); the vars reach the process
 identically either way.
+
+### Smart Turn and fillers (speech-server features)
+
+Both need the `remote-transcription` / `remote-speech` backends on a speech server that serves `smart-turn` and the persona voices, and both are inert without their env var. Pre-render the clips once per voice, with the same environment as the service (so it renders the phrases the service would pick):
+
+```sh
+python3 scripts/render_fillers.py --base-url http://HOST:PORT --dry-run   # voices x phrases, writes nothing
+python3 scripts/render_fillers.py --base-url http://HOST:PORT             # all voices; --voice ryan to limit
+```
+
+`--rate` must equal the pipeline output rate (the TTS handler's `remote_speech_sample_rate`, 16000 unless you set it) and `--source-rate` the rate the server returns (48000 for voxcpm2). Existing clips are skipped; `--force` re-renders. Turn fillers also need `VOICE_TURN_FILLER=on`, and Smart Turn `VOICE_SMART_TURN=act` (or `shadow` to only log what it would decide).
 
 ## Vocabulary snap (optional)
 

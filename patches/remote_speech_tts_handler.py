@@ -14,7 +14,7 @@ import httpx
 import numpy as np
 from rich.console import Console
 
-from speech_to_speech import tts_capabilities
+from speech_to_speech import filler_clips, tts_capabilities
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.cancel_scope import CancelScope
 from speech_to_speech.pipeline.handler_types import TTSIn, TTSOut
@@ -114,6 +114,7 @@ class RemoteSpeechTTSHandler(BaseHandler[TTSIn, TTSOut]):
         self.fallback_preload = fallback_preload
         self.model = model
         self.voice = voice
+        filler_clips.set_voice_getter(lambda: self.voice)  # pre-rendered fillers follow the active persona voice
         # Empty/whitespace stays empty -- an operator-supplied instruct (or none
         # at all, the default) is respected as-is. See DEFAULT_INSTRUCTIONS.
         self.instructions = (instructions or "").strip()

@@ -42,8 +42,10 @@ class _LocalHandler:
 
 
 class _RemoteHandler:
-    def __init__(self, base_url):
+    def __init__(self, base_url, model=None):
         self.base_url = base_url
+        if model is not None:
+            self.model = model
 
 
 class _BareHandler:
@@ -70,6 +72,7 @@ class _CountingVoicesServer:
 
     def __init__(self, responses):
         self.requests = 0
+        self.paths = []
         self._responses = responses
         self._req_lock = threading.Lock()
         outer = self
@@ -78,6 +81,7 @@ class _CountingVoicesServer:
             def do_GET(self):
                 with outer._req_lock:
                     outer.requests += 1
+                    outer.paths.append(self.path)
                     idx = min(outer.requests, len(outer._responses)) - 1
                 status, body = outer._responses[idx]
                 self.send_response(status)
@@ -131,6 +135,19 @@ def test_remote_backend_detected_via_base_url():
     try:
         caps = tc.get_capabilities(_RemoteHandler(server.base_url))
         assert caps.voices == ["jean"]
+    finally:
+        server.close()
+
+
+def test_remote_probe_names_the_configured_model():
+    # audio.cpp lists a model's voice_presets only when ?model= names it; a bare
+    # GET returns {"voices": []} and every preset (the persona voices) was then
+    # rejected as an unknown custom voice (2026-11-02, VoxCPM2 on the rig).
+    server = _CountingVoicesServer([(200, {"voices": ["the-system"]})])
+    try:
+        caps = tc.get_capabilities(_RemoteHandler(server.base_url, model="voxcpm2"))
+        assert caps.voices == ["the-system"]
+        assert server.paths == ["/v1/audio/voices?model=voxcpm2"]
     finally:
         server.close()
 

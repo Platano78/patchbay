@@ -35,6 +35,8 @@ import threading
 import types
 from queue import Queue
 
+import pytest
+
 
 def _install_stubs():
     def mod(name, **attrs):
@@ -415,7 +417,8 @@ def test_no_audio_send_site_bypasses_the_playback_funnel():
 
     source = inspect.getsource(WebSocketStreamer._send_loop)
     assert "client.send(data)" not in source
-    assert source.count("_broadcast_audio") == 4
+    # four reply-audio sends + the pre-rendered filler send (which can skip opted-out clients)
+    assert source.count("_broadcast_audio") == 5
 
 
 def test_reset_fires_when_the_last_client_disconnects():
@@ -1632,3 +1635,150 @@ def test_ptt_hold_admits_every_chunk_at_the_owners_real_mic_levels():
         hold2 = PttHold()
         hold2.down()
         assert all(hold2.admit(gauss(speech_rms)) for _ in range(40))
+
+
+# ── pre-rendered fillers on the wire (filler_clips.py) ────────────────────
+
+
+def _drive_send_loop(streamer, seconds=0.15):
+    async def drive():
+        task = asyncio.create_task(streamer._send_loop())
+        await asyncio.sleep(seconds)
+        streamer.stop_event.set()
+        await task
+
+    asyncio.run(drive())
+
+
+def test_filler_clip_is_sent_directly_and_is_not_reply_audio(monkeypatch):
+    from patches import filler_clips as fc
+
+    marks = []
+    monkeypatch.setattr(websocket_streamer, "turn_stats", types.SimpleNamespace(mark=marks.append))
+    streamer = _make_streamer()
+    client = _FakeClient()
+    streamer.clients.add(client)
+    f = fc.FillerClips()
+    monkeypatch.setattr(fc, "FILLERS", f)
+    monkeypatch.setattr(fc, "note_reply_audio", f.note_reply_audio)
+    f.on_turn_end()  # no-op unless VOICE_TURN_FILLER, but arms nothing we assert on
+    streamer.output_queue.put(fc.FillerClip(b"\x05\x00" * 500))
+    _drive_send_loop(streamer)
+    assert client.sent == [b"\x05\x00" * 500]
+    assert marks == []  # a filler is not "first audio out"
+
+
+def test_real_reply_audio_after_a_filler_still_flows_and_is_noted(monkeypatch):
+    from patches import filler_clips as fc
+
+    streamer = _make_streamer()
+    client = _FakeClient()
+    streamer.clients.add(client)
+    noted = []
+    monkeypatch.setattr(fc, "note_reply_audio", lambda: noted.append(1))
+    streamer.output_queue.put(fc.FillerClip(b"\x05\x00" * 500))
+    streamer.output_queue.put(b"\x07\x00" * 2000)
+    _drive_send_loop(streamer)
+    assert client.sent[0] == b"\x05\x00" * 500
+    assert b"".join(client.sent[1:]) == b"\x07\x00" * 2000
+    assert noted == [1]  # the filler did not count, the reply did
+
+
+def test_turn_filler_skips_a_client_that_opted_out_but_tool_filler_does_not(monkeypatch):
+    from patches import filler_clips as fc
+
+    monkeypatch.setenv("VOICE_TURN_FILLER", "on")
+    monkeypatch.setenv("VOICE_TURN_FILLER_DELAY_MS", "60000")
+    fc.on_turn_end()  # a live turn, so the turn filler is not dropped as stale
+    streamer = _make_streamer()
+    watch, phone = _FakeClient(), _FakeClient()
+    streamer.clients.update({watch, phone})
+    streamer._no_turn_filler.add(id(watch))
+    streamer.output_queue.put(fc.TurnFillerClip(b"\x01\x00" * 100))
+    streamer.output_queue.put(fc.FillerClip(b"\x02\x00" * 100))
+    try:
+        _drive_send_loop(streamer)
+    finally:
+        fc.cancel()
+    assert phone.sent == [b"\x01\x00" * 100, b"\x02\x00" * 100]
+    assert watch.sent == [b"\x02\x00" * 100]
+
+
+@pytest.mark.parametrize(
+    "path,expected",
+    [("/", False), ("/?turn_filler=0", True), ("/?x=1&turn_filler=off", True), ("/?turn_filler=1", False), ("/?turn_filler=on", False)],
+)
+def test_turn_filler_opt_out_is_read_from_the_websocket_url(path, expected):
+    ws = types.SimpleNamespace(request=types.SimpleNamespace(path=path))
+    assert websocket_streamer._client_opted_out_of_turn_filler(ws) is expected
+    assert websocket_streamer._client_opted_out_of_turn_filler(object()) is False
+
+
+def test_barge_in_cancels_the_pending_turn_filler(monkeypatch):
+    from patches import filler_clips as fc
+
+    called = []
+    monkeypatch.setattr(fc, "cancel", lambda: called.append(1))
+    _make_streamer()._barge_in(1, "client")
+    assert called == [1]
+
+
+# ── review fixes: stale PTT marker, filler-after-reply race ───────────────
+
+
+def test_client_dropping_mid_ptt_hold_does_not_leave_the_classifier_marker_down():
+    from patches import turn_classifier as tc
+
+    tc.reset_ptt()
+    streamer = _make_streamer()
+    asyncio.run(streamer._handle_client(_FakeClient([_ptt("down")])))  # socket ends with the key still held
+    tc._PTT.up_at = float("-inf")  # ignore the post-release grace: the hold itself must be gone
+    assert tc._PTT.down_at is None
+    tc.reset_ptt()
+
+
+def test_ptt_marker_down_expires_after_its_max_age():
+    from patches import turn_classifier as tc
+
+    tc.reset_ptt()
+    tc.note_ptt("down", 100.0)
+    assert tc.ptt_owns_turn(100.0 + tc.PTT_MAX_AGE_S - 1)
+    assert not tc.ptt_owns_turn(100.0 + tc.PTT_MAX_AGE_S + 1)
+    tc.reset_ptt()
+
+
+def test_turn_filler_queued_behind_reply_audio_is_dropped_not_played(monkeypatch):
+    from patches import filler_clips as fc
+
+    monkeypatch.setenv("VOICE_TURN_FILLER", "on")
+    monkeypatch.setenv("VOICE_TURN_FILLER_DELAY_MS", "60000")
+    streamer = _make_streamer()
+    client = _FakeClient()
+    streamer.clients.add(client)
+    fc.on_turn_end()
+    try:
+        # the race: the first reply chunk is already queued when the filler is put behind it
+        streamer.output_queue.put(b"\x07\x00" * 2000)
+        streamer.output_queue.put(fc.TurnFillerClip(b"\x05\x00" * 500))
+        _drive_send_loop(streamer)
+    finally:
+        fc.cancel()
+    assert b"".join(client.sent) == b"\x07\x00" * 2000  # reply only, no filler mid-reply
+
+
+def test_turn_filler_ahead_of_the_reply_still_plays(monkeypatch):
+    from patches import filler_clips as fc
+
+    monkeypatch.setenv("VOICE_TURN_FILLER", "on")
+    monkeypatch.setenv("VOICE_TURN_FILLER_DELAY_MS", "60000")
+    streamer = _make_streamer()
+    client = _FakeClient()
+    streamer.clients.add(client)
+    fc.on_turn_end()
+    try:
+        streamer.output_queue.put(fc.TurnFillerClip(b"\x05\x00" * 500))
+        streamer.output_queue.put(b"\x07\x00" * 2000)
+        _drive_send_loop(streamer)
+    finally:
+        fc.cancel()
+    assert client.sent[0] == b"\x05\x00" * 500

@@ -46,3 +46,11 @@ def pytest_configure(config):
             + ". Run ./setup.sh, then: ~/speech-to-speech-main/.venv/bin/python3 -m pytest patches/ examples/ webclient/",
             returncode=4,
         )
+    # Dependency-light pack modules that other pack modules import as
+    # `speech_to_speech.<name>`: stubbed-package tests need them importable
+    # before apply.sh has put them into an install. Real module, never a stub.
+    import importlib
+    import sys
+
+    for _name in ("filler_clips", "turn_classifier", "voice_design"):
+        sys.modules.setdefault(f"speech_to_speech.{_name}", importlib.import_module(f"patches.{_name}"))

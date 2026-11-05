@@ -63,7 +63,7 @@ CLONING_UNAVAILABLE_MSG = (
 BACKEND_CANNOT_CLONE_MSG = "The active TTS backend does not support voice cloning."
 
 # Ruling 9: lowercase, digits, underscore, hyphen, 1-32 chars.
-_NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+_NAME_RE = re.compile(r"[a-z0-9_-]{1,32}")
 
 
 class VoiceCloneError(Exception):
@@ -79,7 +79,7 @@ def is_name_format_valid(name: Any) -> bool:
     """Format-only check (ruling 9's regex), with no collision/deletion-state
     opinion -- the one gate every name arriving off the wire must pass before
     it's ever joined into a filesystem path via `voice_path()`."""
-    return isinstance(name, str) and bool(_NAME_RE.match(name))
+    return isinstance(name, str) and bool(_NAME_RE.fullmatch(name))
 
 
 def validate_name(name: Any, predefined: Iterable[str]) -> tuple[bool, str]:
@@ -181,7 +181,7 @@ class UploadManager:
         """Validate + start a new session. A new `begin` for the same
         `client_key` silently replaces (aborts) any prior in-flight upload,
         per protocol."""
-        if not isinstance(name, str) or not _NAME_RE.match(name):
+        if not isinstance(name, str) or not _NAME_RE.fullmatch(name):
             return False, "invalid name: use lowercase letters, digits, underscore, hyphen (1-32 chars)"
         ok, error = validate_extension(ext)
         if not ok:

@@ -83,6 +83,19 @@ def mark_instructions_unsupported(handler: Any) -> None:
         _instruct_rejected_at[key] = time.monotonic()
 
 
+def invalidate(handler: Any) -> None:
+    """Make the next `get_capabilities` re-probe now instead of serving the TTL
+    cache. The last good answer is kept as the fallback if that probe fails.
+    Used after a voice is designed/cloned/deleted on the server."""
+    key, _ = _select_prober(handler)
+    if key is None:
+        return
+    with _lock:
+        entry = _cache.get(key)
+        if entry is not None:
+            entry.last_probe_at = float("-inf")
+
+
 def _with_overrides(key: str, caps: TTSCapabilities, now: float) -> TTSCapabilities:
     rejected_at = _instruct_rejected_at.get(key)
     if rejected_at is None:
@@ -135,7 +148,9 @@ def _select_prober(handler: Any) -> tuple[Optional[str], Optional[Callable[[], T
 
     base_url = getattr(handler, "base_url", None)
     if base_url:
-        return base_url, lambda: _probe_remote(base_url)
+        # A remote handler's `model` is the plain model id it sends per request.
+        remote_model = model if isinstance(model, str) and model else None
+        return base_url, lambda: _probe_remote(base_url, remote_model)
 
     return None, None
 
@@ -154,11 +169,14 @@ def _probe_local() -> TTSCapabilities:
     return TTSCapabilities(voices=voices, can_clone=True, accepts_instructions=False)
 
 
-def _probe_remote(base_url: str) -> TTSCapabilities:
-    """`GET {base_url}/v1/audio/voices`. Raises on any transport/HTTP failure
+def _probe_remote(base_url: str, model: Optional[str] = None) -> TTSCapabilities:
+    """`GET {base_url}/v1/audio/voices[?model=...]`. The model is named because a
+    multi-model server (audio.cpp) lists a model's voice presets only when asked
+    for that model; a bare GET returns an empty list. Raises on any transport/HTTP failure
     -- the caller (`get_capabilities`) is what decides whether that means
     "serve the last-good answer" or "there is no last-good answer yet"."""
-    resp = httpx.get(f"{base_url.rstrip('/')}/v1/audio/voices", timeout=_PROBE_TIMEOUT_S)
+    params = {"model": model} if model else None
+    resp = httpx.get(f"{base_url.rstrip('/')}/v1/audio/voices", params=params, timeout=_PROBE_TIMEOUT_S)
     resp.raise_for_status()
     data = resp.json()
     body = data if isinstance(data, dict) else {}

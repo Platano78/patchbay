@@ -16,6 +16,7 @@ from openai import OpenAI
 from speech_to_speech.LLM.base_openai_compatible_language_model import BaseOpenAICompatibleHandler
 from speech_to_speech import tts_capabilities
 from speech_to_speech import voice_clone
+from speech_to_speech import voice_design
 from speech_to_speech import voice_tools
 # brain_discovery is dependency-light by design (stdlib + httpx only, no
 # speech_to_speech.* imports of its own -- see its docstring) so it can run
@@ -611,6 +612,16 @@ class BrainControl:
         self._probed_model_ids = threading.local()
         self.tools_armed = 0
         self.tools_armed_names: list[str] = []
+        # On-the-fly voice design (patches/voice_design.py): the voice active
+        # before the most recent design (for restore_voice), and the designed
+        # voices created this session (accepted by _set_voice_remote even
+        # when the capabilities probe has not caught up).
+        self._voice_before_design: Optional[str] = None
+        self._boot_voice: str = (getattr(tts_handler, "voice", None) or "") if tts_handler is not None else ""
+        self._session_designed: set[str] = set()
+        # Registered BEFORE arming: get_tool_defs() asks it whether the design
+        # tools apply to the active TTS backend.
+        voice_tools.set_voice_controller(self)
         try:
             armed = voice_tools.get_tool_defs()
             runtime_config.session.tools = armed
@@ -984,6 +995,17 @@ class BrainControl:
         # not four separate ones that could disagree if a probe happened to
         # land mid-build.
         caps = tts_capabilities.get_capabilities(self.tts_handler) if self.tts_handler else None
+        voices = caps.voices if caps else []
+        custom_voices = voice_clone.list_custom_voices() if self.tts_handler else []
+        can_clone = caps.can_clone if caps else False
+        if self._remote_design_enabled():
+            # Designed/cloned voices live on the speech server: list them in the
+            # custom group (where the UI offers Delete) rather than as presets,
+            # and offer the clone panel -- the upload goes to the server.
+            designed = [v for v in voices if voice_design.is_designed_name(v)]
+            voices = [v for v in voices if v not in designed]
+            custom_voices = custom_voices + designed
+            can_clone = True
         return {
             "active_brain": self.active_brain,
             "model": self.llm_handler.model_name,
@@ -992,10 +1014,10 @@ class BrainControl:
             "persona_persisted": self.persona_persisted,
             "persona_tiers": self._persona_tier_state(),
             "voice": (self.tts_handler.voice or "") if self.tts_handler else "",
-            "voices": caps.voices if caps else [],
-            "custom_voices": voice_clone.list_custom_voices() if self.tts_handler else [],
+            "voices": voices,
+            "custom_voices": custom_voices,
             "speech_style": (getattr(self.tts_handler, "instructions", "") or "") if self.tts_handler else "",
-            "can_clone": caps.can_clone if caps else False,
+            "can_clone": can_clone,
             "accepts_instructions": caps.accepts_instructions if caps else True,
             "tools_armed": self.tools_armed,
             "tools": list(self.tools_armed_names),
@@ -1493,7 +1515,7 @@ class BrainControl:
         network (a `tts_capabilities` cache miss), but that's a validation
         lookup, not this method building or sending any state itself.
         """
-        if name not in self._predefined_voices():
+        if name not in self._predefined_voices() and name not in self._session_designed:
             # Preset names validate against the ACTIVE backend's own list (via
             # `tts_capabilities`) -- not a pocket-specific one, so this holds
             # for whatever remote server is actually configured. Format-
@@ -1574,6 +1596,8 @@ class BrainControl:
         if self.tts_handler is None:
             logger.warning("BrainControl: voice delete refused for %s: voice switching unavailable", name)
             return False, "voice switching unavailable"
+        if self._remote_design_enabled() and voice_design.is_designed_name(name):
+            return self._voice_delete_designed(name)
         ok, error = voice_clone.check_delete_allowed(name, self.tts_handler.voice, self._predefined_voices())
         if not ok:
             logger.warning("BrainControl: voice delete refused for %s: %s", name, error)
@@ -1597,6 +1621,8 @@ class BrainControl:
 
         if self.tts_handler is None:
             return {"type": "voice_clone_result", "ok": False, "name": name, "error": "voice cloning unavailable"}
+        if self._remote_design_enabled():
+            return self._voice_clone_begin_remote(msg)
         if not tts_capabilities.get_capabilities(self.tts_handler).can_clone:
             # Distinct from the has_voice_cloning check below: this backend
             # (a remote server) has no cloning capability at all, not "pocket
@@ -1635,6 +1661,8 @@ class BrainControl:
 
         if self.tts_handler is None:
             return {"type": "voice_clone_result", "ok": False, "name": name, "error": "voice cloning unavailable"}
+        if self._remote_design_enabled():
+            return self._voice_clone_end_remote(msg)
         if not tts_capabilities.get_capabilities(self.tts_handler).can_clone:
             # Same distinction as _voice_clone_begin's early refusal.
             return {
@@ -1696,3 +1724,160 @@ class BrainControl:
         if self.streamer is not None:
             self.streamer.broadcast_json(self._config_state())
         return {"type": "voice_clone_result", "ok": True, "name": name, "error": None}
+
+    # ── remote voice design / cloning (patches/voice_design.py) ─────────────
+
+    def _remote_design_enabled(self) -> bool:
+        """Design + remote cloning apply to the remote-speech backend only
+        (the pocket path keeps its local sidecar cloning, untouched), and can
+        be switched off with VOICE_DESIGN_TOOLS=off."""
+        return voice_design.enabled() and voice_design.is_remote_handler(self.tts_handler)
+
+    def voice_design_available(self) -> bool:
+        return self._remote_design_enabled()
+
+    def _adopt_designed_voice(self, voice: str, audition: bool) -> tuple[bool, str]:
+        """Switch to a voice the server just created: through `_set_voice` (so it
+        persists like any choice), with the capability cache refreshed and the
+        voice trusted for this session even if the re-probe fails. Fillers are
+        rendered in the background."""
+        tts_capabilities.invalidate(self.tts_handler)
+        self._session_designed.add(voice)
+        ok, error = self._set_voice(voice, audition=audition)
+        if ok:
+            voice_design.render_fillers_async(self.tts_handler, voice)
+            self._broadcast_state()
+        return ok, error
+
+    def _broadcast_state(self) -> None:
+        if self.streamer is not None:
+            try:
+                self.streamer.broadcast_json(self._config_state())
+            except Exception as e:
+                logger.warning("BrainControl: state broadcast failed: %s", e)
+
+    def design_voice(self, description: str) -> str:
+        """LLM tool `design_voice`: design a voice from `description` and switch
+        to it. Returns a short plain result; on any failure the voice is unchanged."""
+        if not self._remote_design_enabled():
+            return "Voice design isn't available with the current voice engine."
+        handler = self.tts_handler
+        started = time.monotonic()
+        try:
+            result = voice_design.design(handler.base_url, description)
+        except voice_design.VoiceDesignError as e:
+            logger.warning("BrainControl: voice design failed: %s", e)
+            return f"I couldn't design that voice: {e}. The voice is unchanged."
+        if time.monotonic() - started > voice_design.TOOL_DEADLINE_S:
+            # The tool runner has already reported a timeout to the LLM; switching
+            # now would change the voice without anyone knowing. Drop the orphan.
+            logger.warning("BrainControl: voice design for %s finished after the tool deadline; not adopted", result["voice"])
+            try:
+                voice_design.delete(handler.base_url, result["voice"])
+            except voice_design.VoiceDesignError:
+                pass
+            return "The voice design finished too late. The voice is unchanged."
+        previous = handler.voice or ""
+        voice = result["voice"]
+        ok, error = self._adopt_designed_voice(voice, audition=False)
+        if not ok:
+            return f"I couldn't switch to the new voice: {error}. The voice is unchanged."
+        if previous != voice:
+            self._voice_before_design = previous
+        logger.info("BrainControl: designed voice %s (was %r) in %ss", voice, previous, result.get("seconds"))
+        return "Voice ready. You are now speaking in the new voice; continue naturally in it."
+
+    def save_voice(self, name: str) -> str:
+        """LLM tool `save_voice`: give the CURRENT designed voice a permanent name."""
+        if not self._remote_design_enabled():
+            return "Voice saving isn't available with the current voice engine."
+        handler = self.tts_handler
+        current = handler.voice or ""
+        if not voice_design.is_designed_name(current):
+            return "The current voice isn't a designed or cloned voice, so there is nothing to save."
+        try:
+            result = voice_design.rename(handler.base_url, current, voice_design.clean_save_name(name))
+        except voice_design.VoiceDesignError as e:
+            return f"I couldn't save the voice: {e}."
+        new_voice = result["voice"]
+        voice_design.move_fillers(current, new_voice)
+        tts_capabilities.invalidate(handler)
+        self._session_designed.discard(current)
+        self._session_designed.add(new_voice)
+        ok, error = self._set_voice(new_voice, audition=False)
+        if not ok:
+            return f"The voice was renamed but I couldn't switch to it: {error}."
+        if self._voice_before_design == current:
+            self._voice_before_design = new_voice
+        voice_design.render_fillers_async(handler, new_voice)  # no-op for clips that moved over
+        self._broadcast_state()
+        return f"Saved. This voice is now called {result.get('name') or name}."
+
+    def restore_voice(self) -> str:
+        """LLM tool `restore_voice`: back to the voice active before the most
+        recent design, or the configured default when none is remembered."""
+        if not self._remote_design_enabled():
+            return "Voice switching isn't available with the current voice engine."
+        target = self._voice_before_design or self._boot_voice
+        if not target:
+            return "There is no earlier voice to go back to."
+        if target == self.tts_handler.voice:
+            return "I'm already using that voice."
+        ok, error = self._set_voice(target, audition=False)
+        if not ok:
+            return f"I couldn't go back to the earlier voice: {error}."
+        self._voice_before_design = None
+        self._broadcast_state()
+        return "Back to the earlier voice. Continue naturally in it."
+
+    def _voice_delete_designed(self, name: str) -> tuple[bool, str]:
+        if name == self.tts_handler.voice:
+            return False, "switch to another voice first"
+        try:
+            voice_design.delete(self.tts_handler.base_url, name)
+        except voice_design.VoiceDesignError as e:
+            logger.warning("BrainControl: designed voice delete failed for %s: %s", name, e)
+            return False, str(e)
+        self._session_designed.discard(name)
+        if self._voice_before_design == name:
+            self._voice_before_design = None
+        tts_capabilities.invalidate(self.tts_handler)
+        self._broadcast_state()
+        return True, ""
+
+    def _voice_clone_begin_remote(self, msg: dict[str, Any]) -> dict[str, Any]:
+        name = msg.get("name")
+        for ok, error in (
+            voice_clone.validate_name(name, self._predefined_voices()),
+            voice_clone.validate_extension(msg.get("ext")),
+            voice_clone.validate_size(msg.get("size")),
+        ):
+            if not ok:
+                return {"type": "voice_clone_result", "ok": False, "name": name, "error": error}
+        return {"type": "voice_clone_progress", "stage": "receiving"}
+
+    def _voice_clone_end_remote(self, msg: dict[str, Any]) -> dict[str, Any]:
+        """The recorded/uploaded sample goes to the speech server's /v1/voices/clone;
+        the resulting `designed:<id>` voice is selected and persisted like any voice."""
+        name = msg.get("name")
+        raw = msg.get("data")
+
+        def fail(error: str) -> dict[str, Any]:
+            return {"type": "voice_clone_result", "ok": False, "name": name, "error": error}
+
+        if not isinstance(raw, (bytes, bytearray)) or not raw:
+            return fail("empty upload")
+        ok, error = voice_clone.validate_name(name, self._predefined_voices())
+        if not ok:
+            return fail(error)
+        try:
+            wav_bytes = voice_clone.normalize_to_wav(bytes(raw), msg.get("ext") or "")
+            result = voice_design.clone(self.tts_handler.base_url, wav_bytes, name)
+        except (voice_clone.VoiceCloneError, voice_design.VoiceDesignError) as e:
+            logger.warning("BrainControl: remote voice clone failed for %s: %s", name, e)
+            return fail(str(e))
+        ok, error = self._adopt_designed_voice(result["voice"], audition=False)
+        if not ok:
+            return fail(error)
+        self._audition(name)
+        return {"type": "voice_clone_result", "ok": True, "name": name, "voice": result["voice"], "error": None}

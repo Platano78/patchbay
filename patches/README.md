@@ -247,6 +247,40 @@ shared by both OpenAI-style handlers) instead of `responses-api`.
   back-to-back; the pool is overridable via the `VOICE_TOOL_FILLERS` env var
   (pipe-`|`-separated phrases, since a phrase may itself contain a comma),
   and the special value `off` disables the filler entirely.
+  `VOICE_TOOL_FILLERS` phrases can be pre-rendered per persona voice
+  (`scripts/render_fillers.py` -> `filler_clips.py`'s cache): a picked phrase
+  with a clip for the TTS handler's current voice goes straight onto the audio
+  queue, otherwise it is spoken through the TTS exactly as above. The same
+  module adds the turn-end filler (`VOICE_TURN_FILLER=on`, pool
+  `VOICE_TURN_FILLERS`, default the tool pool, picked by the same `_pick_filler`
+  logic): `vad_handler.py` starts a timer at each user turn end; at
+  `VOICE_TURN_FILLER_DELAY_MS` (600) it plays one clip if the turn was
+  transcribed and no reply audio has been enqueued. Wire view of such a turn:
+  `speech_started`, `speech_stopped`, `transcription_completed` JSON frames,
+  then the filler as plain binary audio frames, then the reply's `assistant_text`
+  frames and audio. A tool filler has no frame of its own either (it follows the
+  tool chunk's empty-text `assistant_text` with `tools`). A client opts out of the
+  turn filler only with `?turn_filler=0` on its websocket URL.
+
+- `turn_classifier.py` (new) — `speech_to_speech/turn_classifier.py`. Client for
+  the speech server's `smart-turn` model (`POST /v1/tasks/run`), 250 ms timeout,
+  fail-open. `VOICE_SMART_TURN=off|shadow|act`, `VOICE_SMART_TURN_THRESHOLD`,
+  `VOICE_SMART_TURN_HOLD_MS`. Also holds the PTT marker `websocket_streamer.py`
+  sets so push-to-talk turns are never classified.
+
+- `filler_clips.py` (new) — `speech_to_speech/filler_clips.py`. Clip cache and
+  turn-filler timer described above. Stdlib only.
+
+- `vad_handler.py` (new to the pack) — `speech_to_speech/VAD/vad_handler.py`.
+  Upstream's file at the pinned commit `1e63f7e`, plus: the Smart Turn gate
+  (`_smart_turn_hold` / `_smart_turn_expire` / `_smart_turn_merge`: in `act` an
+  unfinished-sounding turn is held, not emitted, and either continues if speech
+  resumes or ends when the hold runs out), the `smart_turn_base_url` setup
+  argument (passed by `s2s_pipeline.py` from the remote transcription base
+  url), and the filler timer hooks (`filler_clips.on_turn_end()` before each
+  final turn, `filler_clips.cancel()` on confirmed speech start). This is a
+  whole-file override of upstream `VAD/vad_handler.py` at pin `1e63f7e`: it must
+  be re-diffed against upstream on any pin bump.
 
 - `wakeword_gate.py` (new) — `speech_to_speech/wakeword_gate.py`. Defines
   `WakewordGate`, an optional join-deaf gate (the pattern is borrowed from

@@ -453,6 +453,11 @@ def _build_pipeline_handlers(
     """
     from speech_to_speech.LLM.lm_output_processor import LMOutputProcessor
 
+    # Smart Turn (VOICE_SMART_TURN) talks to the same speech server as remote
+    # transcription. Set here, in the builder every mode (websocket, realtime,
+    # socket, local) shares; rename_args() has already stripped the
+    # `remote_transcription_` prefix, so the attribute is `base_url`.
+    vars(vad_handler_kwargs)["smart_turn_base_url"] = getattr(remote_transcription_stt_handler_kwargs, "base_url", None)
     vad = VADHandler(
         stop_event,
         queue_in=recv_audio_chunks_queue,

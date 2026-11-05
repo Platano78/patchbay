@@ -12,12 +12,12 @@ import time
 from queue import Empty, Queue
 from threading import Event
 from typing import Any, Callable
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 import numpy as np
 from websockets.asyncio.server import ServerConnection
 
-from speech_to_speech import phone_context
+from speech_to_speech import filler_clips, phone_context, turn_classifier
 from speech_to_speech.floor_state import FloorState
 from speech_to_speech.pipeline.control import SESSION_END, PipelineControlMessage, is_control_message
 from speech_to_speech.pipeline.events import PipelineEvent
@@ -175,6 +175,18 @@ class PttHold:
             return True
         self._quiet_run += 1
         return self._quiet_run <= PTT_QUIET_PASS_CHUNKS
+
+
+turn_classifier.PTT_MAX_AGE_S = PTT_HOLD_MAX_S  # the marker and the hold expire together
+
+
+def _client_opted_out_of_turn_filler(websocket: Any) -> bool:
+    """True when the client's websocket URL carries ?turn_filler=0 (or off/false/no).
+    A client whose turn logic cannot tolerate a clip before the reply (it ends a reply
+    after ~1.6 s of output quiet) sets this; the turn-end filler is then not sent to it."""
+    path = getattr(getattr(websocket, "request", None), "path", "") or ""
+    values = parse_qs(urlsplit(path).query).get("turn_filler", [])
+    return any(v.strip().lower() in ("0", "off", "false", "no") for v in values)
 
 
 def _playback_delay_s(value: Any) -> float:
@@ -412,6 +424,10 @@ class WebSocketStreamer:
         # Audio waiting to reach 100 ms before it is sent. Lives on the instance
         # so a barge-in can discard it along with the queue.
         self._audio_buffer = bytearray()
+        # Pre-rendered fillers are enqueued here (see filler_clips.py); inert unless a clip exists.
+        filler_clips.attach_sink(self.output_queue)
+        # Clients that connected with ?turn_filler=0: they get tool fillers but not the turn-end one.
+        self._no_turn_filler: set[int] = set()
         self.clients: set[ServerConnection] = set()
         self.loop: asyncio.AbstractEventLoop | None = None
         self.server: Any = None
@@ -587,6 +603,8 @@ class WebSocketStreamer:
         self.clients.add(websocket)
         recv_buffer = bytearray()
         ptt_hold = PttHold()  # per connection: dies with the socket, never shared
+        if _client_opted_out_of_turn_filler(websocket):
+            self._no_turn_filler.add(client_id)
 
         # Enable listening when first client connects
         if len(self.clients) == 1:
@@ -696,6 +714,8 @@ class WebSocketStreamer:
                     if not isinstance(msg, dict):
                         logger.debug(f"Client {client_id}: ignoring non-object text frame")
                         continue
+                    if msg.get("type") == "ptt" and msg.get("state") in ("down", "up"):
+                        turn_classifier.note_ptt(msg["state"])  # Smart Turn never second-guesses a PTT turn
                     if msg.get("type") == "camera_frame":
                         await asyncio.to_thread(self._write_camera_frame, msg.get("data"))
                     elif msg.get("type") == "screen_frame":
@@ -744,6 +764,9 @@ class WebSocketStreamer:
             logger.error(f"Client {client_id} error: {type(e).__name__}: {e}", exc_info=True)
         finally:
             self.clients.discard(websocket)
+            self._no_turn_filler.discard(client_id)
+            if ptt_hold.active:  # dropped while holding: the process-wide marker must not stay down
+                turn_classifier.note_ptt("up")
             ptt_hold.reset()
             self._voice_uploads.abort(client_id)
             self.floor_state.drop_client(client_id)
@@ -1035,6 +1058,7 @@ class WebSocketStreamer:
         and tell every client to stop with {"type":"audio_stop"}. With nothing in
         flight the pipeline is left alone; the asking client is still answered with
         audio_stop so it can resume accepting audio. Returns True if it cancelled."""
+        filler_clips.cancel()
         if self.cancel_scope is None:
             return False
         if not self._response_in_flight():
@@ -1051,12 +1075,14 @@ class WebSocketStreamer:
     def _note_floor_event(self, payload: dict[str, Any]) -> None:
         """Feed the user's speech state from the pipeline's VAD events."""
         kind = payload.get("type")
+        if kind == "transcription_completed":
+            filler_clips.note_transcript(payload.get("transcript"))
         if kind == "speech_started":
             self.floor_state.user_speech_started()
         elif kind == "speech_stopped":
             self.floor_state.user_speech_stopped()
 
-    async def _broadcast_audio(self, data: bytes) -> None:
+    async def _broadcast_audio(self, data: bytes, skip: frozenset[int] = frozenset()) -> None:
         """Send one chunk of TTS audio to every client, and record it as the
         echo gate's playback reference.
 
@@ -1065,13 +1091,19 @@ class WebSocketStreamer:
         played?", so a send site that skipped `note_playback` would leave a
         hole in the reference, and the echo from that hole would correlate
         against nothing and be passed through as if it were user speech.
-        Funnelling the sends makes that omission impossible to reintroduce."""
+        Funnelling the sends makes that omission impossible to reintroduce.
+
+        `skip` names client ids that must not get this chunk (a client that opted out
+        of the turn-end filler); if that leaves nobody, nothing is sent or recorded."""
+        targets = [client for client in self.clients if id(client) not in skip]
+        if not targets:
+            return
         self.floor_state.audio_sent()
         try:
             self.echo_gate.note_playback(data)
         except Exception:
             logger.debug("echo gate note_playback failed", exc_info=True)
-        await asyncio.gather(*[self._send_or_drop(client, data) for client in self.clients], return_exceptions=True)
+        await asyncio.gather(*[self._send_or_drop(client, data) for client in targets], return_exceptions=True)
 
     async def _send_loop(self) -> None:
         """Send audio and text from queues to all connected clients."""
@@ -1114,6 +1146,16 @@ class WebSocketStreamer:
                     # Sentinels returned above, so a stale reply can never leave the mic closed.
                     if gen is not None and self.cancel_scope is not None and self.cancel_scope.is_stale(gen):
                         continue
+
+                    if isinstance(audio_chunk, filler_clips.FillerClip):
+                        if filler_clips.should_drop_filler(audio_chunk):
+                            continue  # reply audio got in first: a filler now would play mid-reply
+                        # A pre-rendered filler: straight out, not reply audio, no first_audio_out mark.
+                        if self.clients:
+                            skip = frozenset(self._no_turn_filler) if isinstance(audio_chunk, filler_clips.TurnFillerClip) else frozenset()
+                            await self._broadcast_audio(bytes(audio_chunk), skip)
+                        continue
+                    filler_clips.note_reply_audio()
 
                     if self.clients:
                         chunk_bytes: bytes

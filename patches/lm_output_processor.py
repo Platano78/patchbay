@@ -17,7 +17,7 @@ from queue import Queue
 
 from openai.types.realtime.conversation_item import RealtimeConversationItemFunctionCallOutput
 
-from speech_to_speech import voice_affect, voice_tools
+from speech_to_speech import filler_clips, voice_affect, voice_tools
 from speech_to_speech.baseHandler import BaseHandler
 from speech_to_speech.pipeline.events import AssistantTextEvent, ResponseFailedEvent, TokenUsageEvent
 from speech_to_speech.pipeline.cancel_scope import CancelScope
@@ -78,6 +78,21 @@ def _parse_tool_fillers() -> tuple[str, ...]:
 
 _TOOL_FILLERS: tuple[str, ...] = _parse_tool_fillers()
 _last_tool_filler: str | None = None
+
+
+def _parse_turn_fillers() -> tuple[str, ...]:
+    """Parse VOICE_TURN_FILLERS: the pool the turn-end filler (VOICE_TURN_FILLER=on)
+    draws from, same format as VOICE_TOOL_FILLERS. Unset: the tool-filler pool."""
+    if os.environ.get("VOICE_TURN_FILLERS") is None:
+        return _TOOL_FILLERS
+    raw = os.environ["VOICE_TURN_FILLERS"]
+    if raw.strip().lower() == "off":
+        return ()
+    phrases = tuple(phrase.strip() for phrase in raw.split("|") if phrase.strip())
+    return phrases if phrases else _TOOL_FILLERS
+
+
+_TURN_FILLERS: tuple[str, ...] = _parse_turn_fillers()
 
 # Spoken once when the generation that follows a tool round ends with nothing
 # speakable and no further tool calls (otherwise the user hears dead air).
@@ -144,21 +159,33 @@ def _parse_tool_filler_every() -> int:
     return value if value >= 1 else _DEFAULT_TOOL_FILLER_EVERY
 
 
+def _pick_from(pool: tuple[str, ...]) -> str | None:
+    global _last_tool_filler
+    if not pool:
+        return None
+    phrase = random.choice(pool)
+    if len(pool) > 1:
+        while phrase == _last_tool_filler:
+            phrase = random.choice(pool)
+    _last_tool_filler = phrase
+    return phrase
+
+
 def _pick_filler() -> str | None:
     """Pick a tool-call filler phrase, or None if fillers are disabled.
 
     Avoids repeating the last-returned phrase back-to-back when the pool
     has more than one entry.
     """
-    global _last_tool_filler
-    if not _TOOL_FILLERS:
-        return None
-    phrase = random.choice(_TOOL_FILLERS)
-    if len(_TOOL_FILLERS) > 1:
-        while phrase == _last_tool_filler:
-            phrase = random.choice(_TOOL_FILLERS)
-    _last_tool_filler = phrase
-    return phrase
+    return _pick_from(_TOOL_FILLERS)
+
+
+def _pick_turn_filler() -> str | None:
+    """Same picker (and the same no-back-to-back rule) over the turn-filler pool."""
+    return _pick_from(_TURN_FILLERS)
+
+
+filler_clips.set_turn_picker(_pick_turn_filler)
 
 
 class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
@@ -555,9 +582,18 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
             )
             # This tool round is consumed: the next one starts silent.
             self._set_model_spoke(lm_output.turn_id, False)
-            if plays_filler_round and not all_visual and not model_spoke and response_wants_audio(lm_output.response):
+            if (
+                plays_filler_round
+                and not all_visual
+                and not model_spoke
+                and response_wants_audio(lm_output.response)
+                and not filler_clips.turn_filler_just_played()  # a turn-end filler just covered this silence
+            ):
                 filler = _pick_filler()
-                if filler is not None:
+                if filler is not None and filler_clips.play_cached(filler):
+                    pass  # pre-rendered clip in the persona voice went straight to the audio queue
+                elif filler is not None:
+                    filler_clips.note_filler()
                     turn_stats.on_tts_input()
                     yield TTSInput(
                         text=filler,
