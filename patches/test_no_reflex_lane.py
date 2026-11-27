@@ -1,4 +1,4 @@
-"""The reflex lane was removed (see CHANGELOG, Unreleased); nothing may bring it back by accident.
+"""The reflex lane was removed (see CHANGELOG, 2.9.0); nothing may bring it back by accident.
 
 * ``TestPipelineBuildIgnoresVoiceReflex`` drives the REAL call path in a SUBPROCESS against the real
   framework, the way ``test_vocab_snap.TestRealHookPoint`` does: ``s2s_pipeline._build_pipeline_handlers``

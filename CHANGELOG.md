@@ -5,6 +5,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-11-27
+
 ### Removed
 
 - The pre-LLM reflex lane (`patches/reflex_lane.py`, `VOICE_REFLEX`). `VOICE_REFLEX` is now ignored: every turn goes to the LLM, which already handles smart-home commands through the `home_assistant` tool. Reason: measured over 60 days enabled, it answered zero turns (its `^turn ...` patterns missed real phrasings such as "can you turn off the living room lights") and it duplicated the tool's command parsing. `emit_synthetic_reply` and the chat-buffer reader that parrot mode shared with it now live in `patches/parrot_lane.py`.
