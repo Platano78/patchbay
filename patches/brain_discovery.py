@@ -12,9 +12,11 @@ imports of its own. This is what lets it run standalone, before a pipeline
 is stuck at "the pipeline won't start because no brain is reachable", and
 can't get to a running panel to ask it what's running. Run it directly:
 
-    python3 patches/brain_discovery.py                     # loopback only
-    python3 patches/brain_discovery.py --host 10.0.0.20 # one LAN host
-    python3 patches/brain_discovery.py --cidr 10.0.0.0/24
+    ~/speech-to-speech-main/.venv/bin/python3 patches/brain_discovery.py                     # loopback only
+    ~/speech-to-speech-main/.venv/bin/python3 patches/brain_discovery.py --host 10.0.0.20    # one LAN host
+    ~/speech-to-speech-main/.venv/bin/python3 patches/brain_discovery.py --cidr 10.0.0.0/24
+
+(Name the framework venv's python, not the system `python3`: it imports httpx.)
 
 `_extract_model_ids`/`MAX_PROBED_MODEL_IDS` live here (not in brain_control.py)
 for that reason: brain_control.py imports FROM this module, never the other
@@ -58,11 +60,21 @@ import logging
 import math
 import os
 import re
+import shlex
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Iterable, Optional, Sequence
 
-import httpx
+try:
+    import httpx
+except ImportError:  # a python without the framework venv's packages, e.g. the system python3
+    if __name__ == "__main__":
+        sys.exit(
+            "brain_discovery.py needs the framework venv's python, which has httpx: run it as "
+            "~/speech-to-speech-main/.venv/bin/python3 patches/brain_discovery.py "
+            "(or $INSTALL_DIR/.venv/bin/python3 if you installed elsewhere)."
+        )
+    raise
 
 logger = logging.getLogger(__name__)
 
@@ -411,6 +423,13 @@ def _print_candidates(urls: Sequence[str], limit: int = 20) -> None:
         print(f"  … and {len(urls) - limit} more")
 
 
+def _python() -> str:
+    """The interpreter running this script, for the commands the hints print: it
+    imports httpx, so a bare `python3` (the system one) would die with a traceback
+    where the framework venv's python, which is the one running now, works."""
+    return shlex.quote(sys.executable) if sys.executable else "python3"
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     """`python3 patches/brain_discovery.py [--host H] [--cidr BLOCK]` -- prints
     what `discover()` found in plain text, with a ready-to-paste brains.json
@@ -453,18 +472,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             print("needs OLLAMA_HOST=0.0.0.0, llama-server needs --host 0.0.0.0),")
             print("and that no firewall is in the way. If it listens on a port this")
             print("tool doesn't know, name the full URL instead:")
-            print("  BRAIN_DISCOVERY_URLS=http://10.0.0.20:9000/v1 python3 patches/brain_discovery.py")
+            print(f"  BRAIN_DISCOVERY_URLS=http://10.0.0.20:9000/v1 {_python()} patches/brain_discovery.py")
             return 0
         print("No local model server answered on the usual ports:")
         _print_candidates(urls)
         print()
         print("If yours listens somewhere else, set BRAIN_DISCOVERY_URLS to its")
         print("base URL(s) (comma-separated) and run this again, e.g.:")
-        print("  BRAIN_DISCOVERY_URLS=http://localhost:9000/v1 python3 patches/brain_discovery.py")
+        print(f"  BRAIN_DISCOVERY_URLS=http://localhost:9000/v1 {_python()} patches/brain_discovery.py")
         print()
         print("If it runs on another box, scan that instead, e.g.:")
-        print("  python3 patches/brain_discovery.py --host 10.0.0.20")
-        print("  python3 patches/brain_discovery.py --cidr 10.0.0.0/24")
+        print(f"  {_python()} patches/brain_discovery.py --host 10.0.0.20")
+        print(f"  {_python()} patches/brain_discovery.py --cidr 10.0.0.0/24")
         print()
         print("Don't have a model server anywhere yet? Install Ollama")
         print("(https://ollama.com), `ollama pull llama3.2`, then run this again --")

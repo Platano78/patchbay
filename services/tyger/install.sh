@@ -14,6 +14,7 @@ set -euo pipefail
 UPSTREAM_URL="https://github.com/nineninesix-ai/tyger-s2s"
 UPSTREAM_SHA="97d011dcd4c8d2a117e54f00bf5b2d457cefa160"
 BUNDLE_REPO="nineninesix/tyger"
+BUNDLE_REV="a5d4d73bb74fa4a7082dcd4387e44a1e5ac151b6"   # the revision these scripts were verified against
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIR="${1:-$HOME/patchbay-tyger}"
 
@@ -68,11 +69,11 @@ git -C "$DIR/tyger-s2s" fetch -q --depth 1 "$UPSTREAM_URL" "$UPSTREAM_SHA"
 git -C "$DIR/tyger-s2s" checkout -q FETCH_HEAD
 [ "$(git -C "$DIR/tyger-s2s" rev-parse HEAD)" = "$UPSTREAM_SHA" ] || { echo "upstream checkout is not the pinned SHA" >&2; exit 1; }
 
-echo "== weights bundle ($BUNDLE_REPO, no token needed, license OpenMDW-1.1)"
-"$DIR/venv/bin/python" - "$DIR/bundle" "$BUNDLE_REPO" <<'PY'
+echo "== weights bundle ($BUNDLE_REPO @ ${BUNDLE_REV:0:7}, no token needed, license OpenMDW-1.1)"
+"$DIR/venv/bin/python" - "$DIR/bundle" "$BUNDLE_REPO" "$BUNDLE_REV" <<'PY'
 import sys
 from huggingface_hub import snapshot_download
-snapshot_download(sys.argv[2], local_dir=sys.argv[1], allow_patterns=["config.json", "model.safetensors", "nemotron/*.json"])
+snapshot_download(sys.argv[2], revision=sys.argv[3], local_dir=sys.argv[1], allow_patterns=["config.json", "model.safetensors", "nemotron/*.json"])
 PY
 
 echo "== upstream validator (batched engine vs plain reference; needs the GPU free)"

@@ -136,7 +136,7 @@ _LANE_LIST: tuple[Lane, ...] = (
         sends_chat_template_kwargs=True,
         models_endpoint_public=False,  # n/a: it is your own server, key or not
         note=(
-            "Your own model server. Run `python3 patches/brain_discovery.py` to find it "
+            "Your own model server. Run `~/speech-to-speech-main/.venv/bin/python3 patches/brain_discovery.py` to find it "
             "and print a filled-in entry. Most such servers ignore the API key entirely; "
             "if yours wants one, add api_key_file + api_key_var."
         ),
@@ -494,7 +494,7 @@ def _print_lane_show(lane: Lane) -> None:
     else:
         print("  base_url    YOU supply this -- only you know where your server listens")
         if lane.key == "openai-compatible":
-            print("              `python3 patches/brain_discovery.py` will find it for you")
+            print("              `~/speech-to-speech-main/.venv/bin/python3 patches/brain_discovery.py` will find it for you")
     if lane.needs_key:
         print(f"  API key     REQUIRED, as {lane.key_var}")
         print(f"              get one at {lane.key_console_url}")
@@ -684,7 +684,7 @@ def _cmd_check(brains_json: Optional[str]) -> int:
             print("from the cockpit. To create one:")
             print("  cp brains.json.example brains.json    # then edit it")
             print("  python3 patches/brain_lanes.py show <type>")
-            print("  python3 patches/brain_discovery.py    # finds a local server for you")
+            print("  ~/speech-to-speech-main/.venv/bin/python3 patches/brain_discovery.py    # finds a local server for you")
         return 1
 
     print(f"Checking {len(data)} brain(s) in {path}\n")

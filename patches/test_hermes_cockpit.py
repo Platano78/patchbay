@@ -18,7 +18,12 @@ No real 90s waits: the generation-counter reset logic is tested by calling
 
 from __future__ import annotations
 
+import os
 import sys
+import threading
+import time
+
+import pytest
 import types
 from queue import Queue
 
@@ -423,3 +428,418 @@ def test_next_poll_interval_pending_approvals_ignore_backoff(monkeypatch):
 
     assert cockpit._next_poll_interval() == hermes_cockpit._POLL_ACTIVE_S
     assert cockpit._idle_failure_streak == 0
+
+
+# ── failed delegation is spoken as a plain phrase, never a class name or URL ──
+
+
+def _failing_shim(exc):
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def post(self, *a, **kw):
+            raise exc
+
+    return _Client
+
+
+def _run_failed_delegation(monkeypatch, exc):
+    cockpit = _make_cockpit(monkeypatch)
+    monkeypatch.setattr(hermes_cockpit, "_resolve_shim_token", lambda: "t")
+    monkeypatch.setattr(hermes_cockpit.httpx, "Client", _failing_shim(exc))
+    cockpit._run_delegation("do the thing")
+    return cockpit._delegation["status"], cockpit._delegation["result"]
+
+
+_PRIVATE_URL = "http://192.0.2.7:8087/v1/chat/completions"
+
+
+def _status_error(code):
+    request = hermes_cockpit.httpx.Request("POST", _PRIVATE_URL)
+    response = hermes_cockpit.httpx.Response(code, request=request)
+    return hermes_cockpit.httpx.HTTPStatusError(f"Server error '{code}' for url '{_PRIVATE_URL}'", request=request, response=response)
+
+
+def test_failed_delegation_504_says_the_gateway_timed_out(monkeypatch):
+    status, result = _run_failed_delegation(monkeypatch, _status_error(504))
+    assert status == "error"
+    assert result == "Delegation failed: the Hermes gateway timed out (504)."
+
+
+def test_failed_delegation_other_status_says_error_and_code(monkeypatch):
+    _, result = _run_failed_delegation(monkeypatch, _status_error(500))
+    assert result == "Delegation failed: Hermes answered with an error (500)."
+
+
+def test_failed_delegation_timeout_says_how_long(monkeypatch):
+    exc = hermes_cockpit.httpx.ReadTimeout("read timed out", request=hermes_cockpit.httpx.Request("POST", _PRIVATE_URL))
+    _, result = _run_failed_delegation(monkeypatch, exc)
+    assert result == "Delegation failed: Hermes timed out after 15 minutes."
+
+
+def test_failed_delegation_connection_error_says_unreachable(monkeypatch):
+    exc = hermes_cockpit.httpx.ConnectError("refused", request=hermes_cockpit.httpx.Request("POST", _PRIVATE_URL))
+    _, result = _run_failed_delegation(monkeypatch, exc)
+    assert result == "Delegation failed: Hermes could not be reached."
+
+
+def test_failed_delegation_connect_timeout_is_unreachable_not_a_long_wait(monkeypatch):
+    exc = hermes_cockpit.httpx.ConnectTimeout("slow", request=hermes_cockpit.httpx.Request("POST", _PRIVATE_URL))
+    _, result = _run_failed_delegation(monkeypatch, exc)
+    assert result == "Delegation failed: Hermes could not be reached."
+
+
+def test_failed_delegation_unknown_error_has_no_class_name(monkeypatch):
+    _, result = _run_failed_delegation(monkeypatch, KeyError("boom"))
+    assert result == "Delegation failed: something went wrong on the way to Hermes."
+
+
+def test_failed_delegation_text_never_carries_url_or_host(monkeypatch):
+    for exc in (_status_error(502), _status_error(504)):
+        _, result = _run_failed_delegation(monkeypatch, exc)
+        assert "192.0.2.7" not in result and "http" not in result and "8087" not in result
+
+
+def test_failed_delegation_still_logs_the_detail(monkeypatch, caplog):
+    with caplog.at_level("WARNING", logger="patches.hermes_cockpit"):
+        _run_failed_delegation(monkeypatch, _status_error(500))
+    assert any(_PRIVATE_URL in r.getMessage() for r in caplog.records)
+
+
+# ── the last delegation outlives the quest-card reset ────────────────────
+
+
+def _finished_cockpit(monkeypatch, status="done", result="Saved the shortlist to /data/notes/report.md"):
+    cockpit = _make_cockpit(monkeypatch)
+    cockpit.hermes_ok = True
+    monkeypatch.setattr(cockpit, "_schedule_reset", lambda generation: None)
+    cockpit._delegation_generation = 1
+    cockpit._delegation = _active_delegation(active=True, status="running", task="research it", steps=[])
+    cockpit._finish_delegation(status, result)
+    return cockpit
+
+
+def test_status_after_reset_still_reports_the_finished_result(monkeypatch):
+    cockpit = _finished_cockpit(monkeypatch)
+    cockpit._maybe_reset(1)
+    assert cockpit._delegation["status"] == "idle"  # the card did clear
+    summary = cockpit.status_summary("summary")
+    assert "Saved the shortlist to /data/notes/report.md" in summary
+    assert "finished" in summary
+    assert "ago" in summary
+    assert summary != "Hermes is idle."
+
+
+def test_last_result_after_reset_returns_the_result(monkeypatch):
+    cockpit = _finished_cockpit(monkeypatch)
+    cockpit._maybe_reset(1)
+    assert cockpit.status_summary("last_result") == (
+        "Hermes's last result: Saved the shortlist to /data/notes/report.md"
+    )
+
+
+def test_steps_after_reset_return_the_final_step(monkeypatch):
+    cockpit = _finished_cockpit(monkeypatch)
+    cockpit._maybe_reset(1)
+    steps = cockpit.status_summary("steps")
+    assert steps.startswith("Recent Hermes activity: ")
+    assert "done: Saved the shortlist" in steps
+
+
+def test_error_finish_after_reset_reports_the_error(monkeypatch):
+    cockpit = _finished_cockpit(monkeypatch, status="error", result="Hermes could not be reached")
+    cockpit._maybe_reset(1)
+    summary = cockpit.status_summary("summary")
+    assert "hit an error" in summary
+    assert "ago" in summary
+    assert "Hermes could not be reached" in summary
+
+
+def test_fresh_cockpit_strings_are_unchanged(monkeypatch):
+    cockpit = _make_cockpit(monkeypatch)
+    cockpit.hermes_ok = True
+    assert cockpit.status_summary("summary") == "Hermes is idle."
+    assert cockpit.status_summary("steps") == "No Hermes activity recorded yet."
+    assert cockpit.status_summary("last_result") == "Hermes hasn't finished anything yet."
+
+
+def test_new_active_delegation_wins_and_old_record_survives_until_it_finishes(monkeypatch):
+    import time
+
+    cockpit = _finished_cockpit(monkeypatch, result="first result")
+    cockpit._maybe_reset(1)
+    cockpit._delegation_generation = 2
+    cockpit._delegation = _active_delegation(
+        active=True, status="running", task="second", started_ts=time.time(), steps=[]
+    )
+    summary = cockpit.status_summary("summary")
+    assert "working" in summary
+    assert "first result" not in summary
+    assert cockpit._last_delegation["result"] == "first result"  # not cleared by the new delegation
+    cockpit._finish_delegation("done", "second result")
+    assert cockpit._last_delegation["result"] == "second result"
+    assert cockpit._last_delegation["task"] == "second"
+
+
+def test_permission_suffix_kept_on_the_last_record_summary(monkeypatch):
+    cockpit = _finished_cockpit(monkeypatch)
+    cockpit._maybe_reset(1)
+    cockpit._permissions = [{"id": "p1"}]
+    assert cockpit.status_summary("summary").endswith("1 approval waiting for your decision.")
+
+
+# ── spoken announcement fits the TTS cap ─────────────────────────────────
+
+_TAIL = " Ask me for the details if you want more."
+
+
+def test_spoken_result_replaces_absolute_paths_with_a_file():
+    spoken = hermes_cockpit._spoken_result("Saved it to /data/notes/report.md and ~/docs/a.txt. Done.")
+    assert spoken == "Saved it to a file and a file. Done."
+    assert "/" not in spoken
+
+
+def test_spoken_result_keeps_single_slash_words_and_non_paths():
+    text = "Use and/or the /etc setting, about 3/4 done"
+    assert hermes_cockpit._spoken_result(text) == text
+
+
+def test_build_announcement_has_no_path():
+    assert "/" not in hermes_cockpit._build_announcement("done", "Saved to /data/notes/report.md")
+
+
+def test_spoken_result_long_text_cuts_at_a_sentence_end():
+    text = "This is a sentence of moderate length that says something. " * 10
+    spoken = hermes_cockpit._spoken_result(text)
+    assert spoken.endswith("something." + _TAIL)
+    assert len(spoken) <= hermes_cockpit._ANNOUNCE_RESULT_CHARS + len(_TAIL)
+    body = spoken[: -len(_TAIL)]
+    assert len(body) > 60
+
+
+def test_spoken_result_without_sentence_end_cuts_at_a_word_boundary():
+    spoken = hermes_cockpit._spoken_result("alpha beta gamma delta " * 30)
+    assert spoken.endswith(_TAIL)
+    body = spoken[: -len(_TAIL)]
+    assert body.split()[-1] in {"alpha", "beta", "gamma", "delta"}  # never mid-word
+    assert len(spoken) <= hermes_cockpit._ANNOUNCE_RESULT_CHARS + len(_TAIL)
+
+
+def test_spoken_result_early_sentence_end_is_ignored():
+    spoken = hermes_cockpit._spoken_result("Short. " + "alpha beta gamma delta " * 30)
+    body = spoken[: -len(_TAIL)]
+    assert body != "Short."
+    assert len(body) > 60
+    assert body.split()[-1] in {"alpha", "beta", "gamma", "delta"}
+
+
+def test_announce_cap_is_tight_enough_for_the_tts_limit():
+    assert hermes_cockpit._ANNOUNCE_RESULT_CHARS <= 180
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        ("Saved it to ~/notes.txt for you.", "Saved it to a file for you."),
+        ('Path is "/home/a/b" now.', "Path is a file now."),
+        ("Path is (/home/a/b) now.", "Path is a file now."),
+        ("Path is `/home/a/b` now.", "Path is a file now."),
+        ("Path is [/home/a/b] now.", "Path is a file now."),
+        ("Path is '/home/a/b'.", "Path is a file."),
+        ("Saved (to `~/x/y.md`), done.", "Saved (to a file, done."),
+        ("Wrote /home/a/b.", "Wrote a file."),
+        ("See https://example.com/a/b now", "See https://example.com/a/b now"),
+        ("about 1/2 of it, and/or 24/7", "about 1/2 of it, and/or 24/7"),
+        ("the /etc setting", "the /etc setting"),
+        ("a ~/ alone", "a ~/ alone"),
+    ],
+)
+def test_spoken_paths_wrapped_and_single_segment(text, expected):
+    assert hermes_cockpit._spoken_result(text) == expected
+
+
+def test_finish_delegation_record_is_built_from_the_finishing_task(monkeypatch):
+    cockpit = _finished_cockpit(monkeypatch, result="the result")
+    rec = cockpit._last_delegation
+    assert rec["task"] == "research it"
+    assert rec["status"] == "done"
+    assert rec["steps"][-1]["text"] == "done: the result"
+
+
+def test_finish_delegation_record_ignores_a_delegation_landing_after_the_lock(monkeypatch):
+    cockpit = _make_cockpit(monkeypatch)
+    monkeypatch.setattr(cockpit, "_schedule_reset", lambda generation: None)
+    cockpit._delegation = _active_delegation(active=True, status="running", task="first", steps=[])
+    real_append = cockpit._append_step
+
+    def _append_then_new_delegation(role, text):
+        real_append(role, text)
+        cockpit._delegation = _active_delegation(active=True, status="running", task="newer", steps=[])
+
+    monkeypatch.setattr(cockpit, "_append_step", _append_then_new_delegation)
+    cockpit._finish_delegation("done", "r")
+    assert cockpit._last_delegation["task"] == "first"
+    assert cockpit._last_delegation["steps"][-1]["text"] == "done: r"
+
+
+# ── delegation outcome: Telegram post (VOICE_HERMES_NOTIFY) + brain memory ───
+
+
+def _finish_with_posts(monkeypatch, status="done", result="short", full_text=None, target="telegram:test-chat", **kw):
+    monkeypatch.setattr(hermes_cockpit, "_HERMES_TARGET", target)
+    cockpit = _make_cockpit(monkeypatch, **kw)
+    posted = []
+    sent = threading.Event()
+
+    def fake_tool_call(name, args):
+        posted.append((name, args))
+        sent.set()
+        return {"ok": True}
+
+    monkeypatch.setattr(cockpit, "_tool_call", fake_tool_call)
+    monkeypatch.setattr(cockpit, "_schedule_reset", lambda generation: None)
+    cockpit._delegation = _active_delegation(active=True, status="running")
+    cockpit._delegation["task"] = "make the list"
+    cockpit._finish_delegation(status, result, full_text=full_text)
+    if target and os.environ.get("VOICE_HERMES_NOTIFY", "").strip().lower() != "off":
+        sent.wait(2)
+    else:
+        time.sleep(0.05)  # give a (wrongly) started post thread a chance to show itself
+    return cockpit, posted
+
+
+def test_finish_posts_full_untruncated_result_to_target(monkeypatch):
+    monkeypatch.delenv("VOICE_HERMES_NOTIFY", raising=False)
+    full = "line one\n\nline two " + "y" * 600  # longer than the 400-char record result
+    _, posted = _finish_with_posts(monkeypatch, result="trunc...", full_text=full)
+    assert posted == [
+        (
+            "messages_send",
+            {
+                "target": "telegram:test-chat",
+                "message": f"Hermes finished your voice request: make the list\n\n{full}",
+            },
+        )
+    ]
+
+
+def test_finish_error_wording(monkeypatch):
+    monkeypatch.delenv("VOICE_HERMES_NOTIFY", raising=False)
+    _, posted = _finish_with_posts(monkeypatch, status="error", result="Delegation failed: x.")
+    assert posted[0][1]["message"] == "Hermes couldn't finish your voice request: make the list\n\nDelegation failed: x."
+
+
+def test_finish_post_is_capped_at_3500_with_ellipsis(monkeypatch):
+    monkeypatch.delenv("VOICE_HERMES_NOTIFY", raising=False)
+    _, posted = _finish_with_posts(monkeypatch, full_text="z" * 5000)
+    body = posted[0][1]["message"].split("\n\n", 1)[1]
+    assert len(body) == 3500 and body.endswith("…")
+
+
+def test_finish_does_not_post_without_target(monkeypatch):
+    monkeypatch.delenv("VOICE_HERMES_NOTIFY", raising=False)
+    _, posted = _finish_with_posts(monkeypatch, target="")
+    assert posted == []
+
+
+def test_finish_does_not_post_when_notify_off(monkeypatch):
+    monkeypatch.setenv("VOICE_HERMES_NOTIFY", "OFF")
+    _, posted = _finish_with_posts(monkeypatch)
+    assert posted == []
+
+
+def test_finish_survives_a_failed_post(monkeypatch):
+    monkeypatch.delenv("VOICE_HERMES_NOTIFY", raising=False)
+    monkeypatch.setattr(hermes_cockpit, "_HERMES_TARGET", "telegram:test-chat")
+    cockpit = _make_cockpit(monkeypatch)
+    monkeypatch.setattr(cockpit, "_tool_call", lambda n, a: None)
+    monkeypatch.setattr(cockpit, "_schedule_reset", lambda generation: None)
+    cockpit._delegation = _active_delegation(active=True, status="running")
+    cockpit._finish_delegation("done", "ok")  # must not raise
+    assert cockpit._last_delegation["status"] == "done"
+
+
+class _FakeChat:
+    def __init__(self):
+        self.items = []
+
+    def add_item(self, item):
+        self.items.append(item)
+
+
+def test_finish_appends_one_assistant_item_to_chat(monkeypatch):
+    monkeypatch.setenv("VOICE_HERMES_ANNOUNCE", "off")  # independent of speech
+    chat = _FakeChat()
+    _finish_with_posts(
+        monkeypatch, result="the GPU list is ready", runtime_config=types.SimpleNamespace(chat=chat)
+    )
+    assert len(chat.items) == 1
+    item = chat.items[0]
+    assert item.role == "assistant"
+    assert item.content[0].type == "output_text"
+    assert item.content[0].text == 'Hermes finished the task "make the list": the GPU list is ready'
+
+
+def test_finish_without_runtime_config_is_fine(monkeypatch):
+    cockpit, _ = _finish_with_posts(monkeypatch)
+    assert cockpit._last_delegation["status"] == "done"
+
+
+def test_chat_failure_never_raises_into_finish(monkeypatch):
+    class _Boom:
+        def add_item(self, item):
+            raise RuntimeError("nope")
+
+    cockpit, _ = _finish_with_posts(monkeypatch, runtime_config=types.SimpleNamespace(chat=_Boom()))
+    assert cockpit._last_delegation["status"] == "done"
+
+
+def test_send_message_result_is_honest(monkeypatch):
+    monkeypatch.setattr(hermes_cockpit, "_HERMES_TARGET", "telegram:test-chat")
+    cockpit = _make_cockpit(monkeypatch)
+    monkeypatch.setattr(cockpit, "_tool_call", lambda n, a: {"ok": True})
+    assert cockpit.send_message("hi") == (
+        "Posted to your chat with Hermes. Hermes doesn't act on these; to have it do something, delegate it."
+    )
+
+
+def test_finish_survives_a_notify_thread_that_cannot_start(monkeypatch):
+    monkeypatch.delenv("VOICE_HERMES_NOTIFY", raising=False)
+    monkeypatch.setattr(hermes_cockpit, "_HERMES_TARGET", "telegram:test-chat")
+    cockpit = _make_cockpit(monkeypatch)
+    monkeypatch.setattr(cockpit, "_schedule_reset", lambda generation: None)
+    announced = []
+    monkeypatch.setattr(cockpit, "_announce_completion", lambda status, result: announced.append(status))
+    real_start = threading.Thread.start
+
+    def start(self):
+        if self.name == "hermes-cockpit-notify":
+            raise RuntimeError("can't start new thread")
+        return real_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", start)
+    cockpit._delegation = _active_delegation(active=True, status="running")
+    cockpit._finish_delegation("done", "r", full_text="r")
+    assert cockpit._last_delegation["status"] == "done"
+    assert announced == ["done"]
+
+
+def test_finish_post_caps_a_long_task_line(monkeypatch):
+    monkeypatch.delenv("VOICE_HERMES_NOTIFY", raising=False)
+    monkeypatch.setattr(hermes_cockpit, "_HERMES_TARGET", "telegram:test-chat")
+    cockpit = _make_cockpit(monkeypatch)
+    posted, sent = [], threading.Event()
+    monkeypatch.setattr(cockpit, "_tool_call", lambda n, a: (posted.append(a), sent.set(), {"ok": True})[-1])
+    monkeypatch.setattr(cockpit, "_schedule_reset", lambda generation: None)
+    cockpit._delegation = _active_delegation(active=True, status="running")
+    cockpit._delegation["task"] = "t" * 1000
+    cockpit._finish_delegation("done", "r", full_text="z" * 5000)
+    sent.wait(2)
+    assert len(posted[0]["message"]) < 4096

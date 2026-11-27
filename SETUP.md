@@ -210,6 +210,26 @@ Verify the endpoint answers before starting the pipeline:
 curl -sf <your-base-url>/models
 ```
 
+A hosted endpoint that needs an API key rejects that plain request, so send
+the key too (put it in `$KEY` first; do not paste it into a file you commit):
+
+```bash
+curl -sf -H "Authorization: Bearer $KEY" <your-base-url>/models
+```
+
+If you already wrote a `brains.json`, `brain_lanes.py check` does this for
+every entry (it reads each entry's key itself): it validates each entry and
+probes its `/models`. Without `--brains-json` it reads `$BRAINS_JSON`, else
+`~/speech-to-speech/brains.json`, not the file in this repo, so name the file:
+
+```bash
+~/speech-to-speech-main/.venv/bin/python3 patches/brain_lanes.py check --brains-json brains.json
+```
+
+ Some providers list their models without a
+key, so for those a green probe does not prove your key works; the command says
+so and prints a one-token chat request that does. Run it with the framework's venv Python (it needs `httpx`).
+
 Expected output: JSON with a top-level `"data"` array listing at least one
 model id — e.g. `{"object":"list","data":[{"id":"your-model-name",...}]}`.
 
@@ -237,8 +257,10 @@ BRAINS_JSON=$PWD/brains.json \
   --responses_api_stream
 ```
 
-Watch the log for the port-bind line (the first start downloads ~2.7 GB of
-model weights, so it can take a few minutes before this appears):
+Watch the log for the port-bind line. The first start downloads ~2.7 GB of
+model weights, so expect 2-5 minutes with nothing cached; don't restart the
+pipeline meanwhile (`ss -ltn '( sport = :8765 )'` shows a listener once it is
+up):
 
 ```
 WebSocket server ready, waiting for connections...
@@ -261,7 +283,8 @@ switcher.
 
 ### Check it answers, without a microphone
 
-With the pipeline running, in a second terminal:
+With the pipeline running (after the `WebSocket server ready` line), in a
+second terminal. It needs no arguments:
 
 ```bash
 ~/speech-to-speech-main/.venv/bin/python3 examples/smoke_turn.py
@@ -374,6 +397,10 @@ Each of these is independent; skip any you don't need.
 
 ### Run as systemd services
 
+Install these only if you want the pipeline to start by itself; the foreground
+run in step 4 is a complete setup. `systemctl enable --now` below starts both
+services immediately and again at every boot.
+
 Keeps the pipeline and webclient running across reboots and crashes. Both
 templates bind **every interface** (`--ws_host 0.0.0.0` in the pipeline
 unit, `--host 0.0.0.0` in the webclient unit), because a service is
@@ -381,8 +408,8 @@ usually there so other devices can reach it. If it is for this machine
 only, add these two lines to both `sed` commands below:
 
 ```bash
-  -e "s|--ws_host 0.0.0.0|--ws_host 127.0.0.1|" \
-  -e "s|--host 0.0.0.0|--host 127.0.0.1|" \
+  -e "/^ExecStart=/s|--ws_host 0.0.0.0|--ws_host 127.0.0.1|" \
+  -e "/^ExecStart=/s|--host 0.0.0.0|--host 127.0.0.1|" \
 ```
 
 The pipeline unit also passes `--speculative_reopen_ms=-1
@@ -481,15 +508,31 @@ detector into the venv, then restart the pipeline:
 ```
 
 openWakeWord's code is Apache-2.0, but its **pre-trained models, including
-`hey_jarvis`, are CC BY-NC-SA 4.0 — non-commercial use only**. With
-openwakeword ≥ 0.5 the models are not in the wheel; `patches/README.md`
-(`wakeword_gate.py`) has the one-time download command.
+`hey_jarvis`, are CC BY-NC-SA 4.0 — non-commercial use only**.
+
+Which openwakeword you get depends on the Python version (checked with
+`pip download` on Linux x86_64, 2026-11): on Python 3.10 and 3.11 pip installs
+0.6.0, whose models are *not* in the wheel, so run the one-time download once:
+
+```bash
+~/speech-to-speech-main/.venv/bin/python3 -c "import openwakeword.utils; openwakeword.utils.download_models()"
+```
+
+On Python 3.12 and newer, 0.5 and later need `tflite-runtime`, which has no
+wheel there, so pip falls back to 0.4.0. That version bundles the models
+(`hey_jarvis` and three others) inside the wheel: there is no download step,
+and the download command above fails with `AttributeError` — skip it.
+`pip list | grep -i openwakeword` shows which one you have.
 
 Turn it on from the settings panel's "Wake word" checkbox, or set
 `VOICE_WAKE_WORD=1` in the unit's `Environment=` (or export it before a
 foreground run) to start with it on. Verify: after the restart, the
-checkbox is enabled. Without openwakeword installed the checkbox stays
-greyed out and the panel shows why:
+checkbox is enabled. The pipeline loads the model when the gate is switched
+on, not on the first audio: if it cannot load (a wrong `VOICE_WAKE_WORD_MODEL`,
+a missing download), the gate stays off, the checkbox is greyed out with the
+reason, and the log has one `wake word stays off: ...` warning naming the model.
+Without openwakeword installed the checkbox stays greyed out too and the panel
+shows why:
 
 ```
 openwakeword is not installed in the pipeline's venv (pip install openwakeword onnxruntime, then restart the pipeline)

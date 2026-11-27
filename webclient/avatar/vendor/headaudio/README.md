@@ -1,3 +1,9 @@
+> **Note for Patchbay users.** This is a vendored, unmodified copy of the upstream
+> HeadAudio README (by Mika Suominen, MIT; see `LICENSE` here). Its examples use the
+> upstream package layout (`./modules/...`, `./dist/...`, `images/*.png`), which does not
+> exist here. Patchbay uses only three files from this directory, loaded by
+> `webclient/avatar/avatar.mjs`: `headaudio.mjs`, `headworklet.mjs` and `model-en-mixed.bin`.
+
 # HeadAudio
 
 ### Introduction

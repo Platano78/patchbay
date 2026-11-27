@@ -907,3 +907,10 @@ def test_knowledge_lookup_says_it_is_not_a_reminder_system():
         " This searches saved notes only and is not a reminder system; "
         "there is no way to set reminders - say so."
     )
+
+
+def test_send_to_hermes_description_is_honest_and_points_at_delegation():
+    desc = {t["name"]: t["description"] for t in vt.TOOL_DEFS}["send_to_hermes"]
+    assert "does not act" in desc.lower() or "does not" in desc.lower()
+    assert "delegate_to_hermes" in desc
+    assert "chat with" in desc

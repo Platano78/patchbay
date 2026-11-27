@@ -231,7 +231,7 @@ def _webclient_temp_root(tmp_path_factory):
     for name in os.listdir(HERE):
         if name in ("themes", "avatar"):
             continue
-        if name == "persona-voices.json":
+        if name in ("persona-voices.json", "personas.json"):
             # An install-local seed file (see seedPersonaVoices in index.html): the real
             # one must not leak into the suite, or it would pre-pair personas under tests
             # that assume none. Tests that need one write it into this temp root.
@@ -264,8 +264,9 @@ def static_server(_webclient_temp_root):
         def do_GET(self):
             # Mirrors serve.py: an absent persona-voices.json answers 200 {} (a 404 would
             # log a console error on every page load, which the console-clean tests reject).
-            if (self.path.split("?")[0] == "/persona-voices.json"
-                    and not os.path.isfile(os.path.join(_webclient_temp_root, "persona-voices.json"))):
+            seed_name = self.path.split("?")[0].lstrip("/")
+            if (seed_name in ("persona-voices.json", "personas.json")
+                    and not os.path.isfile(os.path.join(_webclient_temp_root, seed_name))):
                 body = b"{}"
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
@@ -1724,10 +1725,10 @@ def test_persona_voice_pairing_applies_on_switch(client):
 
 
 @contextlib.contextmanager
-def _seeded_client(browser, static_server, _webclient_temp_root, seed, init_js=""):
+def _seeded_client(browser, static_server, _webclient_temp_root, seed, init_js="", filename="persona-voices.json"):
     """Like `client`, but with a persona-voices.json present in the served root
     BEFORE the page loads (the seed is fetched once, at load)."""
-    seed_path = os.path.join(_webclient_temp_root, "persona-voices.json")
+    seed_path = os.path.join(_webclient_temp_root, filename)
     with open(seed_path, "w") as f:
         f.write(seed if isinstance(seed, str) else json.dumps(seed))
     server = StubControlServer()
@@ -1814,6 +1815,97 @@ def test_persona_voice_seed_garbage_is_ignored(browser, static_server, _webclien
             page.wait_for_timeout(400)
             assert page.evaluate(
                 "() => JSON.parse(localStorage.getItem('va-persona-voices') || '{}')") == {}, bad
+
+
+_PS = "personas.json"
+
+
+def _pseed(browser, static_server, root, seed, init_js=""):
+    return _seeded_client(browser, static_server, root, seed, init_js=init_js, filename=_PS)
+
+
+def _saved(page):
+    return page.evaluate("() => JSON.parse(localStorage.getItem('va-personas') || '{}')")
+
+
+def test_persona_seed_merges_without_overwriting(browser, static_server, _webclient_temp_root):
+    with _pseed(browser, static_server, _webclient_temp_root,
+                {"Glitch": "seed glitch", "Mine": "seed mine"},
+                init_js="if(!localStorage.getItem('va-personas'))"
+                        "localStorage.setItem('va-personas',JSON.stringify({'Mine':'user text','Other':'o'}));"
+                ) as (page, server):
+        page.wait_for_function("() => 'Glitch' in JSON.parse(localStorage.getItem('va-personas')||'{}')", timeout=10000)
+        assert _saved(page) == {"Glitch": "seed glitch", "Mine": "user text", "Other": "o"}
+        assert page.evaluate("() => [...document.getElementById('personaSelect').options].some(o => o.value === 'Glitch')")
+
+
+def test_persona_seed_applies_once_so_deleted_stays_deleted(browser, static_server, _webclient_temp_root):
+    with _pseed(browser, static_server, _webclient_temp_root, {"Glitch": "seed glitch"}) as (page, server):
+        page.wait_for_function("() => 'Glitch' in JSON.parse(localStorage.getItem('va-personas')||'{}')", timeout=10000)
+        page.click("#personaDisplay")
+        page.wait_for_function("() => document.getElementById('personaGroup').open", timeout=10000)
+        page.select_option("#personaSelect", "Glitch")
+        page.once("dialog", lambda d: d.accept())
+        page.click("#personaDeleteBtn")
+        assert "Glitch" not in _saved(page)
+        page.reload()
+        page.wait_for_function("() => ws && ws.readyState === 1", timeout=15000)
+        page.wait_for_timeout(500)
+        assert "Glitch" not in _saved(page), "a deleted seeded persona came back though the file did not change"
+
+
+def test_persona_seed_reapplies_when_file_changes(browser, static_server, _webclient_temp_root):
+    with _pseed(browser, static_server, _webclient_temp_root, {"Glitch": "v1"}) as (page, server):
+        page.wait_for_function("() => 'Glitch' in JSON.parse(localStorage.getItem('va-personas')||'{}')", timeout=10000)
+        page.evaluate("() => { const p = JSON.parse(localStorage.getItem('va-personas')); delete p.Glitch;"
+                      " localStorage.setItem('va-personas', JSON.stringify(p)); }")
+        with open(os.path.join(_webclient_temp_root, _PS), "w") as f:
+            f.write(json.dumps({"Glitch": "v2"}))
+        page.reload()
+        page.wait_for_function("() => 'Glitch' in JSON.parse(localStorage.getItem('va-personas')||'{}')", timeout=10000)
+        assert _saved(page)["Glitch"] == "v2"
+
+
+def test_persona_seed_garbage_is_ignored(browser, static_server, _webclient_temp_root):
+    for bad in ("not json at all", "[1, 2]", '"str"', '{"Glitch": 7, "E": ""}'):
+        with _pseed(browser, static_server, _webclient_temp_root, bad) as (page, server):
+            page.wait_for_timeout(400)
+            assert page.evaluate("() => localStorage.getItem('va-personas')") is None, bad
+
+
+def test_persona_seed_never_selects_applies_or_sends(browser, static_server, _webclient_temp_root):
+    """Fresh install (Default selected, empty library) and a user who is mid-way through an edit:
+    seeding must leave the select, the textarea and the active key alone, and send no config_set."""
+    with _pseed(browser, static_server, _webclient_temp_root, {"Glitch": "seed glitch"}) as (page, server):
+        page.wait_for_function("() => 'Glitch' in JSON.parse(localStorage.getItem('va-personas')||'{}')", timeout=10000)
+        page.wait_for_timeout(400)
+        assert page.evaluate("() => document.getElementById('personaSelect').value") == "__default__"
+        assert page.evaluate("() => document.getElementById('personaInput').value") == ""
+        assert page.evaluate("() => localStorage.getItem('va-persona-active')") in (None, "", "__default__")
+        sent = [m for m in server.text_msgs if m.get("type") == "config_set" and "persona" in m]
+        assert not sent, sent
+    # Mid-session: a saved persona is selected and the user has a draft in the textarea.
+    with _pseed(browser, static_server, _webclient_temp_root, {"Glitch": "seed glitch"},
+                init_js="if(!localStorage.getItem('va-personas'))"
+                        "localStorage.setItem('va-personas',JSON.stringify({'Mine':'mine text'}));") as (page, server):
+        page.wait_for_function("() => 'Glitch' in JSON.parse(localStorage.getItem('va-personas')||'{}')", timeout=10000)
+        page.wait_for_timeout(400)
+        page.evaluate("""async () => {
+          document.getElementById('personaSelect').value = 'Mine';
+          document.getElementById('personaInput').value = 'my draft';
+          localStorage.setItem('va-persona-active', 'Mine');
+          const p = JSON.parse(localStorage.getItem('va-personas')); delete p.Glitch;
+          localStorage.setItem('va-personas', JSON.stringify(p));
+          localStorage.removeItem('va-personas-seeded');
+          await seedPersonas();
+        }""")
+        assert 'Glitch' in _saved(page)
+        assert page.evaluate("() => document.getElementById('personaSelect').value") == "Mine"
+        assert page.evaluate("() => document.getElementById('personaInput').value") == "my draft"
+        assert page.evaluate("() => localStorage.getItem('va-persona-active')") == "Mine"
+        page.wait_for_timeout(300)
+        sent = [m for m in server.text_msgs if m.get("type") == "config_set" and "persona" in m]
+        assert not sent, sent
 
 
 def test_persona_voice_pairing_ignored_when_voice_unknown(client):
@@ -3256,8 +3348,17 @@ def test_ptt_size_token_actually_sizes_the_button(browser, static_server, local_
 
     page.evaluate("() => setTheme('ptttest')")
     page.wait_for_function("() => document.documentElement.getAttribute('data-theme') === 'ptttest'")
+    # setTheme appends the theme's <link> and sets data-theme at once; the CSS arrives
+    # later. Measuring on the attribute alone raced the fetch (5 of 20 runs failed
+    # under CPU load) -- wait for the stylesheet itself to be loaded and parsed.
+    page.wait_for_function(
+        "() => { const l = document.querySelector('link[href*=\"ptttest.css\"]'); return !!(l && l.sheet); }",
+        timeout=10000)
     themed_width = page.evaluate("() => document.getElementById('ptt').getBoundingClientRect().width")
-    assert themed_width == 120, f"--ptt-size did not resize #ptt, got {themed_width}px — the token is still dead"
+    sheet = page.evaluate("""() => { const l = document.querySelector('link[href*="ptttest.css"]');
+        return l ? {sheetLoaded: !!l.sheet} : null; }""")
+    assert themed_width == 120, (
+        f"--ptt-size did not resize #ptt, got {themed_width}px (stylesheet state: {sheet}) — the token is still dead")
 
     ctx.close()
     server.stop()
@@ -3588,6 +3689,14 @@ def test_persona_voices_json_is_empty_object_when_absent_and_the_file_when_prese
         conn.request("GET", "/persona-voices.json")
         resp = conn.getresponse()
         assert (resp.status, json.loads(resp.read())) == (200, {"builtin:The Butler": "x"})
+        # /personas.json follows the same rule.
+        conn.request("GET", "/personas.json")
+        resp = conn.getresponse()
+        assert (resp.status, resp.read()) == (200, b"{}")
+        (tmp_path / "personas.json").write_text('{"N": "t"}')
+        conn.request("GET", "/personas.json")
+        resp = conn.getresponse()
+        assert (resp.status, json.loads(resp.read())) == (200, {"N": "t"})
         conn.close()
     finally:
         httpd.shutdown()
@@ -4965,7 +5074,8 @@ def test_legend_plate_does_not_overlap_links_card_when_populated(browser, static
         const legend = document.getElementById('legendPlate');
         const firstLink = document.querySelector('#linksList a');
         const toolCells = document.querySelectorAll('#legendTools .nom');
-        const lastToolCell = toolCells[toolCells.length - 1];
+        // The list is capped to 4 rows (8 cells) and scrolls inside itself: the last cell in view is the plate's tail now.
+        const lastToolCell = toolCells[Math.min(7, toolCells.length - 1)];
         const lr = legend.getBoundingClientRect();
         const intersects = (a, b) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
 
@@ -5199,7 +5309,8 @@ def test_tape_links_split_is_60_40(browser, static_server):
         const contentGrid = document.getElementById('contentGrid');
         const firstLink = document.querySelector('#linksList a');
         const toolCells = document.querySelectorAll('#legendTools .nom');
-        const lastToolCell = toolCells[toolCells.length - 1];
+        // The list is capped to 4 rows (8 cells) and scrolls inside itself: the last cell in view is the plate's tail now.
+        const lastToolCell = toolCells[Math.min(7, toolCells.length - 1)];
 
         const tapeRect = tape.getBoundingClientRect();
         const linksRect = links.getBoundingClientRect();
@@ -7767,3 +7878,144 @@ def test_index_html_sends_ptt_frames():
     src = open(os.path.join(HERE, "index.html"), encoding="utf-8").read()
     assert 'type: "ptt", state' in src
     assert 'sendPtt("down")' in src and 'sendPtt("up")' in src
+
+
+# ── release-gate 7 (D1-D3): legend must not squeeze the meter; honest hints ──
+
+_THIRTY_TOOLS = [f"tool_number_{i:02d}" for i in range(30)]
+
+# Fully inside the viewport AND inside every ancestor that clips (overflow other
+# than visible, either axis). elementFromPoint alone passes a half-clipped row
+# whose centre happens to be visible, which is exactly the D1 defect.
+_CLIP_PROBE = """(sels) => sels.map((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return {sel, missing: true};
+    const r = el.getBoundingClientRect();
+    const out = {sel, top: r.top, bottom: r.bottom, h: r.height, clippedBy: []};
+    if (r.height === 0 || r.width === 0) out.clippedBy.push('zero-size');
+    if (r.top < -0.5 || r.bottom > innerHeight + 0.5) out.clippedBy.push('viewport');
+    for (let a = el.parentElement; a && a !== document.documentElement; a = a.parentElement) {
+        const cs = getComputedStyle(a);
+        if (cs.display === 'contents') continue;
+        if (cs.overflowY === 'visible' && cs.overflowX === 'visible') continue;
+        const ar = a.getBoundingClientRect();
+        if (r.top < ar.top - 0.5 || r.bottom > ar.bottom + 0.5)
+            out.clippedBy.push((a.id ? '#' + a.id : a.tagName.toLowerCase() + '.' + a.className)
+                               + ' [' + ar.top.toFixed(0) + '..' + ar.bottom.toFixed(0) + ']');
+    }
+    return out;
+})"""
+
+_PRIMARY_READOUTS = [".meter-readout", "#voiceDisplay", ".stat-strip", "#sessionPersonaWindow"]
+
+
+def _connected_page(browser, static_server, width, height, n_tools):
+    server = StubControlServer()
+    server.start()
+    ctx = browser.new_context(permissions=["microphone"], viewport={"width": width, "height": height})
+    page = ctx.new_page()
+    page.add_init_script(
+        f"localStorage.setItem('va-ws-url', 'ws://127.0.0.1:{server.port}');"
+        "localStorage.setItem('va-avatar', 'off');"
+        "try{localStorage.setItem('va-firstrun-done','1')}catch(e){}")
+    page.goto(f"http://127.0.0.1:{static_server}/index.html")
+    page.wait_for_function("() => ws && ws.readyState === 1", timeout=15000)
+    page.wait_for_timeout(300)
+    if n_tools:
+        server.send(dict(CONFIG_STATE, tools=_THIRTY_TOOLS[:n_tools]))
+        page.wait_for_function(
+            f"() => document.getElementById('legendTools').children.length === {n_tools}")
+    page.wait_for_timeout(300)
+    return page, server, ctx
+
+
+@pytest.mark.parametrize("width,height", [(1440, 900), (1280, 800), (1440, 1271), (1920, 1080)])
+def test_armed_tool_list_does_not_squeeze_the_meter_or_deck(browser, static_server, width, height):
+    """D1: with 30 armed tools the legend plate used to grow row 4 and take
+    the height from #contentGrid, clipping the PEAK/READY/RMS row and
+    pushing the deck strip behind an inner scroll. The primary readouts must
+    be exactly as visible with 30 tools as with none."""
+    page0, server0, ctx0 = _connected_page(browser, static_server, width, height, 0)
+    base = page0.evaluate(_CLIP_PROBE, _PRIMARY_READOUTS)
+    base_grid = page0.evaluate("() => document.getElementById('contentGrid').getBoundingClientRect().height")
+    ctx0.close()
+    server0.stop()
+    page, server, ctx = _connected_page(browser, static_server, width, height, 30)
+    try:
+        got = page.evaluate(_CLIP_PROBE, _PRIMARY_READOUTS)
+        grid = page.evaluate("() => document.getElementById('contentGrid').getBoundingClientRect().height")
+        # Baseline = the instrument with no tool list (v2.8.0 look). 30 tools
+        # must add no clipping and take no height from the grid.
+        for b, g in zip(base, got):
+            assert not g.get("missing"), g
+            assert g["clippedBy"] == b["clippedBy"], (
+                f"{width}x{height}: {g['sel']} clipped by {g['clippedBy']} with 30 tools, "
+                f"{b['clippedBy']} with none")
+        assert abs(grid - base_grid) <= 1, (
+            f"{width}x{height}: #contentGrid is {grid}px with 30 tools, {base_grid}px with none")
+        # Outright: the meter readout row is fully visible at every size here;
+        # the deck strip/persona card sit below the fold of #contentGrid at 900px
+        # tall even with NO tools (v2.8.0 baseline: 570px of content in a 365px
+        # grid; the tape row's 190px floor and row 4's 150px floor are deliberate),
+        # so they are only required in full where the chassis has the room.
+        meter = [g for g in got if g["sel"] == ".meter-readout"][0]
+        assert meter["clippedBy"] == [], f"{width}x{height}: meter readout clipped by {meter['clippedBy']}"
+        if height >= 1080:
+            for g in got:
+                assert g["clippedBy"] == [], f"{width}x{height}: {g['sel']} clipped by {g['clippedBy']}"
+        # The list itself stays reachable: keyboard-focusable, scrolls internally.
+        info = page.evaluate("""() => { const t = document.getElementById('legendTools');
+            return {tab: t.tabIndex, sh: t.scrollHeight, ch: t.clientHeight, ov: getComputedStyle(t).overflowY}; }""")
+        assert info["tab"] == 0 and info["ov"] in ("auto", "scroll"), info
+        assert info["sh"] > info["ch"], f"30 tools should overflow the capped list: {info}"
+    finally:
+        ctx.close()
+        server.stop()
+
+
+def test_legend_shows_no_wake_placeholder_before_config_state(browser, static_server):
+    """D3 (a): before connect the ARM line printed the literal placeholder
+    "the wake word". A page whose socket never opens never receives a
+    config_state, so nothing about a wake word may be visible."""
+    ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+    page = ctx.new_page()
+    page.add_init_script(
+        "localStorage.setItem('va-avatar', 'off');"
+        "localStorage.setItem('va-ws-url', 'ws://127.0.0.1:9');")
+    page.goto(f"http://127.0.0.1:{static_server}/index.html")
+    page.wait_for_function(
+        "() => document.getElementById('statusText').textContent.startsWith(\"can't reach\")", timeout=10000)
+    assert "the wake word" not in page.evaluate("() => document.body.innerText").lower()
+    assert "wake" not in page.evaluate("() => document.getElementById('legendPlate').innerText").lower()
+    ctx.close()
+
+
+def test_legend_names_the_real_wake_phrase_once_config_state_arrives(client):
+    """D3 (b): ARM turns the wake gate on, so "Arm opens the mic, say <phrase>
+    to wake" is true whenever a wake word is available, gate on or off."""
+    page, server = client
+    server.send(dict(CONFIG_STATE, wake_word={
+        "enabled": False, "state": "off", "phrase": "alexa",
+        "model": "alexa", "models": ["alexa"]}))
+    page.wait_for_function(
+        "() => document.getElementById('legendPlate').innerText.toLowerCase().includes('alexa')")
+    legend = page.evaluate("() => document.getElementById('legendPlate').innerText").lower()
+    assert "arm opens the mic" in legend and "to wake" in legend, legend
+    assert "the wake word" not in page.evaluate("() => document.body.innerText").lower()
+
+
+def test_connect_failure_hint_names_the_origin_cause(browser, static_server):
+    """D2: a refused handshake (403 from the Origin/Host guard) is invisible to
+    the browser and looks like nothing listening; the hint must name both."""
+    ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+    page = ctx.new_page()
+    page.add_init_script(
+        "localStorage.setItem('va-avatar', 'off');"
+        "localStorage.setItem('va-ws-url', 'ws://127.0.0.1:9');")
+    page.goto(f"http://127.0.0.1:{static_server}/index.html")
+    page.wait_for_function(
+        "() => document.getElementById('statusText').textContent.startsWith(\"can't reach\")", timeout=10000)
+    log = page.evaluate("() => document.getElementById('log').textContent")
+    assert "origin" in log.lower() and "VOICE_WS_ORIGINS" in log and "VOICE_ALLOWED_HOSTS" in log, log
+    assert "nothing is listening" in log.lower(), log
+    ctx.close()

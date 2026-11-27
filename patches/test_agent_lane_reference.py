@@ -152,7 +152,7 @@ def test_messages_send_records_to_the_log(monkeypatch, ref_server):
 
     result = cockpit.send_message("on my way")
 
-    assert "Sent to Hermes" in result
+    assert "Posted to your chat with Hermes" in result
     assert len(ref_server.state.sent_messages) == 1
     assert ref_server.state.sent_messages[0]["target"] == "example:1234567890"
     assert ref_server.state.sent_messages[0]["message"] == "on my way"

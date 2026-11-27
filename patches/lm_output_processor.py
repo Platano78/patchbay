@@ -111,10 +111,37 @@ _SYNTHETIC_CAP_OUTPUT = (
     "you could not finish."
 )
 
+_SYNTHETIC_DUPLICATE_CALL_OUTPUT = (
+    "This exact call was already made this turn, so it was not run again. "
+    "Answer from the results you already have, or try a different query."
+)
+
+# Read-only lookups the model is known to repeat verbatim within a turn
+# (seen: five identical web_search queries). Only these are deduplicated:
+# every other tool, state-changing or zero-argument ones above all, may
+# legitimately repeat an identical call (restore -> design -> restore).
+_REPEAT_GUARDED_TOOLS = frozenset({"web_search", "get_weather", "sports_scores"})
+
 _SYNTHETIC_UNPARSEABLE_ARGS_OUTPUT = (
     "This tool call was not executed because its arguments were incomplete "
     "or malformed. Retry with a shorter request, or answer without the tool."
 )
+
+
+def _normalize_arg(value):
+    """Canonical form of a tool argument for duplicate detection: strings are
+    lower-cased with whitespace collapsed, containers are walked."""
+    if isinstance(value, str):
+        return " ".join(value.split()).casefold()
+    if isinstance(value, dict):
+        return {k: _normalize_arg(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_normalize_arg(v) for v in value]
+    return value
+
+
+def _call_signature(name: str, args) -> str:
+    return name + "\0" + json.dumps(_normalize_arg(args), sort_keys=True, default=str)
 
 
 def _parse_tool_call_cap() -> int | None:
@@ -228,6 +255,9 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
         # naturally does the right thing on the very first chunk either way.
         self._tool_turn_id: str | None = None
         self._tool_rounds_this_turn = 0
+        # Signatures of the calls already executed this turn (reset with the
+        # round counter): an identical repeat is answered, not run again.
+        self._seen_tool_calls: set[str] = set()
         # Whether the model has already spoken (text forwarded to TTS) in the
         # current tool round of this turn. In the upstream base class, a
         # ToolCall event first flushes the buffered sentences as a text-only
@@ -276,6 +306,7 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
         if turn_id != self._tool_turn_id:
             self._tool_turn_id = turn_id
             self._tool_rounds_this_turn = 0
+            self._seen_tool_calls = set()
         self._tool_rounds_this_turn += 1
         return self._tool_rounds_this_turn
 
@@ -366,8 +397,38 @@ class LMOutputProcessor(BaseHandler[LLMOut, TTSIn]):
                         continue
                 else:
                     args = {}
+                signature = None
+                if tool_call.name in _REPEAT_GUARDED_TOOLS:
+                    signature = _call_signature(tool_call.name, args)
+                    if signature in self._seen_tool_calls:
+                        logger.warning(
+                            "LMOutputProcessor: duplicate %s call in turn=%s, not executed again",
+                            tool_call.name,
+                            lm_output.turn_id,
+                        )
+                        try:
+                            chat.append_tool_output(
+                                tool_call.call_id,
+                                RealtimeConversationItemFunctionCallOutput(
+                                    type="function_call_output",
+                                    id=_generate_id("fco"),
+                                    call_id=tool_call.call_id,
+                                    output=_SYNTHETIC_DUPLICATE_CALL_OUTPUT,
+                                ),
+                            )
+                            resolved_any = True
+                        except Exception:
+                            logger.exception(
+                                "LMOutputProcessor: failed to record duplicate-call output for %s",
+                                tool_call.name,
+                            )
+                        continue
                 try:
                     result = voice_tools.execute(tool_call.name, args)
+                    # Recorded only after a run that did not raise: a call that
+                    # failed may be retried.
+                    if signature is not None:
+                        self._seen_tool_calls.add(signature)
                     chat.append_tool_output(
                         tool_call.call_id,
                         RealtimeConversationItemFunctionCallOutput(

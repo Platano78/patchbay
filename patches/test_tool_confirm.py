@@ -75,6 +75,8 @@ def _isolate(monkeypatch):
     monkeypatch.setattr(vt, "_CONSEQUENTIAL_DROPINS", set())
     monkeypatch.setattr(vt, "_CONFIRM_REFUSED", None)
     monkeypatch.setattr(vt, "_CONFIRM_CONFIRMED", None)
+    monkeypatch.setattr(vt, "_USER_UTTERANCES", 0)
+    monkeypatch.setattr(vt, "_CONFIRM_REFUSED_AT", 0)
     yield
 
 
@@ -138,6 +140,7 @@ def test_confirm_then_same_call_with_same_arg_runs(monkeypatch):
     vt._CONFIRM_NAMES = {"get_weather"}
 
     vt.execute("get_weather", {"place": "Tokyo"})
+    vt.note_user_utterance()  # the user answers between the refusal and the confirm
     assert "confirmed" in vt.execute("confirm_action", {"action": "get_weather"}).lower()
 
     assert re.fullmatch(_DONE_TOKYO, vt.execute("get_weather", {"place": "Tokyo"}))
@@ -151,6 +154,7 @@ def test_confirmation_token_is_single_use(monkeypatch):
     vt._CONFIRM_NAMES = {"get_weather"}
 
     vt.execute("get_weather", {"place": "Tokyo"})
+    vt.note_user_utterance()  # the user answers between the refusal and the confirm
     vt.execute("confirm_action", {"action": "get_weather"})
     assert re.fullmatch(_DONE_TOKYO, vt.execute("get_weather", {"place": "Tokyo"}))
 
@@ -166,6 +170,7 @@ def test_confirmation_is_scoped_to_the_refused_argument(monkeypatch):
     vt._CONFIRM_NAMES = {"send_to_hermes"}
 
     vt.execute("send_to_hermes", {"message": "A"})
+    vt.note_user_utterance()  # the user answers between the refusal and the confirm
     vt.execute("confirm_action", {"action": "send_to_hermes"})
 
     out = vt.execute("send_to_hermes", {"message": "B"})
@@ -179,6 +184,7 @@ def test_confirm_action_naming_a_never_refused_tool_confirms_nothing(monkeypatch
     _record("get_weather", monkeypatch)
     vt._CONFIRM_NAMES = {"get_weather"}
 
+    vt.note_user_utterance()  # the user answers between the refusal and the confirm
     out = vt.execute("confirm_action", {"action": "get_weather"})
     assert "waiting" in out.lower(), "nothing was refused, so nothing could be confirmed"
     assert vt._CONFIRM_CONFIRMED is None
@@ -196,10 +202,12 @@ def test_confirm_action_naming_a_different_tool_confirms_nothing(monkeypatch):
 
     vt.execute("get_weather", {"place": "Tokyo"})
 
+    vt.note_user_utterance()  # the user answers between the refusal and the confirm
     vt.execute("confirm_action", {"action": "send_to_hermes"})
     assert vt._CONFIRM_CONFIRMED is None
 
     # The original refusal stands: the right name still works afterwards.
+    vt.note_user_utterance()  # the user answers between the refusal and the confirm
     vt.execute("confirm_action", {"action": "get_weather"})
     assert vt._CONFIRM_CONFIRMED == ("get_weather", "Tokyo")
 
@@ -238,6 +246,7 @@ def test_consequential_dropin_is_gated(monkeypatch, tmp_path):
     assert calls == []
     assert "confirm_action" in out
 
+    vt.note_user_utterance()  # the user answers between the refusal and the confirm
     vt.execute("confirm_action", {"action": "send_sms"})
     assert vt.execute("send_sms", {"message": "hi"}) == "done: 'hi'"
     assert calls == [("send_sms", "hi")]
@@ -254,6 +263,7 @@ def test_confirm_action_is_never_gated_even_when_named(monkeypatch):
 
     assert "confirm_action" not in vt._CONFIRM_NAMES
     vt.execute("get_weather", {"place": "Tokyo"})
+    vt.note_user_utterance()  # the user answers between the refusal and the confirm
     vt.execute("confirm_action", {"action": "get_weather"})
     assert vt._CONFIRM_CONFIRMED == ("get_weather", "Tokyo"), (
         "confirm_action was gated; the refusal/confirm pair would be unbreakable"
@@ -290,3 +300,35 @@ def test_confirm_action_arms_on_probe_path_only_when_something_is_gated(monkeypa
     armed = {t["name"] for t in vt.get_tool_defs()}
     assert "confirm_action" not in armed
     assert "confirm_action" not in vt._ARMED_NAMES
+
+
+# ── the confirmation must come from the user, not the model ──────────────────
+
+def test_confirm_in_the_same_utterance_window_is_refused_and_refusal_stands(monkeypatch):
+    calls = _record("send_to_hermes", monkeypatch)
+    vt._CONFIRM_NAMES = {"send_to_hermes"}
+
+    first = vt.execute("send_to_hermes", {"message": "A"})
+    assert "only their yes counts" in first
+    # the model tries to confirm itself, with no user utterance in between
+    out = vt.execute("confirm_action", {"action": "send_to_hermes"})
+    assert out == (
+        "The user hasn't answered yet. Ask them, and call confirm_action only after they say yes."
+    )
+    assert vt._CONFIRM_CONFIRMED is None
+    # the retry is still refused, and calls nothing
+    assert "confirm_action" in vt.execute("send_to_hermes", {"message": "A"})
+    assert calls == []
+
+    # the user speaks: now the confirmation counts
+    vt.note_user_utterance()
+    assert "confirmed" in vt.execute("confirm_action", {"action": "send_to_hermes"}).lower()
+    assert vt.execute("send_to_hermes", {"message": "A"}) == "done: 'A'"
+    assert calls == [("send_to_hermes", "A")]
+
+
+def test_note_user_utterance_counts_monotonically():
+    before = vt._USER_UTTERANCES
+    vt.note_user_utterance()
+    vt.note_user_utterance()
+    assert vt._USER_UTTERANCES == before + 2

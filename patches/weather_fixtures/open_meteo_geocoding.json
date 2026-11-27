@@ -1,0 +1,569 @@
+{
+ "New Jersey": [
+  {
+   "name": "New Jersey",
+   "latitude": 10.23333,
+   "longitude": -61.63333,
+   "feature_code": "PPL",
+   "admin1": "Siparia Regional Corporation",
+   "country": "Trinidad and Tobago",
+   "country_code": "TT"
+  },
+  {
+   "name": "New Jersey",
+   "latitude": 47.19947,
+   "longitude": -65.20639,
+   "feature_code": "PPL",
+   "admin1": "New Brunswick",
+   "country": "Canada",
+   "country_code": "CA"
+  },
+  {
+   "name": "New Jersey Steel Helistop",
+   "latitude": 40.48622,
+   "longitude": -74.32154,
+   "feature_code": "AIRP",
+   "admin1": "New Jersey",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "New Jersey Bell CDC 11 Heliport",
+   "latitude": 40.23817,
+   "longitude": -74.31931,
+   "feature_code": "AIRH",
+   "admin1": "New Jersey",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "New Jersey Wildlife and Game Refuge",
+   "latitude": 40.06206,
+   "longitude": -74.40821,
+   "feature_code": "PRK",
+   "admin1": "New Jersey",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "New Jersey Turnpike Authority Heliport",
+   "latitude": 39.95567,
+   "longitude": -74.91906,
+   "feature_code": "AIRH",
+   "admin1": "New Jersey",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "New Jersey Sports and Exposition Authority",
+   "latitude": 40.80954,
+   "longitude": -74.08014,
+   "feature_code": "AIRP",
+   "admin1": "New Jersey",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "New Jersey Highway Authority - Administration Building Helispot",
+   "latitude": 40.53733,
+   "longitude": -74.29765,
+   "feature_code": "AIRP",
+   "admin1": "New Jersey",
+   "country": "United States",
+   "country_code": "US"
+  }
+ ],
+ "Chicago": [
+  {
+   "name": "Chicago",
+   "latitude": 41.85003,
+   "longitude": -87.65005,
+   "feature_code": "PPLA2",
+   "population": 2664452,
+   "admin1": "Illinois",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Chicago",
+   "latitude": 22.33944,
+   "longitude": -104.15972,
+   "feature_code": "PPL",
+   "population": 9,
+   "admin1": "Jalisco",
+   "country": "Mexico",
+   "country_code": "MX"
+  },
+  {
+   "name": "Willard",
+   "latitude": 41.05311,
+   "longitude": -82.72629,
+   "feature_code": "PPL",
+   "population": 6063,
+   "admin1": "Ohio",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Craigmont",
+   "latitude": 46.24128,
+   "longitude": -116.46709,
+   "feature_code": "PPL",
+   "population": 493,
+   "admin1": "Idaho",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Chicago",
+   "latitude": -12.81722,
+   "longitude": 34.78583,
+   "feature_code": "PPL",
+   "admin1": "Niassa Province",
+   "country": "Mozambique",
+   "country_code": "MZ"
+  },
+  {
+   "name": "Chicago",
+   "latitude": 13.396,
+   "longitude": 121.0984,
+   "feature_code": "PPL",
+   "admin1": "Mimaropa",
+   "country": "Philippines",
+   "country_code": "PH"
+  },
+  {
+   "name": "Chicago",
+   "latitude": 17.4,
+   "longitude": -93.46667,
+   "feature_code": "PPL",
+   "admin1": "Tabasco",
+   "country": "Mexico",
+   "country_code": "MX"
+  },
+  {
+   "name": "Chicago",
+   "latitude": 16.33333,
+   "longitude": -94.31667,
+   "feature_code": "PPL",
+   "admin1": "Oaxaca",
+   "country": "Mexico",
+   "country_code": "MX"
+  },
+  {
+   "name": "Chicago",
+   "latitude": 17.81524,
+   "longitude": -88.31159,
+   "feature_code": "PPL",
+   "admin1": "Belize District",
+   "country": "Belize",
+   "country_code": "BZ"
+  },
+  {
+   "name": "Chicago",
+   "latitude": 14.08718,
+   "longitude": -91.60872,
+   "feature_code": "PPL",
+   "admin1": "Suchitepeque",
+   "country": "Guatemala",
+   "country_code": "GT"
+  }
+ ],
+ "Paris": [
+  {
+   "name": "Paris",
+   "latitude": 48.85341,
+   "longitude": 2.3488,
+   "feature_code": "PPLC",
+   "population": 2138551,
+   "admin1": "Île-de-France Region",
+   "country": "France",
+   "country_code": "FR"
+  },
+  {
+   "name": "Paris",
+   "latitude": 33.66094,
+   "longitude": -95.55551,
+   "feature_code": "PPLA2",
+   "population": 24782,
+   "admin1": "Texas",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Paris",
+   "latitude": 36.302,
+   "longitude": -88.32671,
+   "feature_code": "PPLA2",
+   "population": 10150,
+   "admin1": "Tennessee",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Paris",
+   "latitude": 38.2098,
+   "longitude": -84.25299,
+   "feature_code": "PPLA2",
+   "population": 9870,
+   "admin1": "Kentucky",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Paris",
+   "latitude": 39.61115,
+   "longitude": -87.69614,
+   "feature_code": "PPLA2",
+   "population": 8432,
+   "admin1": "Illinois",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Paris",
+   "latitude": 44.25979,
+   "longitude": -70.50062,
+   "feature_code": "PPLA2",
+   "population": 5073,
+   "admin1": "Maine",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Paris",
+   "latitude": 39.48087,
+   "longitude": -92.00128,
+   "feature_code": "PPLA2",
+   "population": 1176,
+   "admin1": "Missouri",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Paris",
+   "latitude": 42.22715,
+   "longitude": -111.40104,
+   "feature_code": "PPLA2",
+   "population": 506,
+   "admin1": "Idaho",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Paris",
+   "latitude": 35.29203,
+   "longitude": -93.72992,
+   "feature_code": "PPL",
+   "population": 3443,
+   "admin1": "Arkansas",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "París",
+   "latitude": 8.05267,
+   "longitude": -80.55379,
+   "feature_code": "PPLA3",
+   "population": 894,
+   "admin1": "Herrera Province",
+   "country": "Panama",
+   "country_code": "PA"
+  }
+ ],
+ "Springfield": [
+  {
+   "name": "Springfield",
+   "latitude": 37.21533,
+   "longitude": -93.29824,
+   "feature_code": "PPLA2",
+   "population": 170188,
+   "admin1": "Missouri",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Springfield",
+   "latitude": 39.80172,
+   "longitude": -89.64371,
+   "feature_code": "PPLA",
+   "population": 114394,
+   "admin1": "Illinois",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Springfield",
+   "latitude": 42.10148,
+   "longitude": -72.58981,
+   "feature_code": "PPL",
+   "population": 154341,
+   "admin1": "Massachusetts",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Springfield",
+   "latitude": 39.92423,
+   "longitude": -83.80882,
+   "feature_code": "PPLA2",
+   "population": 59680,
+   "admin1": "Ohio",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Springfield",
+   "latitude": 36.50921,
+   "longitude": -86.885,
+   "feature_code": "PPLA2",
+   "population": 16808,
+   "admin1": "Tennessee",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Springfield",
+   "latitude": 37.68534,
+   "longitude": -85.22218,
+   "feature_code": "PPLA2",
+   "population": 3055,
+   "admin1": "Kentucky",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Springfield",
+   "latitude": 32.37241,
+   "longitude": -81.3115,
+   "feature_code": "PPLA2",
+   "population": 2889,
+   "admin1": "Georgia",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Springfield",
+   "latitude": 37.40835,
+   "longitude": -102.61436,
+   "feature_code": "PPLA2",
+   "population": 1396,
+   "admin1": "Colorado",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Springfield",
+   "latitude": 44.04624,
+   "longitude": -123.02203,
+   "feature_code": "PPL",
+   "population": 60870,
+   "admin1": "Oregon",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Springfield",
+   "latitude": 38.78928,
+   "longitude": -77.1872,
+   "feature_code": "PPL",
+   "population": 30484,
+   "admin1": "Virginia",
+   "country": "United States",
+   "country_code": "US"
+  }
+ ],
+ "Georgia": [
+  {
+   "name": "Georgia",
+   "latitude": 41.99998,
+   "longitude": 43.4999,
+   "feature_code": "PCLI",
+   "population": 3935766,
+   "country": "Georgia",
+   "country_code": "GE"
+  },
+  {
+   "name": "Georgia",
+   "latitude": -18.2,
+   "longitude": 29.91667,
+   "feature_code": "PPL",
+   "admin1": "Mashonaland West",
+   "country": "Zimbabwe",
+   "country_code": "ZW"
+  },
+  {
+   "name": "Georgia",
+   "latitude": 18.44961,
+   "longitude": -77.53783,
+   "feature_code": "PPL",
+   "admin1": "Trelawny Parish",
+   "country": "Jamaica",
+   "country_code": "JM"
+  },
+  {
+   "name": "Georgia",
+   "latitude": 18.41937,
+   "longitude": -78.13679,
+   "feature_code": "PPL",
+   "admin1": "Hanover Parish",
+   "country": "Jamaica",
+   "country_code": "JM"
+  },
+  {
+   "name": "Georgia",
+   "latitude": 34.45343,
+   "longitude": -86.92806,
+   "feature_code": "PPL",
+   "admin1": "Alabama",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Georgia",
+   "latitude": 38.71005,
+   "longitude": -86.57222,
+   "feature_code": "PPL",
+   "admin1": "Indiana",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Georgia",
+   "latitude": 37.62779,
+   "longitude": -98.00867,
+   "feature_code": "PPL",
+   "admin1": "Kansas",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Georgia",
+   "latitude": 29.8402,
+   "longitude": -90.98843,
+   "feature_code": "PPL",
+   "admin1": "Louisiana",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Georgia",
+   "latitude": 33.75399,
+   "longitude": -95.83136,
+   "feature_code": "PPL",
+   "admin1": "Texas",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Georgia",
+   "latitude": 40.18733,
+   "longitude": -74.28459,
+   "feature_code": "PPL",
+   "admin1": "New Jersey",
+   "country": "United States",
+   "country_code": "US"
+  }
+ ],
+ "Victoria": [
+  {
+   "name": "Victoria",
+   "latitude": 48.4359,
+   "longitude": -123.35155,
+   "feature_code": "PPLA",
+   "population": 289625,
+   "admin1": "British Columbia",
+   "country": "Canada",
+   "country_code": "CA"
+  },
+  {
+   "name": "Victoria",
+   "latitude": 22.2875,
+   "longitude": 114.14417,
+   "feature_code": "PPL",
+   "population": 956800,
+   "admin1": "Central and Western",
+   "country_code": "HK"
+  },
+  {
+   "name": "Vitória",
+   "latitude": -20.31944,
+   "longitude": -40.33778,
+   "feature_code": "PPLA",
+   "population": 312656,
+   "admin1": "Espírito Santo",
+   "country": "Brazil",
+   "country_code": "BR"
+  },
+  {
+   "name": "Las Tunas",
+   "latitude": 20.96135,
+   "longitude": -76.95192,
+   "feature_code": "PPLA",
+   "population": 203684,
+   "admin1": "Las Tunas Province",
+   "country": "Cuba",
+   "country_code": "CU"
+  },
+  {
+   "name": "Victoria",
+   "latitude": 28.80527,
+   "longitude": -97.0036,
+   "feature_code": "PPLA2",
+   "population": 67574,
+   "admin1": "Texas",
+   "country": "United States",
+   "country_code": "US"
+  },
+  {
+   "name": "Victoria",
+   "latitude": -4.62001,
+   "longitude": 55.45501,
+   "feature_code": "PPLC",
+   "population": 22881,
+   "admin1": "La Rivière Anglaise",
+   "country": "Seychelles",
+   "country_code": "SC"
+  },
+  {
+   "name": "Victoria",
+   "latitude": 36.04473,
+   "longitude": 14.24118,
+   "feature_code": "PPLA",
+   "population": 6596,
+   "admin1": "Victoria",
+   "country": "Malta",
+   "country_code": "MT"
+  },
+  {
+   "name": "Victoria",
+   "latitude": 12.19021,
+   "longitude": -61.70677,
+   "feature_code": "PPLA",
+   "population": 2256,
+   "admin1": "Saint Mark Parish",
+   "country": "Grenada",
+   "country_code": "GD"
+  },
+  {
+   "name": "Durango",
+   "latitude": 24.02032,
+   "longitude": -104.65756,
+   "feature_code": "PPL",
+   "population": 518709,
+   "admin1": "Durango",
+   "country": "Mexico",
+   "country_code": "MX"
+  },
+  {
+   "name": "Victoria",
+   "latitude": 13.17722,
+   "longitude": 121.27806,
+   "feature_code": "PPLA3",
+   "population": 52215,
+   "admin1": "Mimaropa",
+   "country": "Philippines",
+   "country_code": "PH"
+  }
+ ]
+}

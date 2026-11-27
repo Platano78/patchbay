@@ -327,7 +327,7 @@ def test_set_model_valid_name_swaps_and_rearms(monkeypatch):
     assert ok is True
     assert err == ""
     assert gate._model_arg == "alexa"
-    assert gate._model is None  # dropped -- lazy-reloads on the next feed()
+    assert gate._model is fake  # the picked model is loaded up front, not on the next feed()
     assert gate.awake is False  # rearm() fired
 
 
@@ -374,6 +374,7 @@ def test_set_model_with_own_display_name_preserves_custom_path(monkeypatch, tmp_
     monkeypatch.setenv("VOICE_WAKE_WORD_MODEL", str(custom))
     gate = wg.WakewordGate()
     monkeypatch.setattr(gate, "available_models", lambda: ["hey_jarvis", "my_wake"])
+    monkeypatch.setattr(gate, "_load_model", lambda: FakeModel())
 
     ok, err = gate.set_model(gate.model_name)
 
@@ -385,7 +386,7 @@ def test_set_model_with_own_display_name_preserves_custom_path(monkeypatch, tmp_
 
 def test_set_model_with_own_display_name_still_reloads_and_rearms(monkeypatch, tmp_path):
     """Preserving the path must not cost the explicit-user-action semantics: the
-    model is still dropped for a lazy reload and the gate still goes back to sleep."""
+    model is still reloaded and the gate still goes back to sleep."""
     custom = tmp_path / "my_wake_v1.0.onnx"
     custom.write_bytes(b"")
     monkeypatch.setenv("VOICE_WAKE_WORD_MODEL", str(custom))
@@ -394,11 +395,12 @@ def test_set_model_with_own_display_name_still_reloads_and_rearms(monkeypatch, t
     monkeypatch.setattr(gate, "_load_model", lambda: FakeModel(score=0.9))
     gate.feed(_silence(wg._FRAME_SAMPLES))
     assert gate.awake is True
+    before = gate._model
 
     ok, _ = gate.set_model("my_wake")
 
     assert ok is True
-    assert gate._model is None
+    assert gate._model is not None and gate._model is not before
     assert gate.awake is False
 
 
@@ -409,6 +411,7 @@ def test_set_model_to_a_different_known_name_still_swaps(monkeypatch, tmp_path):
     monkeypatch.setenv("VOICE_WAKE_WORD_MODEL", str(custom))
     gate = wg.WakewordGate()
     monkeypatch.setattr(gate, "available_models", lambda: ["hey_jarvis", "my_wake"])
+    monkeypatch.setattr(gate, "_load_model", lambda: FakeModel())
 
     ok, err = gate.set_model("hey_jarvis")
 
@@ -490,6 +493,7 @@ def test_state_off_when_disabled(monkeypatch):
 def test_state_asleep_when_enabled_not_awake(monkeypatch):
     monkeypatch.setenv("VOICE_WAKE_WORD", "1")
     monkeypatch.setattr(wg, "_openwakeword_installed", lambda: True)
+    monkeypatch.setattr(wg.WakewordGate, "_load_model", lambda self: FakeModel())
     gate = wg.WakewordGate()
     assert gate.state() == "asleep"
 
@@ -497,6 +501,7 @@ def test_state_asleep_when_enabled_not_awake(monkeypatch):
 def test_state_awake_when_enabled_and_awake(monkeypatch):
     monkeypatch.setenv("VOICE_WAKE_WORD", "1")
     monkeypatch.setattr(wg, "_openwakeword_installed", lambda: True)
+    monkeypatch.setattr(wg.WakewordGate, "_load_model", lambda self: FakeModel())
     gate = wg.WakewordGate()
     gate._awake = True
     assert gate.state() == "awake"
@@ -545,6 +550,7 @@ def test_boot_enable_without_openwakeword_warns_once_and_stays_off(monkeypatch, 
 def test_boot_enable_with_openwakeword_arms(monkeypatch, caplog):
     monkeypatch.setenv("VOICE_WAKE_WORD", "1")
     monkeypatch.setattr(wg, "_openwakeword_installed", lambda: True)
+    monkeypatch.setattr(wg.WakewordGate, "_load_model", lambda self: FakeModel())
     with caplog.at_level("WARNING", logger=wg.logger.name):
         gate = wg.WakewordGate()
     assert gate.enabled is True
@@ -602,7 +608,10 @@ def test_real_openwakeword_smoke():
     os.environ["VOICE_WAKE_WORD"] = "1"
     try:
         gate = wg.WakewordGate()
-        assert gate.enabled is True
+        # The default model must load at construction: a gate that cannot load its
+        # model switches itself off (enabled False) instead of failing open.
+        assert gate.enabled is True and gate.available is True
+        assert gate._model is not None
 
         rng_bytes = os.urandom(16000 * 2 * 2)  # 2s of noise, int16 mono 16kHz
         for i in range(0, len(rng_bytes), 1024):
@@ -611,3 +620,230 @@ def test_real_openwakeword_smoke():
         assert gate.awake is False
     finally:
         os.environ.pop("VOICE_WAKE_WORD", None)
+
+
+# ── a model that cannot load must not look like a working gate ───────────
+
+
+def _armed(monkeypatch, loader):
+    monkeypatch.setenv("VOICE_WAKE_WORD", "1")
+    monkeypatch.setattr(wg, "_openwakeword_installed", lambda: True)
+    monkeypatch.setattr(wg.WakewordGate, "_load_model", loader)
+
+
+def _boom(self):
+    raise RuntimeError("Load model from hey_jarvis failed")
+
+
+def test_boot_with_unloadable_model_switches_gate_off_and_says_why(monkeypatch, caplog):
+    _armed(monkeypatch, _boom)
+    with caplog.at_level("WARNING", logger=wg.logger.name):
+        gate = wg.WakewordGate()
+    assert gate.enabled is False
+    assert gate.state() == "off"
+    assert gate.available is False
+    assert "hey_jarvis" in gate.UNAVAILABLE_REASON
+    assert "Load model from hey_jarvis failed" in gate.UNAVAILABLE_REASON
+    assert "VOICE_WAKE_WORD_MODEL" in gate.UNAVAILABLE_REASON
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert len(warnings) == 1
+    assert "hey_jarvis" in warnings[0].getMessage()
+    # the class-level text is untouched for other instances
+    assert "not installed" in wg.WakewordGate.UNAVAILABLE_REASON
+
+
+def test_boot_with_loadable_model_keeps_it_for_feed(monkeypatch):
+    fake = FakeModel()
+    _armed(monkeypatch, lambda self: fake)
+    gate = wg.WakewordGate()
+    assert gate.enabled is True and gate.available is True
+    gate.feed(_silence(wg._FRAME_SAMPLES))
+    assert len(fake.frames) == 1
+
+
+def test_toggling_on_with_unloadable_model_switches_off_not_open(monkeypatch):
+    monkeypatch.delenv("VOICE_WAKE_WORD", raising=False)
+    monkeypatch.setattr(wg, "_openwakeword_installed", lambda: True)
+    monkeypatch.setattr(wg.WakewordGate, "_load_model", _boom)
+    gate = wg.WakewordGate()
+    assert gate.available is True  # nothing probed yet
+    gate.enabled = True  # what BrainControl does, then rearm()
+    gate.rearm()
+    assert gate.enabled is False
+    assert gate.available is False
+    assert gate.awake is False and gate._load_failed is False
+
+
+def test_set_model_that_cannot_load_is_rejected_and_keeps_the_working_one(monkeypatch):
+    good = FakeModel()
+
+    def loader(self):
+        if self._model_arg == "broken":
+            raise RuntimeError("no such file")
+        return good
+
+    _armed(monkeypatch, loader)
+    gate = wg.WakewordGate()
+    monkeypatch.setattr(gate, "available_models", lambda: ["hey_jarvis", "broken"])
+    assert gate.enabled is True
+
+    ok, err = gate.set_model("broken")
+
+    assert ok is False
+    assert "broken" in err and "no such file" in err
+    assert gate._model_arg == "hey_jarvis"
+    assert gate._model is good
+    assert gate.enabled is True and gate.available is True
+    assert gate.UNAVAILABLE_REASON == wg.WakewordGate.UNAVAILABLE_REASON
+
+
+# ── openwakeword <0.5 only loads files: bare names resolve to the wheel's ──
+
+
+@pytest.fixture()
+def fake_old_openwakeword(monkeypatch, tmp_path):
+    """A stand-in for the 0.4.x package: bundled models under resources/models,
+    and a Model that takes only file paths (and rejects `wakeword_models`
+    with the TypeError the real one raises)."""
+    pkg = tmp_path / "openwakeword"
+    models = pkg / "resources" / "models"
+    models.mkdir(parents=True)
+    for f in ("hey_jarvis_v0.1.onnx", "alexa_v0.1.onnx", "melspectrogram.onnx", "embedding_model.onnx"):
+        (models / f).write_bytes(b"")
+
+    class OldModel:
+        def __init__(self, wakeword_model_paths=None, **kwargs):
+            if "wakeword_models" in kwargs:
+                raise TypeError("AudioFeatures.__init__() got an unexpected keyword argument 'wakeword_models'")
+            for path in wakeword_model_paths:
+                if not os.path.isfile(path):
+                    raise FileNotFoundError(f"Load model from {path} failed")
+            self.paths = list(wakeword_model_paths)
+
+    mod = types.ModuleType("openwakeword")
+    mod.__file__ = str(pkg / "__init__.py")
+    mod.Model = OldModel
+    monkeypatch.setitem(sys.modules, "openwakeword", mod)
+    return models
+
+
+def test_old_openwakeword_bare_name_resolves_to_bundled_file(monkeypatch, fake_old_openwakeword):
+    monkeypatch.delenv("VOICE_WAKE_WORD", raising=False)
+    gate = wg.WakewordGate()
+    model = gate._load_model()
+    assert model.paths == [str(fake_old_openwakeword / "hey_jarvis_v0.1.onnx")]
+
+
+def test_old_openwakeword_path_argument_passes_through_unchanged(monkeypatch, fake_old_openwakeword, tmp_path):
+    custom = tmp_path / "custom_phrase.onnx"
+    custom.write_bytes(b"")
+    monkeypatch.setenv("VOICE_WAKE_WORD_MODEL", str(custom))
+    monkeypatch.delenv("VOICE_WAKE_WORD", raising=False)
+    gate = wg.WakewordGate()
+    assert gate._load_model().paths == [str(custom)]
+
+
+def test_old_openwakeword_unknown_name_names_what_is_installed(monkeypatch, fake_old_openwakeword):
+    monkeypatch.setenv("VOICE_WAKE_WORD_MODEL", "nope")
+    monkeypatch.delenv("VOICE_WAKE_WORD", raising=False)
+    gate = wg.WakewordGate()
+    with pytest.raises(FileNotFoundError) as exc:
+        gate._load_model()
+    assert "alexa" in str(exc.value) and "hey_jarvis" in str(exc.value)
+    assert "melspectrogram" not in str(exc.value)
+
+
+def test_old_openwakeword_default_gate_loads_instead_of_failing_open(monkeypatch, fake_old_openwakeword):
+    monkeypatch.setenv("VOICE_WAKE_WORD", "1")
+    monkeypatch.setattr(wg, "_openwakeword_installed", lambda: True)
+    gate = wg.WakewordGate()
+    assert gate.enabled is True and gate.available is True
+    assert gate._model is not None and gate._load_failed is False
+
+
+# ── set_model(): a rejected pick leaves the gate exactly as it was ───────
+
+
+def _armed_awake_gate(monkeypatch, models=("hey_jarvis", "broken")):
+    """Enabled gate whose current model works and which has been woken."""
+    good = FakeModel(score=0.9)
+
+    def loader(self):
+        if self._model_arg == "broken":
+            raise RuntimeError("no such file")
+        return good
+
+    _armed(monkeypatch, loader)
+    gate = wg.WakewordGate()
+    monkeypatch.setattr(gate, "available_models", lambda: list(models))
+    gate.feed(_silence(wg._FRAME_SAMPLES))
+    assert gate.awake is True
+    return gate, good
+
+
+def test_rejected_pick_on_an_awake_gate_stays_awake(monkeypatch):
+    gate, good = _armed_awake_gate(monkeypatch)
+    ok, _ = gate.set_model("broken")
+    assert ok is False
+    assert gate.awake is True and gate.state() == "awake"
+    assert gate._model is good and gate._model_arg == "hey_jarvis"
+    assert gate.enabled is True and gate.available is True
+
+
+def test_rejected_pick_when_the_current_model_is_not_loaded_never_fails_open(monkeypatch):
+    """The restored model can be None (mid-stream predict failure, or never loaded).
+    A rejected pick must not leave an enabled gate that fails open on the next
+    feed with no panel warning: nothing is mutated, and a failing lazy load
+    switches the gate off with the reason."""
+    gate, _ = _armed_awake_gate(monkeypatch)
+    gate._model = None
+    gate._awake = False
+    monkeypatch.setattr(wg.WakewordGate, "_load_model", _boom)  # the current model is now unloadable too
+
+    ok, _ = gate.set_model("broken")
+    assert ok is False
+    gate.feed(_silence(wg._FRAME_SAMPLES))
+
+    assert gate.awake is False  # not fail-open
+    assert gate.enabled is False and gate.available is False
+    assert "hey_jarvis" in gate.UNAVAILABLE_REASON
+
+
+def test_lazy_load_failure_on_an_enabled_gate_switches_it_off_not_open(monkeypatch):
+    _armed(monkeypatch, lambda self: FakeModel())
+    gate = wg.WakewordGate()
+    gate._model = None
+    monkeypatch.setattr(wg.WakewordGate, "_load_model", _boom)
+    assert gate.feed(_silence(wg._FRAME_SAMPLES)) is None
+    assert gate.awake is False
+    assert gate.enabled is False and gate.available is False
+    assert "Load model from hey_jarvis failed" in gate.UNAVAILABLE_REASON
+
+
+def test_reselecting_the_active_model_when_the_reload_fails_is_an_error(monkeypatch):
+    gate, good = _armed_awake_gate(monkeypatch)
+    monkeypatch.setattr(wg.WakewordGate, "_load_model", _boom)
+    ok, err = gate.set_model(gate.model_name)
+    assert ok is False and "hey_jarvis" in err
+    assert gate._model is good and gate.enabled is True and gate.awake is True
+
+
+def test_pick_on_a_disabled_gate_is_probed_too(monkeypatch):
+    monkeypatch.delenv("VOICE_WAKE_WORD", raising=False)
+    monkeypatch.setattr(wg, "_openwakeword_installed", lambda: True)
+
+    def loader(self):
+        if self._model_arg == "broken":
+            raise RuntimeError("no such file")
+        return FakeModel()
+
+    monkeypatch.setattr(wg.WakewordGate, "_load_model", loader)
+    gate = wg.WakewordGate()
+    monkeypatch.setattr(gate, "available_models", lambda: ["hey_jarvis", "broken"])
+    assert gate.enabled is False
+
+    ok, err = gate.set_model("broken")
+
+    assert ok is False and "broken" in err and "no such file" in err
+    assert gate._model_arg == "hey_jarvis"
+    assert gate.enabled is False and gate.available is True

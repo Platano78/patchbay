@@ -68,8 +68,8 @@ shared by both OpenAI-style handlers) instead of `responses-api`.
   calls need the network. The import direction is one-way — `brain_control.py`
   imports FROM `brain_lanes.py` (`get_lane`, `resolve_entry`, `resolve_api_key`,
   `missing_key_error`), never the reverse — that's what keeps this CLI
-  standalone. It prints; it never writes `brains.json`, same ruling as
-  `brain_discovery.py`: the file is the user's, and a tool that edits it
+  standalone. It prints; it never writes `brains.json`, like
+  `brain_discovery.py`: the file is yours, and a tool that edits it
   behind their back is a tool they cannot trust with their API keys.
 
 - `brain_control.py` — `speech_to_speech/brain_control.py`. Defines
@@ -298,9 +298,12 @@ shared by both OpenAI-style handlers) instead of `responses-api`.
   pipeline stays deaf until the wake phrase scores above threshold, then
   wakes once for the rest of that session (`WakewordGate.reset()` re-arms it
   on the next session, called next to the `SESSION_END` put on last-client
-  disconnect). Fail-open by design: any exception loading the model or
-  scoring a frame is logged once and treated as an immediate, permanent
-  wake — a broken detector must never brick the assistant. The module
+  disconnect). A model that cannot load when the gate is enabled (at boot,
+  on the panel toggle, or on a model pick) turns the gate off and reports why
+  through `unavailable_reason`; a pick that cannot load changes nothing. Only
+  a scoring failure after a successful load fails open (logged once, treated
+  as a permanent wake for the session), so a broken detector never bricks the
+  assistant. The module
   itself never imports `openwakeword` at module scope (lazy import inside
   `_load_model`), so it stays importable/testable with the dependency
   absent. Failing open is only for a detector that breaks: if
@@ -313,10 +316,14 @@ shared by both OpenAI-style handlers) instead of `responses-api`.
 
   Deploy prerequisite (only if the wake word is actually used):
   `pip install openwakeword onnxruntime` into `$INSTALL_DIR/.venv`, then
-  one-time model download:
-  `$INSTALL_DIR/.venv/bin/python3 -c "import openwakeword.utils; openwakeword.utils.download_models()"`
-  (openwakeword >=0.5 ships no models in the wheel; older 0.4.x bundles the
-  pretrained onnx models already and this step is a no-op). openWakeWord's
+  on openwakeword >=0.5 (what pip picks on Python 3.10/3.11) a one-time model download:
+  `$INSTALL_DIR/.venv/bin/python3 -c "import openwakeword.utils; openwakeword.utils.download_models()"`.
+  On Python 3.12+ pip falls back to 0.4.x, which bundles the pretrained onnx
+  models and has no download function (the call raises `AttributeError`; skip
+  it); a bare model name like `hey_jarvis` is resolved to the bundled file.
+  The model is loaded when the gate is enabled; if that fails the gate turns
+  itself off and `unavailable_reason` names the model and the fix, rather than
+  failing open behind a toggle that reads as on. openWakeWord's
   code is Apache-2.0, but those pre-trained models, `hey_jarvis` included,
   are CC BY-NC-SA 4.0 — non-commercial use only. Client-side,
   the webclient shows a `zzz — say "<phrase>" to wake` status while asleep
@@ -399,7 +406,7 @@ shared by both OpenAI-style handlers) instead of `responses-api`.
   `speech_to_speech` import), like `think_filter.py`.
 
 - `voice_affect.py` (new) — `speech_to_speech/voice_affect.py`. Per-turn
-  affect instruct seam (owner ruling 2026-09-13). The brain prefixes each
+  affect instruct seam The brain prefixes each
   reply with a short delivery note, `[affect: what this moment is - how it
   should sound]`; `TurnAffectTracker.feed()` strips the marker before the
   text reaches the client transcript or the TTS, and the note rides the
@@ -433,8 +440,7 @@ shared by both OpenAI-style handlers) instead of `responses-api`.
   the word "affect" never leaked into a reply (0/24), 70 real brain turns
   replay clean. With the spoken text held identical (n=20/arm), the instruct
   buys **+12% duration** and a register shift — it is a DELIVERY channel,
-  not an event generator. See Law 10 in
-  `docs/research/voice-stack-review-2026-08-11.md` (maintainer notes, not in the public export).
+  not an event generator.
   Dependency-free (stdlib only, no `speech_to_speech` import), like
   `voice_rules.py`/`think_filter.py`.
 
@@ -567,8 +573,7 @@ not be able to stop the assistant from booting. Where a value can be parsed
 later instead, do that (`_WSS_PORT_RAW` stays a string until it is inside the
 TLS try-block).
 
-Consolidating the HTTP clients was considered and rejected on the same
-grounds: the `httpx` call sites are one-liners whose timeouts are chosen per
+The HTTP clients are deliberately not consolidated: the `httpx` call sites are one-liners whose timeouts are chosen per
 site — 5.0 s for an optional agent-delegate MCP call (`hermes_cockpit.py`), 2.0 s for a QMD
 query and 1.5 s for a health probe (`voice_tools.py`), 3.0 s for a brain
 reachability probe (`brain_control.py`), and a streamed completion that
@@ -796,6 +801,11 @@ sudo systemctl restart patchbay
 
 To go further and return the framework itself to pristine upstream, discard the overlay
 in the install tree (`$INSTALL_DIR` is an editable checkout, so this is a plain revert):
+
+This throws away every uncommitted change under `src/speech_to_speech`, including
+edits you made yourself, not only what `apply.sh` copied in. First run
+`git -C "$INSTALL_DIR" status --short src/speech_to_speech`: if it lists changes you
+did not get from `apply.sh`, stop and back them up (or ask the user) before going on.
 
 ```bash
 cd "$INSTALL_DIR"                       # default ~/speech-to-speech-main

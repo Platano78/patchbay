@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import functools
 import logging
+import math
 import os
 import re
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -76,6 +78,10 @@ _DECISION_TIMEOUT_S = 1.5
 # tripping execute()'s "timed out" refusal.
 _FANOUT_BUDGET_S = 5.0
 _SEARCH_TIMEOUT_S = 10.0
+# sports_scores may fetch three scoreboard days one after another.
+_SPORTS_TIMEOUT_S = 9.0
+_SPORTS_REQUEST_TIMEOUT_S = 3.0
+_SPORTS_MAX_GAMES = 8
 _MOOD_TIMEOUT_S = 2.0
 _HERMES_DELEGATE_TIMEOUT_S = 3.0
 _HERMES_STATUS_TIMEOUT_S = 2.0
@@ -166,11 +172,30 @@ _UNSET = object()
 _CONFIRM_LOCK = threading.Lock()
 _CONFIRM_REFUSED: Optional[tuple[str, Any]] = None
 _CONFIRM_CONFIRMED: Optional[tuple[str, Any]] = None
+# The confirmation must come from the user, not the model: a count of final
+# user utterances (bumped by note_user_utterance() from the pipeline's
+# transcription seam) is stored with each refusal, and confirm_action only
+# succeeds once the count has advanced past it, i.e. the user has spoken since.
+_USER_UTTERANCES = 0
+_CONFIRM_REFUSED_AT = 0
 # Spoken back to the model when a consequential call is refused.
 _CONFIRM_REFUSAL = (
-    "That needs your explicit go-ahead before I can do it. If the user "
-    "confirms, call confirm_action with this action's name, then retry."
+    "That needs your explicit go-ahead before I can do it. Ask the user and "
+    "wait for their answer; only their yes counts. If they say yes, call "
+    "confirm_action with this action's name, then retry."
 )
+_CONFIRM_NOT_ANSWERED = (
+    "The user hasn't answered yet. Ask them, and call confirm_action only "
+    "after they say yes."
+)
+
+
+def note_user_utterance() -> None:
+    """Record that the user has just finished speaking (one final transcript).
+    Thread-safe; called from the pipeline's transcription seam."""
+    global _USER_UTTERANCES
+    with _CONFIRM_LOCK:
+        _USER_UTTERANCES += 1
 
 
 def set_cockpit(cockpit: Any) -> None:
@@ -235,15 +260,33 @@ _WMO_WEATHER: dict[int, str] = {
     99: "thunderstorms with heavy hail",
 }
 
+# league -> ESPN's <sport>/<league> path segment.
+_SPORTS_LEAGUES = {
+    "nba": "basketball/nba",
+    "nfl": "football/nfl",
+    "mlb": "baseball/mlb",
+    "nhl": "hockey/nhl",
+    "wnba": "basketball/wnba",
+    "mls": "soccer/usa.1",
+    "ncaaf": "football/college-football",
+    "ncaam": "basketball/mens-college-basketball",
+    "epl": "soccer/eng.1",
+}
+
 TOOL_DEFS: list[dict] = [
     {
         "type": "function",
         "name": "get_weather",
         "description": (
-            "Get the current weather for a place. Use when the user asks about "
+            "Get the weather for a place: now (with today's high and low), "
+            "later today, tonight, or tomorrow. Use when the user asks about "
             "weather, temperature, or conditions somewhere. If the user shares "
-            "their location, place may be omitted to use it. Answer in 1-2 "
-            "spoken sentences."
+            "their location, place may be omitted to use it. Set when to "
+            "'tomorrow' for tomorrow, 'tonight' for tonight or overnight, "
+            "'today' for later today or today's high; leave it out for right "
+            "now. Units follow the place (Fahrenheit in the US, Celsius "
+            "elsewhere); set units only when the user asks for a specific one. "
+            "Answer in 1-2 spoken sentences."
         ),
         "parameters": {
             "type": "object",
@@ -254,7 +297,17 @@ TOOL_DEFS: list[dict] = [
                         "City or place name, e.g. 'Tokyo' or 'Paris, France'. "
                         "Optional if the user's location is known."
                     ),
-                }
+                },
+                "when": {
+                    "type": "string",
+                    "enum": ["now", "today", "tonight", "tomorrow"],
+                    "description": "Which time to report. Default now.",
+                },
+                "units": {
+                    "type": "string",
+                    "enum": ["fahrenheit", "celsius"],
+                    "description": "Only when the user asks for a specific unit.",
+                },
             },
             "required": [],
         },
@@ -264,9 +317,11 @@ TOOL_DEFS: list[dict] = [
         "name": "web_search",
         "description": (
             "Search the public web for current events, software versions and "
-            "releases, sports scores, news, prices, or anything that may have "
-            "changed recently — prefer this over answering from memory for "
-            "time-sensitive facts. Answer in 1-2 spoken sentences summarizing "
+            "releases, news, prices, or anything that may have changed "
+            "recently — prefer this over answering from memory for "
+            "time-sensitive facts. For game scores and schedules in the "
+            "leagues sports_scores covers, use sports_scores instead; a web "
+            "search returns no scores. Answer in 1-2 spoken sentences summarizing "
             "what you find. The result links appear on the user's screen to "
             "click — when the user asks where to get, download, or buy "
             "something, mention the links are on screen instead of reading "
@@ -278,6 +333,34 @@ TOOL_DEFS: list[dict] = [
                 "query": {"type": "string", "description": "The search query."}
             },
             "required": ["query"],
+        },
+    },
+    {
+        "type": "function",
+        "name": "sports_scores",
+        "description": (
+            "Get game scores and schedules for one league: final scores, live "
+            "scores, and start times of games not yet played. Use for 'what "
+            "were the scores', 'did the Knicks win', 'when do the Lakers play'. "
+            "Pass team to get one team's game. day is today unless the user "
+            "says yesterday, tomorrow or a date. Read the result as 1-3 short "
+            "spoken sentences, not the whole list."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "league": {
+                    "type": "string",
+                    "enum": list(_SPORTS_LEAGUES),
+                    "description": "nba, nfl, mlb, nhl, wnba, mls, ncaaf (college football), ncaam (men's college basketball) or epl (English Premier League).",
+                },
+                "team": {"type": "string", "description": "Team name, city or abbreviation, e.g. 'Knicks'. Optional."},
+                "day": {
+                    "type": "string",
+                    "description": "today, yesterday, tomorrow, or YYYY-MM-DD. Default today.",
+                },
+            },
+            "required": ["league"],
         },
     },
     {
@@ -413,10 +496,10 @@ TOOL_DEFS: list[dict] = [
         "type": "function",
         "name": "send_to_hermes",
         "description": (
-            "Send a quick spoken message or follow-up to Hermes — use when the "
-            "user says 'tell Hermes', 'ask Hermes', 'let Hermes know', or answers "
-            "a question Hermes asked. For a NEW multi-step task use "
-            "delegate_to_hermes instead."
+            "Post a note into the user's own chat with their Hermes agent. "
+            "Hermes does NOT act on these notes; it is a message log, not a "
+            "command. For anything Hermes should DO (a task, a question to "
+            "work out, a follow-up action) use delegate_to_hermes instead."
         ),
         "parameters": {
             "type": "object",
@@ -505,7 +588,7 @@ TOOL_DEFS: list[dict] = [
 
 # Availability tiers used by get_tool_defs() to arm only the tools whose
 # backing service is actually reachable at pipeline start.
-CORE_TOOLS = ("get_weather", "web_search", "set_mood")
+CORE_TOOLS = ("get_weather", "web_search", "sports_scores", "set_mood")
 QMD_TOOLS = ("knowledge_lookup",)
 FAULKNER_TOOLS = ("decision_lookup",)
 HERMES_TOOLS = ("delegate_to_hermes", "hermes_status", "send_to_hermes")
@@ -943,11 +1026,12 @@ _RESULT_CHARS = {
     "knowledge_lookup": _KNOWLEDGE_RESULT_CHARS,
     "decision_lookup": _DECISION_RESULT_CHARS,
     "web_search": _WEB_SEARCH_RESULT_CHARS,
+    "sports_scores": _WEB_SEARCH_RESULT_CHARS,
 }
 
 # Built-ins whose result is about "now"; a successful result is stamped with
 # the time it was fetched so a stale one in the history is recognisable later.
-_TIME_SENSITIVE_BUILTINS = {"web_search", "get_weather"}
+_TIME_SENSITIVE_BUILTINS = {"web_search", "get_weather", "sports_scores"}
 
 
 # Kept as a shared constant so the runner's own fallback refusal (when
@@ -957,23 +1041,238 @@ _TIME_SENSITIVE_BUILTINS = {"web_search", "get_weather"}
 _WEATHER_PLACE_ARG_LABEL = "a place name for the weather"
 
 
-def _run_get_weather(place: str | None) -> str:
+_GEOCODE_CANDIDATES = 10
+
+# How well known a place of this feature_code (GeoNames) is, lower = first.
+# Countries, first-order regions and capitals beat ordinary towns, which beat
+# small populated places and everything else (airports, parks, ...).
+_FEATURE_TIER = {
+    "PCLI": 0, "PCLD": 0, "PCLF": 0, "PCLS": 0, "PCL": 0, "ADM1": 0, "PPLC": 0, "PPLA": 0,
+    "ADM2": 1, "PPLA2": 1, "PPLA3": 2, "PPLA4": 2, "PPLG": 2,
+}
+_FEATURE_TIER_OTHER = 3
+
+
+def _fold_name(text: str | None) -> str:
+    """Casefold with whitespace collapsed; accents are kept on purpose
+    ("Vitória" is not "Victoria")."""
+    return " ".join((text or "").split()).casefold()
+
+
+def _geocode_rank(query: str, indexed_hit: tuple[int, dict]) -> tuple:
+    index, hit = indexed_hit
+    tier = _FEATURE_TIER.get(hit.get("feature_code"), _FEATURE_TIER_OTHER)
+    # A place literally named as asked, then tier, then the bigger place, then
+    # the API's own order.
+    return (_fold_name(hit.get("name")) != _fold_name(query), tier, -(hit.get("population") or 0), index)
+
+
+def _pick_place(place: str, results: list[dict]) -> tuple[float, float, str, str | None]:
+    """Choose among geocoding candidates the way a person would for a bare
+    name, and return (lat, lon, spoken label, country code). The label carries the region
+    when several candidates share the name, so a wrong pick is audible."""
+    ranked = sorted(enumerate(results), key=lambda item: _geocode_rank(place, item))
+    hit = ranked[0][1]
+    if not hit.get("population"):
+        # Nothing here is a known town. If a candidate sits inside a region
+        # named exactly like the query ("New Jersey" airports in the region
+        # New Jersey), the caller asked for the region, which this API does not
+        # return as a result of its own: use that region.
+        wanted = place.strip().casefold()
+        for _, cand in ranked:
+            region = cand.get("admin1")
+            if region and region.casefold() == wanted:
+                label = region
+                if cand.get("country"):
+                    label = f"{label}, {cand['country']}"
+                return cand["latitude"], cand["longitude"], label, cand.get("country_code")
+    name = (hit.get("name") or "").strip() or place
+    shared = sum(1 for r in results if _fold_name(r.get("name")) == _fold_name(name))
+    parts = [name]
+    if shared > 1 and hit.get("admin1"):
+        parts.append(hit["admin1"])
+    if hit.get("country"):
+        parts.append(hit["country"])
+    # "Georgia, Georgia" -> "Georgia": drop a part equal to the one before it.
+    parts = [part for i, part in enumerate(parts) if i == 0 or _fold_name(part) != _fold_name(parts[i - 1])]
+    return hit["latitude"], hit["longitude"], ", ".join(parts), hit.get("country_code")
+
+
+def _default_place() -> str | None:
+    """VOICE_DEFAULT_PLACE (a place name, or "lat,lon"), read at call time."""
+    return os.environ.get("VOICE_DEFAULT_PLACE", "").strip() or None
+
+
+def _parse_lat_lon(text: str) -> tuple[float, float] | None:
+    left, sep, right = text.partition(",")
+    if not sep:
+        return None
+    try:
+        lat, lon = float(left), float(right)
+    except ValueError:
+        return None
+    if -90 <= lat <= 90 and -180 <= lon <= 180:
+        return lat, lon
+    return None
+
+
+# Countries that officially use Fahrenheit and mph.
+_FAHRENHEIT_COUNTRIES = frozenset({"US", "BS", "BZ", "KY", "LR", "PW", "FM", "MH"})
+_WEATHER_WHEN = ("now", "today", "tonight", "tomorrow")
+_WEATHER_DAILY_FIELDS = "weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+_WEATHER_HOURLY_FIELDS = "temperature_2m,weathercode,precipitation_probability"
+
+
+def _normalize_units(value: Any) -> str | None:
+    return {"fahrenheit": "fahrenheit", "f": "fahrenheit", "celsius": "celsius", "c": "celsius"}.get(
+        str(value or "").strip().casefold()
+    )
+
+
+_WARNED_BAD_UNITS_ENV = False
+
+
+def _env_units() -> str | None:
+    global _WARNED_BAD_UNITS_ENV
+    raw = os.environ.get("VOICE_WEATHER_UNITS", "").strip()
+    units = _normalize_units(raw)
+    if raw and units is None and not _WARNED_BAD_UNITS_ENV:
+        _WARNED_BAD_UNITS_ENV = True
+        logger.warning("voice_tools: VOICE_WEATHER_UNITS=%r is not fahrenheit or celsius (ignored)", raw)
+    return units
+
+
+def _pick_units(explicit: Any, country_code: str | None) -> str:
+    """An explicit argument wins, then VOICE_WEATHER_UNITS (every place), then
+    the country rule; a place with no country (coordinates) gets Celsius."""
+    return (
+        _normalize_units(explicit)
+        or _env_units()
+        or ("fahrenheit" if (country_code or "").upper() in _FAHRENHEIT_COUNTRIES else "celsius")
+    )
+
+
+def _deg(value: float, units: str) -> str:
+    """Whole degrees in Fahrenheit, one decimal in Celsius."""
+    if units == "fahrenheit":
+        return f"{math.floor(value + 0.5)}°F"
+    return f"{value:.1f}°C"
+
+
+def _precip_phrase(chance: Any) -> str | None:
+    if chance is None:
+        return None
+    return f"a {math.floor(chance + 0.5)} percent chance of precipitation"
+
+
+def _daily_values(fc: dict, day: str) -> dict:
+    daily = fc.get("daily") or {}
+    times = daily.get("time") or []
+    if day not in times:
+        return {}
+    i = times.index(day)
+
+    def at(key: str):
+        values = daily.get(key) or []
+        return values[i] if i < len(values) else None
+
+    return {
+        "high": at("temperature_2m_max"),
+        "low": at("temperature_2m_min"),
+        "code": at("weathercode"),
+        "precip": at("precipitation_probability_max"),
+    }
+
+
+def _forecast_sentence(when: str, label: str, units: str, fc: dict) -> str:
+    current = fc.get("current_weather") or {}
+    now_s = str(current.get("time") or "")
+    daily_times = (fc.get("daily") or {}).get("time") or []
+    today = now_s[:10] or (daily_times[0] if daily_times else "")
+    try:
+        tomorrow = (date.fromisoformat(today) + timedelta(days=1)).isoformat()
+    except ValueError:
+        return _Unstamped(f"I couldn't get the forecast for {label}.")
+    if when == "tonight":
+        hour = int(now_s[11:13]) if now_s[11:13].isdigit() else 12
+        if hour < 6:
+            start, end = f"{today}T{hour:02d}:00", f"{today}T07:00"
+        elif hour >= 18:
+            start, end = f"{today}T{hour:02d}:00", f"{tomorrow}T07:00"
+        else:
+            start, end = f"{today}T18:00", f"{tomorrow}T07:00"
+        hourly = fc.get("hourly") or {}
+        times = hourly.get("time") or []
+        temps, codes_col, chance_col = (
+            hourly.get("temperature_2m") or [], hourly.get("weathercode") or [], hourly.get("precipitation_probability") or []
+        )
+
+        def at(col: list, i: int):
+            return col[i] if i < len(col) else None
+
+        rows = [
+            (ts, at(temps, i), at(codes_col, i), at(chance_col, i))
+            for i, ts in enumerate(times)
+            if start <= ts < end and at(temps, i) is not None
+        ]
+        if not rows:
+            return _Unstamped(f"I couldn't get tonight's forecast for {label}.")
+        low = min(r[1] for r in rows)
+        codes = [r[2] for r in rows if r[2] is not None]
+        code = max(set(codes), key=lambda c: (codes.count(c), c)) if codes else None
+        chances = [r[3] for r in rows if r[3] is not None]
+        parts = [f"a low of {_deg(low, units)}"]
+        values = {"code": code, "precip": max(chances) if chances else None}
+        prefix = "Tonight"
+    else:
+        day = today if when == "today" else tomorrow
+        values = _daily_values(fc, day)
+        if not values or (values.get("high") is None and values.get("low") is None):
+            return _Unstamped(f"I couldn't get the forecast for {label}.")
+        parts = []
+        if values.get("high") is not None:
+            parts.append(f"a high of {_deg(values['high'], units)}")
+        if values.get("low") is not None:
+            parts.append(f"a low of {_deg(values['low'], units)}")
+        prefix = "Today" if when == "today" else "Tomorrow"
+    if values.get("code") is not None:
+        parts.append(_WMO_WEATHER.get(values["code"], "unknown conditions"))
+    precip = _precip_phrase(values.get("precip"))
+    if precip:
+        parts.append(f"with {precip}")
+    return f"{prefix} in {label}: {', '.join(parts)}."
+
+
+def _run_get_weather(place: str | None, when: str | None = None, units: str | None = None) -> str:
+    when = str(when or "now").strip().casefold()
+    if when not in _WEATHER_WHEN:
+        return _Unstamped("I can give the weather for now, today, tonight or tomorrow.")
+    if units and _normalize_units(units) is None:
+        return _Unstamped("I can give temperatures in fahrenheit or celsius.")
+    # An explicit place wins, then the client's location, then the configured
+    # default; with none of them the caller is asked for a place.
+    default_coords = None
+    if not place and phone_context.location() is None:
+        default = _default_place()
+        if default:
+            default_coords = _parse_lat_lon(default)
+            if default_coords is None:
+                place = default
+    country_code = None
     with httpx.Client(timeout=_WEATHER_TIMEOUT_S) as client:
         if place:
             geo = client.get(
                 "https://geocoding-api.open-meteo.com/v1/search",
-                params={"name": place, "count": 1},
+                params={"name": place, "count": _GEOCODE_CANDIDATES},
             )
             geo.raise_for_status()
             results = geo.json().get("results") or []
             if not results:
                 return _Unstamped(f"I couldn't find a place called {place}.")
-            hit = results[0]
-            lat, lon = hit["latitude"], hit["longitude"]
-            label = hit.get("name", place)
-            country = hit.get("country")
-            if country:
-                label = f"{label}, {country}"
+            lat, lon, label, country_code = _pick_place(place, results)
+        elif default_coords is not None:
+            lat, lon = default_coords
+            label = "the default location"
         else:
             loc = phone_context.location()
             if loc is None:
@@ -981,24 +1280,207 @@ def _run_get_weather(place: str | None) -> str:
             lat, lon = loc
             label = "your location"
 
-        fc = client.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={"latitude": lat, "longitude": lon, "current_weather": "true"},
-        )
+        units = _pick_units(units, country_code)
+        params = {
+            "latitude": lat,
+            "longitude": lon,
+            "current_weather": "true",
+            "daily": _WEATHER_DAILY_FIELDS,
+            "hourly": _WEATHER_HOURLY_FIELDS,
+            "timezone": "auto",
+            "forecast_days": 2,
+        }
+        if units == "fahrenheit":
+            params["temperature_unit"] = "fahrenheit"
+            params["windspeed_unit"] = "mph"
+        fc = client.get("https://api.open-meteo.com/v1/forecast", params=params)
         fc.raise_for_status()
-        current = fc.json().get("current_weather") or {}
+        data = fc.json()
+        if when != "now":
+            return _forecast_sentence(when, label, units, data)
+        current = data.get("current_weather") or {}
         temp = current.get("temperature")
         wind = current.get("windspeed")
         code = current.get("weathercode")
         conditions = _WMO_WEATHER.get(code, "unknown conditions")
         if temp is None:
             return _Unstamped(f"I couldn't get current conditions for {label}.")
-        sentence = f"It's currently {temp}°C and {conditions} in {label}"
+        sentence = f"It's currently {_deg(temp, units)} and {conditions} in {label}"
         if wind is not None:
-            sentence += f", with wind around {wind} km/h."
+            wind_text = f"{math.floor(wind + 0.5)} mph" if units == "fahrenheit" else f"{wind} km/h"
+            sentence += f", with wind around {wind_text}."
         else:
             sentence += "."
+        today_values = _daily_values(data, str(current.get("time") or "")[:10])
+        if today_values.get("high") is not None and today_values.get("low") is not None:
+            sentence += (
+                f" Today's high is {_deg(today_values['high'], units)}"
+                f" and low is {_deg(today_values['low'], units)}."
+            )
         return sentence
+
+
+# Status words that mean the game is not a played final, matched in the
+# status name or description.
+_STATUS_WORDS = (
+    ("POSTPON", "postponed"),
+    ("CANCEL", "canceled"),
+    ("SUSPEND", "suspended"),
+    ("DELAY", "delayed"),
+    ("FORFEIT", "forfeit"),
+)
+
+
+def _today() -> date:
+    return datetime.now().date()
+
+
+def _day_label(day: date) -> str:
+    return f"{day:%A, %B} {day.day}"
+
+
+def _parse_sports_day(text: Any) -> date | None:
+    word = str(text or "today").strip().casefold()
+    base = _today()
+    if word in ("today", ""):
+        return base
+    if word == "yesterday":
+        return base - timedelta(days=1)
+    if word == "tomorrow":
+        return base + timedelta(days=1)
+    try:
+        return date.fromisoformat(word)
+    except ValueError:
+        return None
+
+
+# One city under several spellings: ESPN calls the Lakers' city "Los Angeles"
+# and the Clippers' "LA", and people say "Philly" or "NYC".
+_CITY_ALIASES = {
+    "la": "los angeles", "los angeles": "los angeles",
+    "ny": "new york", "nyc": "new york", "new york": "new york",
+    "sf": "san francisco", "san francisco": "san francisco",
+    "dc": "washington", "washington": "washington",
+    "philly": "philadelphia", "philadelphia": "philadelphia",
+    "vegas": "las vegas", "las vegas": "las vegas",
+}
+
+
+def _canon_city(text: str) -> str:
+    plain = " ".join(str(text or "").replace(".", "").split()).casefold()
+    return _CITY_ALIASES.get(plain, plain)
+
+
+def _team_matches(query: str, team: dict) -> bool:
+    q = " ".join(query.split()).casefold()
+    if not q:
+        return False
+    # A city query matches every team of that city, whichever way either side
+    # spells it.
+    if _canon_city(query) in _CITY_ALIASES.values() and _canon_city(team.get("location")) == _canon_city(query):
+        return True
+    fields = [
+        " ".join(str(team.get(k) or "").split()).casefold()
+        for k in ("displayName", "shortDisplayName", "name", "abbreviation", "location")
+    ]
+    if q in fields:
+        return True
+    return re.search(rf"\b{re.escape(q)}\b", fields[0]) is not None
+
+
+def _game_line(event: dict) -> str:
+    comp = (event.get("competitions") or [{}])[0]
+    teams = comp.get("competitors") or []
+    home = next((c for c in teams if c.get("homeAway") == "home"), None)
+    away = next((c for c in teams if c.get("homeAway") == "away"), None)
+    if home is None or away is None:
+        return str(event.get("name") or "A game") + "."
+    status = (event.get("status") or {}).get("type") or {}
+    state = status.get("state")
+    detail = str(status.get("shortDetail") or "")
+    status_text = f"{status.get('name') or ''} {status.get('description') or ''}".upper()
+    not_played = next((word for key, word in _STATUS_WORDS if key in status_text), None)
+
+    def short(c: dict) -> str:
+        t = c.get("team") or {}
+        return str(t.get("shortDisplayName") or t.get("displayName") or "?")
+
+    def score(c: dict) -> int | None:
+        try:
+            return int(c.get("score"))
+        except (TypeError, ValueError):
+            return None
+
+    if not_played and not (state == "in" and not_played in ("delayed", "suspended")):
+        # Decided from the status name first: a canceled game can be marked
+        # completed, and has no score to speak.
+        return f"{short(away)} at {short(home)}, {not_played}."
+    if state == "pre":
+        try:
+            start = datetime.fromisoformat(str(event["date"]).replace("Z", "+00:00")).astimezone()
+            when = start.strftime("%I:%M %p").lstrip("0")
+        except (KeyError, ValueError):
+            when = detail or "time to be announced"
+        return f"{short(away)} at {short(home)}, {when}."
+    if state == "post" and not status.get("completed"):
+        reason = str(status.get("description") or "not played").lower()
+        return f"{short(away)} at {short(home)}, {reason}."
+    first, second = away, home
+    hs, as_ = score(home), score(away)
+    if hs is not None and as_ is not None and hs > as_:
+        first, second = home, away
+    if not_played:  # a delay or suspension with a live score
+        tail = not_played
+    elif state == "post":
+        suffix = detail.split("/", 1)[1] if detail.lower().startswith("final") and "/" in detail else ""
+        tail = f"final, {suffix}" if suffix else "final"
+    else:
+        tail = f"live, {detail}" if detail else "live"
+    return f"{short(first)} {first.get('score')}, {short(second)} {second.get('score')}, {tail}."
+
+
+def _scoreboard_events(client: Any, path: str, day: date) -> list[dict]:
+    resp = client.get(f"https://site.api.espn.com/apis/site/v2/sports/{path}/scoreboard", params={"dates": f"{day:%Y%m%d}"})
+    resp.raise_for_status()
+    return resp.json().get("events") or []
+
+
+def _run_sports_scores(league: str, team: str | None = None, day: str | None = None) -> str:
+    key = str(league or "").strip().casefold()
+    path = _SPORTS_LEAGUES.get(key)
+    if path is None:
+        return _Unstamped(f"I don't have scores for {league}. I cover {', '.join(_SPORTS_LEAGUES)}.")
+    when = _parse_sports_day(day)
+    if when is None:
+        return _Unstamped("I can look up today, yesterday, tomorrow or a date like 2026-11-24.")
+    name = key.upper()
+    team = " ".join(str(team or "").split())
+    with httpx.Client(timeout=_SPORTS_REQUEST_TIMEOUT_S) as client:
+        events = _scoreboard_events(client, path, when)
+        if not team:
+            if not events:
+                return _Unstamped(f"No {name} games on {_day_label(when)}.")
+            lines = [_game_line(e) for e in events[:_SPORTS_MAX_GAMES]]
+            if len(events) > _SPORTS_MAX_GAMES:
+                lines.append(f"and {len(events) - _SPORTS_MAX_GAMES} more.")
+            return f"{name} games, {_day_label(when)}: " + " ".join(lines)
+
+        def mine(evs: list[dict]) -> list[dict]:
+            return [
+                e for e in evs
+                if any(_team_matches(team, c.get("team") or {}) for c in (e.get("competitions") or [{}])[0].get("competitors") or [])
+            ]
+
+        hits = mine(events)
+        if hits:
+            return f"{name} games, {_day_label(when)}: " + " ".join(_game_line(e) for e in hits[:_SPORTS_MAX_GAMES])
+        found = []
+        for other in (when - timedelta(days=1), when + timedelta(days=1)):
+            for e in mine(_scoreboard_events(client, path, other)):
+                found.append(f"{_day_label(other)}: {_game_line(e)}")
+    if not found:
+        return _Unstamped(f"No {team} game on {_day_label(when)}, or the day before or after.")
+    return f"No {team} game on {_day_label(when)}. " + " ".join(found)
 
 
 def _serp_title(title: str) -> str:
@@ -1369,6 +1851,8 @@ def _run_confirm_action(action: str) -> str:
             return "Nothing is waiting for confirmation."
         if _CONFIRM_REFUSED[0] != action:
             return "That isn't the action waiting for confirmation."
+        if _USER_UTTERANCES <= _CONFIRM_REFUSED_AT:
+            return _CONFIRM_NOT_ANSWERED  # same utterance window: the refusal stands
         _CONFIRM_CONFIRMED = _CONFIRM_REFUSED
         _CONFIRM_REFUSED = None
     return "Confirmed. Retry that call exactly as it was."
@@ -1380,6 +1864,7 @@ def _run_confirm_action(action: str) -> str:
 _DISPATCH = {
     "get_weather": (_run_get_weather, _WEATHER_TIMEOUT_S, "place", _WEATHER_PLACE_ARG_LABEL, "weather lookup", False),
     "web_search": (_run_web_search, _SEARCH_TIMEOUT_S, "query", "a search query", "web search", True),
+    "sports_scores": (_run_sports_scores, _SPORTS_TIMEOUT_S, "league", "a league", "sports scores lookup", True),
     "knowledge_lookup": (
         _run_knowledge_lookup,
         _KNOWLEDGE_TIMEOUT_S,
@@ -1437,6 +1922,12 @@ _DISPATCH = {
 }
 
 
+# Optional arguments, beyond the one named in _DISPATCH, that a tool's runner
+# accepts. Passed only when the caller supplied them, so a runner (or a test
+# double) that takes the one argument keeps working.
+_EXTRA_ARGS = {"get_weather": ("when", "units"), "sports_scores": ("team", "day")}
+
+
 def execute(name: str, kwargs: dict) -> str:
     """Run tool ``name`` with ``kwargs`` under a hard timeout.
 
@@ -1472,17 +1963,19 @@ def execute(name: str, kwargs: dict) -> str:
     # through. confirm_action is never in _CONFIRM_NAMES (discarded when the
     # set is built), so it can never gate itself.
     if name in _CONFIRM_NAMES:
-        global _CONFIRM_REFUSED, _CONFIRM_CONFIRMED
+        global _CONFIRM_REFUSED, _CONFIRM_CONFIRMED, _CONFIRM_REFUSED_AT
         with _CONFIRM_LOCK:
             if _CONFIRM_CONFIRMED is not None and _CONFIRM_CONFIRMED == (name, arg):
                 _CONFIRM_CONFIRMED = None  # single use: an identical repeat is refused
             else:
                 _CONFIRM_REFUSED = (name, arg)
+                _CONFIRM_REFUSED_AT = _USER_UTTERANCES
                 _CONFIRM_CONFIRMED = None  # a new refusal invalidates a stale confirmation
                 return _CONFIRM_REFUSAL
     started = time.monotonic()
     try:
-        result = _run_bounded(fn, arg, name, timeout_s)
+        extras = {k: (kwargs or {})[k] for k in _EXTRA_ARGS.get(name, ()) if (kwargs or {}).get(k)}
+        result = _run_bounded(functools.partial(fn, **extras) if extras else fn, arg, name, timeout_s)
     except _ToolTimeout:
         logger.warning("voice_tools.execute: %s timed out after %.1fs", name, timeout_s)
         return _failure_result(name, tool_label, "timed out", started)

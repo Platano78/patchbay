@@ -20,6 +20,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import pytest
+
 from patches import brain_discovery
 
 
@@ -496,3 +498,55 @@ def test_discover_wall_clock_stays_within_its_deadline(monkeypatch):
     assert brain_discovery.discover(timeout_s=0.2, urls=urls) == []
     elapsed = time.monotonic() - started
     assert elapsed < 0.2 * brain_discovery.scan_rounds(len(urls)) + 2.0, elapsed
+
+
+# ── the printed hints must name the interpreter that has httpx ──────────
+
+
+@pytest.mark.parametrize("argv", [[], ["--host", "10.0.0.20"]])
+def test_printed_hints_name_the_running_interpreter_not_bare_python3(monkeypatch, capsys, argv):
+    """brain_discovery.py imports httpx, so a pasted `python3 patches/...` (the
+    system python) dies with a traceback. The hints name the interpreter that is
+    running now, which by construction has httpx."""
+    monkeypatch.delenv("BRAIN_DISCOVERY_URLS", raising=False)
+    monkeypatch.setattr(brain_discovery, "discover", lambda timeout_s=1.0, urls=None: [])
+    monkeypatch.setattr(brain_discovery.sys, "executable", "/opt/s2s/.venv/bin/python3")
+    brain_discovery.main(argv)
+    out = capsys.readouterr().out
+    assert "/opt/s2s/.venv/bin/python3 patches/brain_discovery.py" in out
+    assert "python3 patches/brain_discovery.py" not in out.replace("/opt/s2s/.venv/bin/python3 patches/brain_discovery.py", "")
+
+
+def test_run_without_httpx_says_which_python_instead_of_a_traceback(tmp_path):
+    """Run with a python that lacks the framework venv's packages (a stranger's
+    system python3), the script must name the venv python in one sentence, not
+    die in an httpx ImportError traceback."""
+    import subprocess
+    import sys as _sys
+    from pathlib import Path
+
+    shadow = tmp_path / "shadow"
+    shadow.mkdir()
+    (shadow / "httpx.py").write_text("raise ImportError('No module named httpx')\n")
+    script = Path(__file__).resolve().parent / "brain_discovery.py"
+    r = subprocess.run(
+        [_sys.executable, str(script), "--host", "127.0.0.1"],
+        capture_output=True, text=True, timeout=30,
+        env={"PYTHONPATH": str(shadow), "PATH": "/usr/bin:/bin"},
+    )
+    assert r.returncode != 0
+    assert "Traceback" not in r.stderr, r.stderr
+    assert ".venv/bin/python3 patches/brain_discovery.py" in r.stderr
+
+
+def test_lane_hints_name_the_venv_python_for_brain_discovery():
+    """brain_lanes.py's hints and the example config point strangers at
+    brain_discovery.py; a bare `python3` there dies on the httpx import."""
+    from pathlib import Path
+    import re
+
+    root = Path(__file__).resolve().parent.parent
+    for f in (root / "patches" / "brain_lanes.py", root / "brains.json.example"):
+        text = f.read_text()
+        bare = re.findall(r"(?<![/\w.])python3 patches/brain_discovery\.py", text)
+        assert not bare, f"{f.name}: bare python3 hint for brain_discovery.py"

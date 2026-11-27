@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 from queue import Queue
@@ -39,6 +40,32 @@ _SHIM_TOKEN_VAR = "HERMES_SHIM_TOKEN"
 _SHIM_MODEL = "hermes-codex"
 _SHIM_TIMEOUT_S = 900.0
 
+
+
+def _describe_duration(seconds: float) -> str:
+    if seconds >= 120:
+        return f"{round(seconds / 60)} minutes"
+    return f"{round(seconds)} seconds"
+
+
+def _describe_delegation_failure(exc: BaseException) -> str:
+    """A plain phrase for a failed delegation, spoken to the user: the status
+    code or the kind of failure, never a class name, URL or host (the full
+    exception stays in the log line)."""
+    if isinstance(exc, httpx.HTTPStatusError):
+        code = exc.response.status_code
+        if code == 504:
+            return f"the Hermes gateway timed out ({code})"
+        return f"Hermes answered with an error ({code})"
+    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return "Hermes could not be reached"
+    if isinstance(exc, httpx.TimeoutException):
+        return f"Hermes timed out after {_describe_duration(_SHIM_TIMEOUT_S)}"
+    if isinstance(exc, httpx.TransportError):
+        return "Hermes could not be reached"
+    return "something went wrong on the way to Hermes"
+
+
 _POLL_ACTIVE_S = 2.0
 _POLL_IDLE_S = 10.0
 # Backoff cap while the MCP endpoint stays unreachable and idle: doubling from
@@ -51,10 +78,24 @@ _BASELINE_MAX_PAGES = 50  # safety valve while draining history to find the live
 _MAX_STEPS = 30
 _STEP_TEXT_CHARS = 200
 _RESULT_CHARS = 400
+# Telegram caps a message at 4096 chars; leave room for the lead-in line.
+_NOTIFY_CHARS = 3500
 
 # Spoken completion announcement + quest-card auto-clear (see
 # _announce_completion/_schedule_reset).
-_ANNOUNCE_RESULT_CHARS = 300
+# 160 chars + the 41-char tail + "Hermes is done. " is ~217 chars: ~13.6 s at
+# the ~16 chars/s the remote TTS speaks, under its 15 s total-duration cap
+# (a longer announcement fails over to the fallback voice mid-sentence).
+_ANNOUNCE_RESULT_CHARS = 160
+_ANNOUNCE_TAIL = " Ask me for the details if you want more."
+_ANNOUNCE_MIN_SENTENCE_CHARS = 60
+# An absolute path token ("/a/b", "~/a/b"): read aloud it is seconds of noise.
+# It may be wrapped in one quote, bracket or backtick (Hermes writes markdown);
+# the wrapper goes with it. A bare one-segment "/etc" is left alone: too close
+# to ordinary words like "and/or".
+_PATH_TOKEN_RE = re.compile(r"(?<!\S)([\"'(\[`])?(~/\S*|/\S*)")
+_PATH_TRAILING = ".,;:!?)]\"'`"
+_PATH_KEEP_AFTER_WRAPPER = ".,;:!?"
 _RESET_DELAY_S = 90.0
 
 
@@ -74,15 +115,39 @@ def _announce_enabled(raw: Optional[str] = None) -> bool:
     return stripped.lower() != "off"
 
 
+def _speak_paths(text: str) -> str:
+    def _sub(m: "re.Match[str]") -> str:
+        opener, token = m.group(1), m.group(2)
+        body = token.rstrip(_PATH_TRAILING)
+        trailing = token[len(body):]
+        is_path = len(body) > 2 if body.startswith("~/") else "/" in body[1:]
+        if not is_path:
+            return m.group(0)
+        if opener:  # the wrapper's closer goes with the path; keep sentence punctuation
+            trailing = "".join(c for c in trailing if c in _PATH_KEEP_AFTER_WRAPPER)
+        return "a file" + trailing
+
+    return _PATH_TOKEN_RE.sub(_sub, text)
+
+
 def _spoken_result(result: str) -> str:
-    """Whitespace-collapsed, ~300-char-capped form of a delegation result
-    for speech. A capped result gets an explanatory tail so the user knows
-    there's more (`status_summary`/`hermes_status` still has the full
-    `_RESULT_CHARS`-length text)."""
-    collapsed = " ".join((result or "").split())
+    """Whitespace-collapsed form of a delegation result for speech: absolute
+    file paths become "a file" (the full text stays in the delegation
+    record, `hermes_status` and the card), and anything over
+    `_ANNOUNCE_RESULT_CHARS` is cut at the last sentence end (past
+    `_ANNOUNCE_MIN_SENTENCE_CHARS`) or, failing that, the last space, and
+    gets a tail so the user knows there's more."""
+    collapsed = _speak_paths(" ".join((result or "").split()))
     if len(collapsed) <= _ANNOUNCE_RESULT_CHARS:
         return collapsed
-    return collapsed[:_ANNOUNCE_RESULT_CHARS].rstrip() + " Ask me for the details if you want more."
+    head = collapsed[: _ANNOUNCE_RESULT_CHARS + 1]
+    end = max(head.rfind(p) for p in (". ", "! ", "? ")) + 1  # keep the punctuation
+    if end > _ANNOUNCE_MIN_SENTENCE_CHARS:
+        cut = collapsed[:end]
+    else:
+        space = head.rfind(" ")
+        cut = collapsed[:space] if space > 0 else collapsed[:_ANNOUNCE_RESULT_CHARS]
+    return cut.rstrip() + _ANNOUNCE_TAIL
 
 
 def _build_announcement(status: str, result: str) -> str:
@@ -162,8 +227,16 @@ class HermesCockpit:
     runs one delegation at a time, and broadcasts a full state snapshot to
     every connected websocket client."""
 
-    def __init__(self, text_output_queue: Optional["Queue[Any]"] = None, tts_queue: Any = None) -> None:
+    def __init__(
+        self,
+        text_output_queue: Optional["Queue[Any]"] = None,
+        tts_queue: Any = None,
+        runtime_config: Any = None,
+    ) -> None:
         self.text_output_queue = text_output_queue
+        # The pipeline's RuntimeConfig: a finished delegation is written into
+        # `runtime_config.chat` so the brain knows the result. None-safe.
+        self.runtime_config = runtime_config
         # lm_processed_queue -- lets HermesCockpit speak a completion
         # announcement (ruling 1). None-safe, same pattern as
         # BrainControl.tts_queue: announcing is simply unavailable then.
@@ -197,6 +270,11 @@ class HermesCockpit:
         # auto-clear timer compares against this (not started_ts floats) to
         # tell whether it's still the delegation it was scheduled for.
         self._delegation_generation = 0
+        # The last *finished* delegation. `_maybe_reset` clears the quest card
+        # (`_delegation`) but never this: status answers read it, so Hermes
+        # does not report "idle, nothing recorded" about a task it finished.
+        # Overwritten only when the next delegation finishes.
+        self._last_delegation: Optional[dict[str, Any]] = None
         self._reset_timer: Optional[threading.Timer] = None
         threading.Thread(target=self._poll_loop, name="hermes-cockpit-poll", daemon=True).start()
 
@@ -257,7 +335,7 @@ class HermesCockpit:
         result = self._tool_call("messages_send", {"target": _HERMES_TARGET, "message": text})
         if result is None:
             return "I couldn't reach Hermes to send that."
-        return "Sent to Hermes. Any reply will show up in the cockpit and in hermes_status."
+        return "Posted to your chat with Hermes. Hermes doesn't act on these; to have it do something, delegate it."
     # -- Poll loop ---------------------------------------------------------
 
     def _baseline_cursor(self) -> None:
@@ -337,11 +415,15 @@ class HermesCockpit:
         return min(_POLL_IDLE_S * (2 ** (self._idle_failure_streak - 1)), _POLL_BACKOFF_MAX_S)
     # -- Delegation ----------------------------------------------------------
 
+    def _append_step_locked(self, role: str, text: str) -> None:
+        """Caller holds `_delegation_lock`."""
+        self._delegation["steps"].append({"ts": time.time(), "role": role, "text": text[:_STEP_TEXT_CHARS]})
+        if len(self._delegation["steps"]) > _MAX_STEPS:
+            self._delegation["steps"] = self._delegation["steps"][-_MAX_STEPS:]
+
     def _append_step(self, role: str, text: str) -> None:
         with self._delegation_lock:
-            self._delegation["steps"].append({"ts": time.time(), "role": role, "text": text[:_STEP_TEXT_CHARS]})
-            if len(self._delegation["steps"]) > _MAX_STEPS:
-                self._delegation["steps"] = self._delegation["steps"][-_MAX_STEPS:]
+            self._append_step_locked(role, text)
 
     def delegate(self, task: str) -> str:
         """Kick off a background delegation to Hermes. Returns the string to
@@ -394,21 +476,89 @@ class HermesCockpit:
             data = resp.json()
             text = ((data.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
             result = _truncate(text, _RESULT_CHARS) if text else "Hermes finished with no response text."
-            self._finish_delegation("done", result)
+            self._finish_delegation("done", result, full_text=text or result)
         except Exception as e:
             logger.warning("HermesCockpit: delegation to Hermes failed: %s", e)
-            self._finish_delegation("error", f"Delegation failed: {type(e).__name__}")
+            self._finish_delegation("error", f"Delegation failed: {_describe_delegation_failure(e)}.")
 
-    def _finish_delegation(self, status: str, result: str) -> None:
+    def _finish_delegation(self, status: str, result: str, full_text: Optional[str] = None) -> None:
         with self._delegation_lock:
             self._delegation["status"] = status
             self._delegation["result"] = result
             self._delegation["active"] = False
             generation = self._delegation_generation
-        self._append_step("system", f"{status}: {result}")
+            # Final step and the last-delegation record are built in this one
+            # lock hold, so a delegate() landing afterwards cannot be recorded
+            # as the task that just finished.
+            self._append_step_locked("system", f"{status}: {result}")
+            task = self._delegation["task"]
+            self._last_delegation = {
+                "task": task,
+                "status": status,
+                "result": result,
+                "finished_ts": time.time(),
+                "steps": list(self._delegation["steps"]),
+            }
         self._broadcast_state()
+        self._remember_in_chat(status, task, result)
+        self._notify_target(status, task, full_text if full_text else result)
         self._announce_completion(status, result)
         self._schedule_reset(generation)
+
+    def _remember_in_chat(self, status: str, task: Optional[str], result: str) -> None:
+        """Append the outcome to the LLM's chat history as one assistant message
+        (same shape as chat_completions_language_model's write-back) so the
+        brain can tell the user the result instead of guessing. Runs on the
+        delegation thread: upstream `Chat.add_item` takes the chat's own lock
+        (LLM/chat.py `with self._lock`), so it is safe against the LLM thread.
+        `trim_if_needed` is deliberately not called here; the next turn's
+        normal write-back trims. Best-effort: never raises."""
+        chat = getattr(self.runtime_config, "chat", None)
+        if chat is None:
+            return
+        if status == "done":
+            text = f'Hermes finished the task "{task}": {result}'
+        else:
+            text = f'Hermes could not finish the task "{task}": {result}'
+        try:
+            from openai.types.realtime.realtime_conversation_item_assistant_message import (
+                Content as AssistantContent,
+                RealtimeConversationItemAssistantMessage,
+            )
+
+            chat.add_item(
+                RealtimeConversationItemAssistantMessage(
+                    type="message", role="assistant", content=[AssistantContent(type="output_text", text=text)]
+                )
+            )
+        except Exception as e:
+            logger.warning("HermesCockpit: could not record the delegation outcome in chat: %s", e)
+
+    def _notify_target(self, status: str, task: Optional[str], full_text: str) -> None:
+        """Post the finished delegation to HERMES_TARGET (the owner's own chat)
+        so the deliverable is readable later, e.g. when away from the cockpit.
+        Off with VOICE_HERMES_NOTIFY=off or no HERMES_TARGET. Runs on a daemon
+        thread; never blocks or raises into the finish path."""
+        if not _HERMES_TARGET or not _announce_enabled(os.environ.get("VOICE_HERMES_NOTIFY")):
+            return
+        lead = "Hermes finished your voice request" if status == "done" else "Hermes couldn't finish your voice request"
+        body = full_text.strip()
+        if len(body) > _NOTIFY_CHARS:
+            body = body[: _NOTIFY_CHARS - 1].rstrip() + "\u2026"  # keep line breaks: this is read as text
+        task_line = _truncate(task or "", 300)  # the task is uncapped; keep the message under Telegram's 4096
+        message = f"{lead}: {task_line}\n\n{body}"
+
+        def _post() -> None:
+            try:
+                if self._tool_call("messages_send", {"target": _HERMES_TARGET, "message": message}) is None:
+                    logger.warning("HermesCockpit: could not post the delegation outcome to HERMES_TARGET")
+            except Exception as e:
+                logger.warning("HermesCockpit: posting the delegation outcome failed: %s", e)
+
+        try:
+            threading.Thread(target=_post, daemon=True, name="hermes-cockpit-notify").start()
+        except Exception as e:  # a failed start must not turn a finished task into an error
+            logger.warning("HermesCockpit: could not start the delegation-outcome post: %s", e)
 
     def _announce_completion(self, status: str, result: str) -> None:
         """Speak the delegation outcome through the normal TTS path so a
@@ -419,9 +569,11 @@ class HermesCockpit:
         Best-effort: never raises; no-ops with no `tts_queue` wired or when
         `VOICE_HERMES_ANNOUNCE=off`.
 
-        Known accepted gap: the announcement is spoken but not written into
-        LLM chat history, so a follow-up question still triggers the
-        `hermes_status` tool -- that's fine, not fixed here."""
+        The announcement is speech only; the brain learns the result from
+        `_remember_in_chat`, which writes it into the chat history
+        independently of this method (and of VOICE_HERMES_ANNOUNCE).
+        `hermes_status` also stays truthful because `status_summary` reads
+        `_last_delegation`, which the quest-card reset leaves alone."""
         if self.tts_queue is None or not _announce_enabled():
             return
         text = _build_announcement(status, result)
@@ -495,14 +647,17 @@ class HermesCockpit:
             return "I can't reach Hermes right now."
         with self._delegation_lock:
             d = dict(self._delegation)
+            last = dict(self._last_delegation) if self._last_delegation else None
 
         if detail == "last_result":
-            if d["result"]:
-                return f"Hermes's last result: {d['result']}"
+            result = d["result"] or (last["result"] if last else None)
+            if result:
+                return f"Hermes's last result: {result}"
             return "Hermes hasn't finished anything yet."
         if detail == "steps":
-            if d["steps"]:
-                texts = [s["text"] for s in d["steps"][-3:]]
+            steps = d["steps"] or (last["steps"] if last and not d["active"] else [])
+            if steps:
+                texts = [s["text"] for s in steps[-3:]]
                 return "Recent Hermes activity: " + "; ".join(texts)
             return "No Hermes activity recorded yet."
         if detail == "approvals":
@@ -527,6 +682,12 @@ class HermesCockpit:
             msg = f"Hermes finished: {d['result']}"
         elif d["status"] == "error":
             msg = f"Hermes's last task hit an error: {d['result'] or 'unknown error'}"
+        elif last and last["result"]:
+            ago = f"{_describe_duration(max(0.0, time.time() - last['finished_ts']))} ago"
+            if last["status"] == "error":
+                msg = f"Hermes is idle. Its last task hit an error {ago}: {last['result']}"
+            else:
+                msg = f"Hermes is idle. Its last task finished {ago}: {last['result']}"
         else:
             msg = "Hermes is idle."
 

@@ -7,9 +7,13 @@ It wraps the open-source [tyger-s2s](https://github.com/nineninesix-ai/tyger-s2s
 a small turn-taking network). Nothing in patchbay needs it: the cockpit works without it, and nothing in this directory
 runs unless you install and start it.
 
-**Requirements.** A GPU with CUDA or ROCm and about 4 GB free (measured: 2.8-4.0 GiB), Linux, git, Python 3.12 (the version tested; upstream targets it)
-(upstream was tested on 3.12), about 3 GB of disk for the weights and packages, plus torch itself (several GB for a GPU wheel). It is not usable on CPU (about
+**Requirements.** A GPU with CUDA or ROCm and about 4 GB free (measured: 2.8-4.0 GiB), Linux, git, Python 3.12 (the version tested), about 3 GB of disk for the weights and packages, plus torch itself (several GB for a GPU wheel). It is not usable on CPU (about
 550 ms per 320 ms step, measured). It runs in FP32; half precision produced NaNs.
+
+**Before you install.** `install.sh` downloads the weights (`nineninesix/tyger` on Hugging Face, part of the about 3 GB above, no
+token needed, pinned to revision `a5d4d73bb74fa4a7082dcd4387e44a1e5ac151b6`) under the OpenMDW-1.1 licence, and it
+does not pause to ask: running it is your consent to that download and licence. If you are an agent installing this for
+someone, tell them that (licence, several GB of disk, a GPU build of PyTorch) and run it only after they agree.
 
 ## Install
 
@@ -36,7 +40,7 @@ The optional argument is the install directory (default `~/patchbay-tyger`; it m
    repo; bumping it is a deliberate edit of `UPSTREAM_SHA` in `install.sh`;
 4. downloads the weights (`nineninesix/tyger`, no Hugging Face token needed) into `DIR/bundle`;
 5. runs upstream's own validator (batched engine against a plain single-session reference) and requires
-   `events match: True` for every session. The validator downloads a small public test dataset;
+   `events match: True` for every session. The validator downloads a small public test dataset (`hf-internal-testing/librispeech_asr_dummy`: a few LibriSpeech clips; the repo declares no licence of its own, and LibriSpeech is CC BY 4.0);
 6. prints `TYGER OK` as its last line. Anything else is a failure; the output of step 5 is kept in `DIR/validate.log`.
 
 Hugging Face downloads go to `DIR/hf` unless you set `HF_HOME`. Tested here with `TORCH_FROM_VENV` on a ROCm torch;

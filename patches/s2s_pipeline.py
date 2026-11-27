@@ -410,6 +410,17 @@ class VocabSnappingNotifier(TranscriptionNotifier):
         # importable until apply.sh has copied them, and tests import this file without that.
         from speech_to_speech import vocab_snap
 
+        # A final transcript is the only thing that can confirm a gated tool call
+        # (voice_tools.confirm_action needs the count to advance after a refusal).
+        # Counted before yielding, so the model's next turn already sees it.
+        if isinstance(transcription, str) or getattr(transcription, "tag", None) == "transcription":
+            if str(getattr(transcription, "text", transcription) or "").strip():
+                try:
+                    from speech_to_speech import voice_tools
+
+                    voice_tools.note_user_utterance()
+                except Exception as e:  # never break the transcript path
+                    logger.warning("note_user_utterance failed: %s", e)
         yield from super().process(vocab_snap.snap_stt_output(transcription))
 
 
@@ -910,7 +921,9 @@ def build_pipeline(
         # actually active rather than only recognising Pocket.
         tts_handler = next((h for h in pipeline_handlers if type(h).__module__.startswith("speech_to_speech.TTS.")), None)
         if llm_handler is not None:
-            cockpit = HermesCockpit(text_output_queue=text_output_queue, tts_queue=lm_processed_queue)
+            cockpit = HermesCockpit(
+                text_output_queue=text_output_queue, tts_queue=lm_processed_queue, runtime_config=runtime_config
+            )
             voice_tools.set_cockpit(cockpit)
             websocket_streamer_ref.control_callback = BrainControl(
                 llm_handler,

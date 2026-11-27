@@ -1,0 +1,762 @@
+{
+ "20261124": {
+  "events": [
+   {
+    "date": "2026-11-25T00:00Z",
+    "name": "Detroit Pistons at Orlando Magic",
+    "status": {
+     "displayClock": "12:00",
+     "period": 4,
+     "type": {
+      "state": "post",
+      "completed": true,
+      "description": "Final",
+      "shortDetail": "Final"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "86",
+        "winner": false,
+        "team": {
+         "location": "Orlando",
+         "name": "Magic",
+         "abbreviation": "ORL",
+         "displayName": "Orlando Magic",
+         "shortDisplayName": "Magic"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "104",
+        "winner": true,
+        "team": {
+         "location": "Detroit",
+         "name": "Pistons",
+         "abbreviation": "DET",
+         "displayName": "Detroit Pistons",
+         "shortDisplayName": "Pistons"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "date": "2026-11-25T01:00Z",
+    "name": "Boston Celtics at Washington Wizards",
+    "status": {
+     "displayClock": "8:12",
+     "period": 4,
+     "type": {
+      "state": "in",
+      "completed": false,
+      "description": "In Progress",
+      "shortDetail": "8:12 - 4th"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "96",
+        "winner": null,
+        "team": {
+         "location": "Washington",
+         "name": "Wizards",
+         "abbreviation": "WSH",
+         "displayName": "Washington Wizards",
+         "shortDisplayName": "Wizards"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "109",
+        "winner": null,
+        "team": {
+         "location": "Boston",
+         "name": "Celtics",
+         "abbreviation": "BOS",
+         "displayName": "Boston Celtics",
+         "shortDisplayName": "Celtics"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "date": "2026-11-25T03:00Z",
+    "name": "Dallas Mavericks at Denver Nuggets",
+    "status": {
+     "displayClock": "0.0",
+     "period": 0,
+     "type": {
+      "state": "pre",
+      "completed": false,
+      "description": "Scheduled",
+      "shortDetail": "11/24 - 10:00 PM EST"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Denver",
+         "name": "Nuggets",
+         "abbreviation": "DEN",
+         "displayName": "Denver Nuggets",
+         "shortDisplayName": "Nuggets"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Dallas",
+         "name": "Mavericks",
+         "abbreviation": "DAL",
+         "displayName": "Dallas Mavericks",
+         "shortDisplayName": "Mavericks"
+        }
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ "20261123": {
+  "events": [
+   {
+    "date": "2026-11-24T00:00Z",
+    "name": "Memphis Grizzlies at Charlotte Hornets",
+    "status": {
+     "displayClock": "12:00",
+     "period": 4,
+     "type": {
+      "state": "post",
+      "completed": true,
+      "description": "Final",
+      "shortDetail": "Final"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "111",
+        "winner": false,
+        "team": {
+         "location": "Charlotte",
+         "name": "Hornets",
+         "abbreviation": "CHA",
+         "displayName": "Charlotte Hornets",
+         "shortDisplayName": "Hornets"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "117",
+        "winner": true,
+        "team": {
+         "location": "Memphis",
+         "name": "Grizzlies",
+         "abbreviation": "MEM",
+         "displayName": "Memphis Grizzlies",
+         "shortDisplayName": "Grizzlies"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "date": "2026-11-24T00:00Z",
+    "name": "Portland Trail Blazers at Philadelphia 76ers",
+    "status": {
+     "displayClock": "12:00",
+     "period": 4,
+     "type": {
+      "state": "post",
+      "completed": true,
+      "description": "Final",
+      "shortDetail": "Final"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "111",
+        "winner": false,
+        "team": {
+         "location": "Philadelphia",
+         "name": "76ers",
+         "abbreviation": "PHI",
+         "displayName": "Philadelphia 76ers",
+         "shortDisplayName": "76ers"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "128",
+        "winner": true,
+        "team": {
+         "location": "Portland",
+         "name": "Trail Blazers",
+         "abbreviation": "POR",
+         "displayName": "Portland Trail Blazers",
+         "shortDisplayName": "Trail Blazers"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "date": "2026-11-24T00:30Z",
+    "name": "Oklahoma City Thunder at Indiana Pacers",
+    "status": {
+     "displayClock": "12:00",
+     "period": 4,
+     "type": {
+      "state": "post",
+      "completed": true,
+      "description": "Final",
+      "shortDetail": "Final"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "125",
+        "winner": true,
+        "team": {
+         "location": "Indiana",
+         "name": "Pacers",
+         "abbreviation": "IND",
+         "displayName": "Indiana Pacers",
+         "shortDisplayName": "Pacers"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "120",
+        "winner": false,
+        "team": {
+         "location": "Oklahoma City",
+         "name": "Thunder",
+         "abbreviation": "OKC",
+         "displayName": "Oklahoma City Thunder",
+         "shortDisplayName": "Thunder"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "date": "2026-11-24T00:30Z",
+    "name": "Milwaukee Bucks at Toronto Raptors",
+    "status": {
+     "displayClock": "12:00",
+     "period": 4,
+     "type": {
+      "state": "post",
+      "completed": true,
+      "description": "Final",
+      "shortDetail": "Final"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "111",
+        "winner": false,
+        "team": {
+         "location": "Toronto",
+         "name": "Raptors",
+         "abbreviation": "TOR",
+         "displayName": "Toronto Raptors",
+         "shortDisplayName": "Raptors"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "116",
+        "winner": true,
+        "team": {
+         "location": "Milwaukee",
+         "name": "Bucks",
+         "abbreviation": "MIL",
+         "displayName": "Milwaukee Bucks",
+         "shortDisplayName": "Bucks"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "date": "2026-11-24T00:30Z",
+    "name": "Brooklyn Nets at Minnesota Timberwolves",
+    "status": {
+     "displayClock": "12:00",
+     "period": 4,
+     "type": {
+      "state": "post",
+      "completed": true,
+      "description": "Final",
+      "shortDetail": "Final"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "142",
+        "winner": true,
+        "team": {
+         "location": "Minnesota",
+         "name": "Timberwolves",
+         "abbreviation": "MIN",
+         "displayName": "Minnesota Timberwolves",
+         "shortDisplayName": "Timberwolves"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "116",
+        "winner": false,
+        "team": {
+         "location": "Brooklyn",
+         "name": "Nets",
+         "abbreviation": "BKN",
+         "displayName": "Brooklyn Nets",
+         "shortDisplayName": "Nets"
+        }
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ },
+ "20261125": {
+  "events": [
+   {
+    "date": "2026-11-25T22:00Z",
+    "name": "Miami Heat at Philadelphia 76ers",
+    "status": {
+     "displayClock": "0.0",
+     "period": 0,
+     "type": {
+      "state": "pre",
+      "completed": false,
+      "description": "Scheduled",
+      "shortDetail": "11/25 - 5:00 PM EST"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Philadelphia",
+         "name": "76ers",
+         "abbreviation": "PHI",
+         "displayName": "Philadelphia 76ers",
+         "shortDisplayName": "76ers"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Miami",
+         "name": "Heat",
+         "abbreviation": "MIA",
+         "displayName": "Miami Heat",
+         "shortDisplayName": "Heat"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "date": "2026-11-26T00:00Z",
+    "name": "Chicago Bulls at Charlotte Hornets",
+    "status": {
+     "displayClock": "0.0",
+     "period": 0,
+     "type": {
+      "state": "pre",
+      "completed": false,
+      "description": "Scheduled",
+      "shortDetail": "11/25 - 7:00 PM EST"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Charlotte",
+         "name": "Hornets",
+         "abbreviation": "CHA",
+         "displayName": "Charlotte Hornets",
+         "shortDisplayName": "Hornets"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Chicago",
+         "name": "Bulls",
+         "abbreviation": "CHI",
+         "displayName": "Chicago Bulls",
+         "shortDisplayName": "Bulls"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "date": "2026-11-26T00:30Z",
+    "name": "Cleveland Cavaliers at New York Knicks",
+    "status": {
+     "displayClock": "0.0",
+     "period": 0,
+     "type": {
+      "state": "pre",
+      "completed": false,
+      "description": "Scheduled",
+      "shortDetail": "11/25 - 7:30 PM EST"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "New York",
+         "name": "Knicks",
+         "abbreviation": "NY",
+         "displayName": "New York Knicks",
+         "shortDisplayName": "Knicks"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Cleveland",
+         "name": "Cavaliers",
+         "abbreviation": "CLE",
+         "displayName": "Cleveland Cavaliers",
+         "shortDisplayName": "Cavaliers"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "date": "2026-11-26T00:30Z",
+    "name": "Minnesota Timberwolves at Oklahoma City Thunder",
+    "status": {
+     "displayClock": "0.0",
+     "period": 0,
+     "type": {
+      "state": "pre",
+      "completed": false,
+      "description": "Scheduled",
+      "shortDetail": "11/25 - 7:30 PM EST"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Oklahoma City",
+         "name": "Thunder",
+         "abbreviation": "OKC",
+         "displayName": "Oklahoma City Thunder",
+         "shortDisplayName": "Thunder"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Minnesota",
+         "name": "Timberwolves",
+         "abbreviation": "MIN",
+         "displayName": "Minnesota Timberwolves",
+         "shortDisplayName": "Timberwolves"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "date": "2026-11-26T01:00Z",
+    "name": "LA Clippers at Memphis Grizzlies",
+    "status": {
+     "displayClock": "0.0",
+     "period": 0,
+     "type": {
+      "state": "pre",
+      "completed": false,
+      "description": "Scheduled",
+      "shortDetail": "11/25 - 8:00 PM EST"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Memphis",
+         "name": "Grizzlies",
+         "abbreviation": "MEM",
+         "displayName": "Memphis Grizzlies",
+         "shortDisplayName": "Grizzlies"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "LA",
+         "name": "Clippers",
+         "abbreviation": "LAC",
+         "displayName": "LA Clippers",
+         "shortDisplayName": "Clippers"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "date": "2026-11-26T01:00Z",
+    "name": "Brooklyn Nets at Milwaukee Bucks",
+    "status": {
+     "displayClock": "0.0",
+     "period": 0,
+     "type": {
+      "state": "pre",
+      "completed": false,
+      "description": "Scheduled",
+      "shortDetail": "11/25 - 8:00 PM EST"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Milwaukee",
+         "name": "Bucks",
+         "abbreviation": "MIL",
+         "displayName": "Milwaukee Bucks",
+         "shortDisplayName": "Bucks"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Brooklyn",
+         "name": "Nets",
+         "abbreviation": "BKN",
+         "displayName": "Brooklyn Nets",
+         "shortDisplayName": "Nets"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "date": "2026-11-26T01:30Z",
+    "name": "Phoenix Suns at Houston Rockets",
+    "status": {
+     "displayClock": "0.0",
+     "period": 0,
+     "type": {
+      "state": "pre",
+      "completed": false,
+      "description": "Scheduled",
+      "shortDetail": "11/25 - 8:30 PM EST"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Houston",
+         "name": "Rockets",
+         "abbreviation": "HOU",
+         "displayName": "Houston Rockets",
+         "shortDisplayName": "Rockets"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Phoenix",
+         "name": "Suns",
+         "abbreviation": "PHX",
+         "displayName": "Phoenix Suns",
+         "shortDisplayName": "Suns"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "date": "2026-11-26T03:00Z",
+    "name": "Sacramento Kings at Golden State Warriors",
+    "status": {
+     "displayClock": "0.0",
+     "period": 0,
+     "type": {
+      "state": "pre",
+      "completed": false,
+      "description": "Scheduled",
+      "shortDetail": "11/25 - 10:00 PM EST"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Golden State",
+         "name": "Warriors",
+         "abbreviation": "GS",
+         "displayName": "Golden State Warriors",
+         "shortDisplayName": "Warriors"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Sacramento",
+         "name": "Kings",
+         "abbreviation": "SAC",
+         "displayName": "Sacramento Kings",
+         "shortDisplayName": "Kings"
+        }
+       }
+      ]
+     }
+    ]
+   },
+   {
+    "date": "2026-11-26T03:00Z",
+    "name": "San Antonio Spurs at Portland Trail Blazers",
+    "status": {
+     "displayClock": "0.0",
+     "period": 0,
+     "type": {
+      "state": "pre",
+      "completed": false,
+      "description": "Scheduled",
+      "shortDetail": "11/25 - 10:00 PM EST"
+     }
+    },
+    "competitions": [
+     {
+      "competitors": [
+       {
+        "homeAway": "home",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "Portland",
+         "name": "Trail Blazers",
+         "abbreviation": "POR",
+         "displayName": "Portland Trail Blazers",
+         "shortDisplayName": "Trail Blazers"
+        }
+       },
+       {
+        "homeAway": "away",
+        "score": "0",
+        "winner": null,
+        "team": {
+         "location": "San Antonio",
+         "name": "Spurs",
+         "abbreviation": "SA",
+         "displayName": "San Antonio Spurs",
+         "shortDisplayName": "Spurs"
+        }
+       }
+      ]
+     }
+    ]
+   }
+  ]
+ }
+}

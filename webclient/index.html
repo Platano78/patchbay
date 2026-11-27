@@ -2574,7 +2574,16 @@
   .legendTools {
     display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
     column-gap: 12px; row-gap: 2px; margin-top: 4px;
+    /* The list grows with every release's tool count; the meter and deck
+       must not pay for it (row 4's min-content track would otherwise take
+       the height from #contentGrid). Capped to ~4 rows -- which keeps the
+       plate under .lowerBayControls' own 150px floor, so the track never
+       grows past it -- and the rest scrolls inside the list. The list is
+       a focusable region so the keyboard can scroll it. */
+    max-height: 60px; overflow-y: auto; scrollbar-width: thin;
+    align-content: start;
   }
+  .legendTools:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
   .legendTools[hidden] { display: none; }
   .legendTools .nom { font-size: 9px; }
 
@@ -3498,8 +3507,8 @@
 
     <div class="legendPlate" id="legendPlate">
       <span class="nom">Hold talk, or press and hold space — release to send</span>
-      <span class="nom" id="legendArmLine">Arm opens the mic, say &ldquo;<b id="legendWakePhrase">the wake word</b>&rdquo; to wake</span>
-      <div class="legendTools" id="legendTools" hidden></div>
+      <span class="nom" id="legendArmLine" hidden>Arm opens the mic, say &ldquo;<b id="legendWakePhrase"></b>&rdquo; to wake</span>
+      <div class="legendTools" id="legendTools" role="region" aria-label="Armed tools" tabindex="0" hidden></div>
     </div>
 
     <div class="lowerBayControls">
@@ -4316,6 +4325,7 @@ function renderLegendTools(ev) {
     cell.textContent = name.replace(/_/g, " ");
     els.legendTools.appendChild(cell);
   });
+  els.legendTools.setAttribute("aria-label", tools.length + " armed tools");
   els.legendTools.hidden = false;
 }
 
@@ -4711,6 +4721,39 @@ async function seedPersonaVoices() {
   updatePersonaVoicePairBtn();
   applyPersonaVoicePairing(els.personaSelect.value);
 }
+// Optional install-local persona seed: a file personas.json served at the site root,
+// {"<name>": "<persona text>"}. Merges into the saved-persona store only names the user does
+// not already have; never overwrites or deletes one. Applied once per distinct file content
+// (marker below), so a seeded persona the user deletes stays deleted until the file changes.
+// HARD RULE: seeding never selects, applies or sends a persona (a persona change reaches every
+// client). It only adds options; the current selection and textarea are left exactly as they are.
+// No file (the default, and the public export) is a silent no-op. Runs before seedPersonaVoices.
+const PERSONA_SEED_KEY = "va-personas-seeded";
+async function seedPersonas() {
+  try {
+    const r = await fetch("/personas.json", { cache: "no-store" });
+    if (!r.ok) return;
+    const text = await r.text();
+    const seed = JSON.parse(text);
+    if (!seed || typeof seed !== "object" || Array.isArray(seed)) return;
+    try { if (localStorage.getItem(PERSONA_SEED_KEY) === text) return; } catch {}
+    const personas = loadPersonas();
+    let added = 0;
+    for (const [name, body] of Object.entries(seed)) {
+      if (name && typeof body === "string" && body && !Object.prototype.hasOwnProperty.call(personas, name)) { personas[name] = body; added++; }
+    }
+    try { localStorage.setItem(PERSONA_SEED_KEY, text); } catch {}
+    if (!added) return;
+    savePersonas(personas);
+    // Repopulating re-derives the selection from storage, which can flip a fresh "Default"
+    // to "custom" once the library is non-empty: put the user's current pick back.
+    const picked = els.personaSelect.value;
+    populatePersonaSelect();
+    els.personaSelect.value = picked;
+    syncFaceplateSelectors();
+    updatePersonaVoicePairBtn();
+  } catch { return; }
+}
 function loadPersonas() {
   try { return JSON.parse(localStorage.getItem(PERSONA_LIB_KEY)) || {}; } catch { return {}; }
 }
@@ -4879,7 +4922,7 @@ els.personaVoicePairBtn.addEventListener("click", () => {
   updatePersonaVoicePairBtn();
 });
 populatePersonaSelect();
-seedPersonaVoices();
+seedPersonas().then(seedPersonaVoices);
 
 // ── Custom voice cloning ────────────────────────────────────────────────
 // Protocol: docs/plans/custom-voice-cloning-v1.3.md (rulings 5, 6, 9, 10, 11; maintainer notes, not in the public export) +
@@ -5622,7 +5665,8 @@ function renderConfigState(ev) {
     // is available: an older server never sends the key.
     const wakeAvailable = !hasWakeWord || wakeWord.available !== false;
     els.wakeWordBlock.hidden = !hasWakeWord;
-    if (legendArmLineEl) legendArmLineEl.hidden = !hasWakeWord || !wakeAvailable;
+    legendArmAvailable = hasWakeWord && wakeAvailable;
+    syncLegendArmLine();
     armSwitchEl?.setAttribute("aria-disabled", String(!hasWakeWord || !wakeAvailable));
     // `disabled` is what blocks the click path: the ARM switch toggles by calling
     // wakeToggle.click(), which a disabled checkbox ignores.
@@ -5945,10 +5989,20 @@ els.wakeToggle.addEventListener("change", () => {
 // here always tracks the live selection even before the server acks it.
 const legendWakePhraseEl = document.getElementById("legendWakePhrase");
 const legendArmLineEl = document.getElementById("legendArmLine");
+// ARM turns the wake gate on (armSwitch click -> wakeToggle.click() -> config_set
+// wake_word), so "Arm opens the mic, say <phrase> to wake" is true whenever a wake
+// word is available. The line stays hidden until the real phrase is known (a
+// config_state with a wake word), never printing a placeholder.
+let legendArmAvailable = false;
+function syncLegendArmLine() {
+  if (!legendArmLineEl) return;
+  legendArmLineEl.hidden = !(legendArmAvailable && legendWakePhraseEl.textContent);
+}
 function syncLegendWakePhrase() {
   if (!legendWakePhraseEl) return;
   const opt = els.wakeModelSelect.selectedOptions && els.wakeModelSelect.selectedOptions[0];
-  legendWakePhraseEl.textContent = opt ? opt.textContent : "the wake word";
+  legendWakePhraseEl.textContent = opt ? opt.textContent : "";
+  syncLegendArmLine();
 }
 els.wakeModelSelect.addEventListener("change", () => {
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -6185,9 +6239,9 @@ function connectFailureHint() {
     return "This page is HTTPS, so the browser blocks a plain ws:// socket as mixed content. Set a wss:// URL below.";
   }
   if (WS_URL.startsWith("wss://")) {
-    return "Nothing accepted a TLS websocket there. Either the voice service has no wss listener (set VOICE_WS_CERTFILE + VOICE_WS_KEYFILE, and VOICE_WSS_PORT must match the port above), or a reverse proxy is supposed to forward that port and isn't, or the port is simply different — correct it below. With a self-signed cert, also open the https:// form of this URL once and accept the warning, or the browser will refuse the socket silently.";
+    return "Nothing accepted a TLS websocket there. Either the voice service has no wss listener (set VOICE_WS_CERTFILE + VOICE_WS_KEYFILE, and VOICE_WSS_PORT must match the port above), or a reverse proxy is supposed to forward that port and isn't, or the port is simply different — correct it below. With a self-signed cert, also open the https:// form of this URL once and accept the warning, or the browser will refuse the socket silently. The pipeline may also have refused this page\u2019s origin or host (see README \u201cWho can connect\u201d: VOICE_WS_ORIGINS / VOICE_ALLOWED_HOSTS).";
   }
-  return "Nothing accepted a websocket there. Check the voice service is running and that VOICE_WS_PORT matches the port above.";
+  return "Either nothing is listening at that address (is the voice service running, and does VOICE_WS_PORT match the port above?), or the pipeline refused this page\u2019s origin or host (see README \u201cWho can connect\u201d: VOICE_WS_ORIGINS / VOICE_ALLOWED_HOSTS). The browser can\u2019t tell which.";
 }
 
 function reportConnectFailure() {

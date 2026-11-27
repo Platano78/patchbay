@@ -339,12 +339,29 @@ def _real_armed_wake_gate(monkeypatch, load_model):
     return gate
 
 
-def test_wake_gate_fail_open_is_not_logged_as_a_detection(monkeypatch, caplog):
+def test_wake_gate_load_failure_switches_the_gate_off_instead_of_failing_open(monkeypatch, caplog):
     def broken():
         raise RuntimeError("model file missing")
 
     streamer = _make_streamer()
     streamer.wakeword_gate = _real_armed_wake_gate(monkeypatch, broken)
+
+    with caplog.at_level("INFO"):
+        asyncio.run(streamer._handle_client(_FakeClient([b"\x00\x00" * 1280])))
+
+    gate = streamer.wakeword_gate
+    assert gate.enabled is False and gate.available is False  # visible to the panel, not "armed"
+    messages = [r.getMessage() for r in caplog.records]
+    assert not any("wake word detected" in m for m in messages), messages
+
+
+def test_wake_gate_fail_open_is_not_logged_as_a_detection(monkeypatch, caplog):
+    class _Exploding:
+        def predict(self, frame):
+            raise RuntimeError("scoring blew up")
+
+    streamer = _make_streamer()
+    streamer.wakeword_gate = _real_armed_wake_gate(monkeypatch, lambda: _Exploding())
 
     with caplog.at_level("INFO"):
         asyncio.run(streamer._handle_client(_FakeClient([b"\x00\x00" * 1280])))

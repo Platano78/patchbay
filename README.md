@@ -61,7 +61,9 @@ Start with [SETUP.md](SETUP.md); agents acting for you start with
   (`config_get`/`config_set` — brain selection, persona text, chat reset).
 - `webclient/serve.py` (stdlib only) serves, on `:8770`: the cockpit's own
   static files; `/models` and `/v1/models`, a small JSON status reporting
-  whether the pipeline's WebSocket port is listening; and — only when both
+  whether something is listening on TCP port 8765 (the pipeline's default
+  WebSocket port; fixed, it does not follow `--ws_port`; Linux only, read from
+  `/proc/net/tcp`). It answers 200 when listening and 503 when not; and — only when both
   `HA_URL` and `HA_TOKEN` are set in its environment — the Home Assistant
   deck routes `/ha/states`, `/ha/stream` and `/ha/intent` (see *Optional
   integrations*). It binds `127.0.0.1` unless you pass `--host`.
@@ -111,14 +113,16 @@ It's **loopback-only by default** — probing your LAN unprompted isn't this
 tool's job. Every run says which target set it scanned on its first line, so
 a result can't be mistaken for more coverage than it had.
 
-If your model server runs on another box, ask for it explicitly:
+If your model server runs on another box, ask for it explicitly (the script
+imports `httpx`, so run it with the framework venv's python, as below, not the
+system `python3`; with a custom `INSTALL_DIR`, use `$INSTALL_DIR/.venv/bin/python3`):
 
 ```bash
 # one or more named hosts (repeat --host)
-python3 patches/brain_discovery.py --host 10.0.0.20 --host 10.0.0.30
+~/speech-to-speech-main/.venv/bin/python3 patches/brain_discovery.py --host 10.0.0.20 --host 10.0.0.30
 
 # or a whole private block, same known port list
-python3 patches/brain_discovery.py --cidr 10.0.0.0/24
+~/speech-to-speech-main/.venv/bin/python3 patches/brain_discovery.py --cidr 10.0.0.0/24
 ```
 
 `--cidr` takes **private address space only** and at most a `/24` (256
@@ -337,7 +341,7 @@ them.
 | `HERMES_SHIM_URL` | `http://localhost:8087/v1/chat/completions` | optional Hermes "shim" brain endpoint — see *Agent lane (optional)* below |
 | `HERMES_SHIM_TOKEN_FILE` | `~/.hermes/shim.env` | optional Hermes shim token file |
 | `HERMES_MCP_URL` | `http://localhost:8088/mcp` | optional Hermes MCP endpoint (cockpit brain) |
-| `HERMES_TARGET` | *(unset — required for `send_to_hermes`)* | Hermes message target, `platform:chat_id` per Hermes `channels_list` |
+| `HERMES_TARGET` | *(unset — required for `send_to_hermes`)* | your own chat with Hermes, `platform:chat_id` per Hermes `channels_list`. `send_to_hermes` posts a note there (Hermes does not act on it), and a finished or failed delegation is reported there with Hermes's full answer (`VOICE_HERMES_NOTIFY=off` to stop) |
 | `QMD_MCP_URL` | `http://localhost:8070/mcp` | optional QMD knowledge endpoint (voice tools) |
 | `VOICE_TOOLS` | *(unset)* | pin the armed voice-tool set to a comma-separated list |
 | `VOICE_TOOLS_DIR` | *(unset)* | directory of drop-in local voice tools (one `.py` per tool) |
@@ -390,13 +394,16 @@ the behaviour described.
 |---|---|---|
 | `VOICE_STREAM_MAX_S` | `120.0` | hard ceiling on a single LLM streaming response, in seconds. Exists because an HTTP read timeout does not bound *total* duration — a model trickling one token at a time can hold the thread open indefinitely without ever tripping a read timeout. `off` disables |
 | `VOICE_MAX_TOKENS` | `1024` | `max_tokens` sent with every LLM request. A spoken answer never needs more, and it bounds a runaway generation. `off` disables |
-| `VOICE_TOOL_CALL_CAP` | `8` | maximum tool-call **rounds** in one turn (one model response may hold several calls; each response counts once) before it is cut off, so a tool loop cannot run forever; `0`/`off` disables |
+| `VOICE_TOOL_CALL_CAP` | `8` | maximum tool-call **rounds** in one turn (one model response may hold several calls; each response counts once) before it is cut off, so a tool loop cannot run forever; `0`/`off` disables. Separately, a call identical to an earlier one in the same turn (same tool, same arguments ignoring case and spacing) is not run again: the model is told so and answers from what it has (only `web_search`, `get_weather` and `sports_scores` are guarded this way; every other tool may repeat) |
+| `VOICE_DEFAULT_PLACE` | *(unset)* | a place name (`Springfield`) or `lat,lon` (`40.0,-75.0`) that `get_weather` uses when the caller names no place and the client has sent no location, so a device without a location still answers "what's the weather today". A client's own location wins over it. Unset: the assistant asks for a place. Read on every call. With coordinates, no place name is sent to Open-Meteo |
+| `VOICE_WEATHER_UNITS` | *(unset)* | `fahrenheit` or `celsius`: the unit `get_weather` speaks for every place, overriding the default rule (Fahrenheit and mph for the US and the other countries that use them, Celsius and km/h elsewhere). A unit the user asks for in the call still wins. Read on every call. With no country (coordinates, a phone location) and this unset, Celsius |
 | `VOICE_TOOL_FILLER_EVERY` | `3` | how often a spoken filler ("Let me check.") plays during a tool chain — every Nth round, so rounds 1, 4, 7… A long chain doesn't chatter |
 | `VOICE_ECHO_GATE` | *(unset — off)* | server-side echo/speech discrimination, so the assistant does not hear itself. `on` gates, `observe` scores and logs without ever dropping audio, `off`/unset disables. Start with `observe` and read the logs before enabling; `journalctl -u patchbay -o cat | python3 examples/echo_gate_report.py` summarises those logs and says whether any echo was ever measured |
 | `VOICE_BARGE_CANCEL` | *(on)* | when a push-to-talk press lands on a reply, the browser tells the server (`barge_in`) and the server stops producing it: the LLM stream, the speech synthesis and the queued audio are cancelled, so the old reply never resumes after the new question. What the model had already said is kept in its chat history. `off` restores the earlier behaviour, where only the browser's own playback stopped |
 | `VOICE_PTT_HOLD` | *(on)* | the browser tells the server when push-to-talk is held (`ptt` `down`/`up`); while held, the server withholds pauses from its silence rule so a pause mid-thought does not end the turn, and `up` ends it. Dropped after 120 s or when the socket closes. Clients that never send `ptt` are unaffected. `0` ignores the frames, restoring silence-only turn ends |
 | `VOICE_OVERLAP_OBSERVE` | *(unset — off)* | a measurement instrument, not a feature: set to `1` (needs `VOICE_ECHO_GATE=observe` or `on`, otherwise it logs a warning and stays inert) and an open-mic client **streams the microphone to the server during replies** (the same data path the wake-word gate already receives while asleep). The server scores those frames with the echo gate, labelled `phase=playback`, and never sends them to the pipeline, so nothing changes in how the assistant listens or answers. Read the result with `examples/echo_gate_report.py`, which then also prints a per-playback-window table. Remove it after the collection session. Push-to-talk is unaffected |
 | `VOICE_HERMES_ANNOUNCE` | *(on)* | speak a short notice when a Hermes delegation completes. `off` disables |
+| `VOICE_HERMES_NOTIFY` | *(on)* | with `HERMES_TARGET` set, post the full result of a finished or failed Hermes delegation to that chat. `off` disables. (A finished delegation is always written into the assistant's own conversation so it can tell you the result.) |
 | `VOICE_PARROT` | *(unset)* | sets the **startup** state of **parrot mode**, a diagnostic: every turn is spoken back to you verbatim with no LLM involved, so you can hear whether the whole audio path — synthesis, streaming, playback, avatar — actually works. Not a conversational mode; the assistant will only ever repeat you. Set to `1` to start armed; leave unset to start disarmed. Toggle it live from the settings panel's Connection section afterwards — no restart needed, so you never have to kill the conversation you're diagnosing. Short-circuits a turn before the LLM sees it; turn it off again to restore normal conversation |
 | `VOICE_CAMERA_FRAME` | `/dev/shm/voice_camera_frame.jpg` | where a client-pushed camera frame is written for the vision tool to read |
 | `VOICE_SCREEN_FRAME` | `/dev/shm/voice_screen_frame.jpg` | same, for a shared screen frame |
@@ -434,8 +441,8 @@ identically either way.
 Both need the `remote-transcription` / `remote-speech` backends on a speech server that serves `smart-turn` and the persona voices, and both are inert without their env var. Pre-render the clips once per voice, with the same environment as the service (so it renders the phrases the service would pick):
 
 ```sh
-python3 examples/render_fillers.py --base-url http://HOST:PORT --dry-run   # voices x phrases, writes nothing
-python3 examples/render_fillers.py --base-url http://HOST:PORT             # all voices; --voice ryan to limit
+~/speech-to-speech-main/.venv/bin/python3 examples/render_fillers.py --base-url http://HOST:PORT --dry-run   # voices x phrases, writes nothing
+~/speech-to-speech-main/.venv/bin/python3 examples/render_fillers.py --base-url http://HOST:PORT             # all voices; --voice ryan to limit
 ```
 
 `--rate` must equal the pipeline output rate (the TTS handler's `remote_speech_sample_rate`, 16000 unless you set it) and `--source-rate` the rate the server returns (48000 for voxcpm2). Existing clips are skipped; `--force` re-renders. Turn fillers also need `VOICE_TURN_FILLER=on`, and Smart Turn `VOICE_SMART_TURN=act` (or `shadow` to only log what it would decide).
@@ -480,14 +487,15 @@ The voice agent's LLM can call a small set of server-side tools (defined in
 
 | Tool | What it does | Backing service |
 |---|---|---|
-| `get_weather` | Current conditions for a place | Open-Meteo (public web API) |
+| `get_weather` | Weather for a place: now (plus today's high and low), today, tonight or tomorrow, in Fahrenheit or Celsius | Open-Meteo (public web API) |
+| `sports_scores` | Final and live scores and start times for one league (NBA, NFL, MLB, NHL, WNBA, MLS, college football and men's basketball, Premier League), optionally one team and a day | ESPN public scoreboard JSON |
 | `web_search` | Search the public web; results also appear as clickable links on screen | DuckDuckGo (`ddgs`) |
 | `knowledge_lookup` | Search your own notes, projects, and research | QMD MCP (`QMD_MCP_URL`) |
 | `decision_lookup` *(optional)* | Look up a recorded design decision and its rationale ("why did we…") | Faulkner-DB (`FAULKNER_API_URL`) |
 | `set_mood` | Set the interface/avatar mood — only when the user asks for an expression or mood change | none — client-side visual only |
 | `delegate_to_hermes` *(optional)* | Hand off a long-running / multi-step task to Hermes | Hermes shim (`HERMES_SHIM_URL`) |
 | `hermes_status` *(optional)* | Report Hermes' status (summary, last result, recent steps, or pending approvals) | Hermes MCP (`HERMES_MCP_URL`) |
-| `send_to_hermes` *(optional)* | Send a quick free-form message / follow-up to Hermes | Hermes MCP (`messages_send` → `HERMES_TARGET`) |
+| `send_to_hermes` *(optional)* | Post a note into your own chat with Hermes (Hermes does not act on it; use `delegate_to_hermes` for anything it should do) | Hermes MCP (`messages_send` → `HERMES_TARGET`) |
 | `confirm_action` *(only with `VOICE_CONFIRM_TOOLS`)* | Lets the model retry a consequential tool once the user has said yes — see *Confirming consequential actions* below | none |
 
 Hermes is a separate, self-hosted service (see *Agent lane (optional)*
@@ -555,7 +563,9 @@ money, send a message, delete something. Set `VOICE_CONFIRM_TOOLS` to a
 pipe-separated list of tool names (or mark a drop-in `CONSEQUENTIAL = True`) and
 those tools are **refused on the first call**: the agent is told to explain what
 will happen and ask you outright. Only after you agree, and the agent calls
-`confirm_action` naming that tool, does a retry go through.
+`confirm_action` naming that tool, does a retry go through. The yes has to be
+yours: `confirm_action` is refused until you have spoken again after the
+refusal, so the model cannot refuse, confirm and retry inside one turn.
 
 The authorisation is deliberately narrow. It is tied to the exact argument that
 was refused, so approving one message does not approve a different one, and it
@@ -842,6 +852,11 @@ cannot collect them. From the repo root:
 ~/speech-to-speech-main/.venv/bin/python3 -m pytest patches/ examples/ webclient/ -q
 ```
 
+If you installed somewhere other than the default `~/speech-to-speech-main`
+(a custom `INSTALL_DIR`), use that install's `.venv/bin/` in every command
+here, and `export INSTALL_DIR=<that path>` first so `patches/test_apply_pack.py`
+finds the install (without it, one test skips). Add `-rs` to see each skip's reason.
+
 `webclient/test_webclient.py` drives the real `index.html` in a headless
 Chromium with a fake microphone, against a stub control websocket, to cover
 client behaviour no unit test can reach — the wake-word mic handoff, the
@@ -853,15 +868,33 @@ in the venv:
 ~/speech-to-speech-main/.venv/bin/python3 -m playwright install chromium
 ```
 
-Without those it skips rather than fails, so the suite still passes on a
-machine that only runs the pipeline — but then the client is untested, so
-check the skip count in the pytest summary before trusting a green run.
-Some skips are expected even with everything installed — measured with the
-browser suite installed: 22, which are the echo-gate tests that need benchmark
-recordings (not shipped), one wake-word test that needs `openwakeword`,
-four that need the maintainer's release tooling (not shipped), and one that
-needs `node`. Both of the browser suite's servers bind ephemeral ports on
-localhost, so it is safe to run on the same box as a live agent.
+On a minimal image (for example a slim Docker image) the second command
+fails with `libatomic.so.1: cannot open shared object file`: Playwright's own
+driver needs that library, so run `sudo apt install libatomic1` before it.
+Chromium also needs system libraries; install them with
+`sudo ~/speech-to-speech-main/.venv/bin/python3 -m playwright install-deps chromium`.
+
+The browser tests (`webclient/test_webclient.py`) skip (rather than fail)
+when `playwright`, `websockets` or Pillow is not installed in the venv, and
+when Chromium fails to launch for any reason
+(no `playwright install chromium`, or its system libraries missing), so a
+missing library can look like a skip. If Playwright's own driver cannot start
+(the `libatomic.so.1` case above), every browser test shows as an error instead.
+A skipped suite still passes on a machine that
+only runs the pipeline, but then the client is untested, so check the skip
+count in the pytest summary before trusting a green run.
+Some skips are expected even with everything installed. Measured on two
+clean hosts (Python 3.12 and 3.14) with the browser suite installed, about 25
+skips fall in these groups, each saying why in the `-rs` summary: the echo-gate
+tests that need benchmark recordings (not shipped; the largest group); two voice-design
+tests that need a live speech server (`VOICE_DESIGN_LIVE_URL`, and
+`VOICE_DESIGN_LIVE_WAV` for the second); one VAD-case test that needs the real
+`speech_to_speech` package rather than the suite's stub; one wake-word test
+that needs `openwakeword` (it runs, and must pass, once `openwakeword` is
+installed); four that need the maintainer's release tooling (not shipped); and
+one that needs `node` (it runs when `node` is on `PATH`). The exact count moves
+with those conditions, so read the reasons rather than matching the number.
+Both of the browser suite's servers bind ephemeral ports on localhost, so it is safe to run on the same box as a live agent.
 
 ## Attribution & acknowledgments
 

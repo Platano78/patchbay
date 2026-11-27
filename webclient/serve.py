@@ -43,6 +43,7 @@ MODEL_PATHS = ("/models", "/v1/models")
 # not there the answer is an empty JSON object, not a 404: an absent seed is the normal case, and a
 # 404 would put a failed-request error in every browser console for nothing.
 PERSONA_VOICES_PATH = "/persona-voices.json"
+PERSONAS_PATH = "/personas.json"  # same rule: index.html seedPersonas
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -88,7 +89,7 @@ class Handler(SimpleHTTPRequestHandler):
         if ha_deck is not None and ha_deck.enabled() and path == "/ha/states":
             ha_deck.handle_states(self)
             return
-        if path == PERSONA_VOICES_PATH and self._persona_voices_absent():
+        if path in (PERSONA_VOICES_PATH, PERSONAS_PATH) and self._seed_absent(path):
             self._serve_empty_json()
             return
         super().do_GET()
@@ -100,14 +101,14 @@ class Handler(SimpleHTTPRequestHandler):
         if path in MODEL_PATHS:
             self._serve_models(head=True)
             return
-        if path == PERSONA_VOICES_PATH and self._persona_voices_absent():
+        if path in (PERSONA_VOICES_PATH, PERSONAS_PATH) and self._seed_absent(path):
             self._serve_empty_json(head=True)
             return
         super().do_HEAD()
 
     @staticmethod
-    def _persona_voices_absent():
-        return not os.path.isfile(os.path.join(HERE, "persona-voices.json"))
+    def _seed_absent(path):
+        return not os.path.isfile(os.path.join(HERE, path.lstrip("/")))
 
     def _serve_empty_json(self, head=False):
         body = b"{}"

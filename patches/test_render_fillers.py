@@ -138,3 +138,20 @@ def test_clip_outside_length_bounds_is_rejected(server, tmp_path, monkeypatch):
     monkeypatch.setattr(rf, "render", lambda *a, **k: np.zeros(100, np.int16).tobytes() + (np.ones(50, np.int16) * 9000).tobytes())
     assert rf.main(["--base-url", url, "--dir", str(tmp_path), "--voice", "ryan"]) == 1
     assert not list(tmp_path.rglob("*.pcm"))
+
+
+def test_unreachable_speech_server_is_one_sentence_and_exit_1(tmp_path, capsys):
+    """No speech server at the URL: a plain sentence naming the URL, exit 1,
+    no urllib traceback."""
+    import socket
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    port = sock.getsockname()[1]
+    sock.close()  # nothing listens here now
+    rc = rf.main(["--base-url", f"http://127.0.0.1:{port}", "--dir", str(tmp_path), "--dry-run"])
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert f"http://127.0.0.1:{port}/v1/audio/voices" in err
+    assert "Traceback" not in err
+    assert len(err.strip().splitlines()) == 1

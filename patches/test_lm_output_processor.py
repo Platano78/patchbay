@@ -1246,3 +1246,145 @@ def test_turn_filler_picker_is_registered_with_filler_clips():
     from patches import filler_clips as fc
 
     assert fc.FILLERS._picker is lm_output_processor._pick_turn_filler
+
+
+# ── duplicate-call guard: an identical call within one turn runs once ───
+
+
+def _call_round(proc, rc, calls, turn_id="turn-1", prefix="c"):
+    """One tool-carrying chunk made of (name, arguments-json) pairs."""
+    tool_calls = [_FakeToolCall(name, f"{prefix}{next(_id_counter)}", args) for name, args in calls]
+    list(proc.process(_chunk(tools=tool_calls, runtime_config=rc, turn_id=turn_id)))
+    return tool_calls
+
+
+def _outputs_by_call(rc):
+    return {cid: obj.output for cid, obj in rc.chat.tool_outputs}
+
+
+def test_same_call_three_times_executes_once_and_refuses_the_rest(monkeypatch):
+    executed = []
+    monkeypatch.setattr(
+        lm_output_processor.voice_tools, "execute", lambda name, kwargs: executed.append((name, kwargs)) or "result"
+    )
+    tpq = Queue()
+    proc = _make_processor(text_prompt_queue=tpq)
+    rc = _FakeRuntimeConfig()
+    args = '{"query": "weather in paris"}'
+
+    sent = [_call_round(proc, rc, [("web_search", args)])[0] for _ in range(3)]
+
+    assert executed == [("web_search", {"query": "weather in paris"})]
+    out = _outputs_by_call(rc)
+    assert out[sent[0].call_id] == "result"
+    assert out[sent[1].call_id] == lm_output_processor._SYNTHETIC_DUPLICATE_CALL_OUTPUT
+    assert out[sent[2].call_id] == lm_output_processor._SYNTHETIC_DUPLICATE_CALL_OUTPUT
+    assert tpq.qsize() == 3  # every round still gets a follow-up so the model can answer
+
+
+def test_duplicate_inside_one_chunk_is_caught(monkeypatch):
+    executed = []
+    monkeypatch.setattr(
+        lm_output_processor.voice_tools, "execute", lambda name, kwargs: executed.append(name) or "result"
+    )
+    proc = _make_processor(text_prompt_queue=Queue())
+    rc = _FakeRuntimeConfig()
+    _call_round(proc, rc, [("web_search", '{"query": "a"}'), ("web_search", '{"query": "a"}')])
+    assert executed == ["web_search"]
+
+
+def test_different_arguments_or_tools_still_execute(monkeypatch):
+    executed = []
+    monkeypatch.setattr(
+        lm_output_processor.voice_tools, "execute", lambda name, kwargs: executed.append((name, kwargs)) or "ok"
+    )
+    proc = _make_processor(text_prompt_queue=Queue())
+    rc = _FakeRuntimeConfig()
+    _call_round(proc, rc, [("web_search", '{"query": "a"}')])
+    _call_round(proc, rc, [("web_search", '{"query": "b"}')])
+    _call_round(proc, rc, [("get_weather", '{"query": "a"}')])
+    assert len(executed) == 3
+
+
+def test_string_arguments_compare_case_and_whitespace_insensitively(monkeypatch):
+    executed = []
+    monkeypatch.setattr(
+        lm_output_processor.voice_tools, "execute", lambda name, kwargs: executed.append(kwargs) or "ok"
+    )
+    proc = _make_processor(text_prompt_queue=Queue())
+    rc = _FakeRuntimeConfig()
+    _call_round(proc, rc, [("web_search", '{"query": "Weather in  Paris"}')])
+    _call_round(proc, rc, [("web_search", '{"query": " weather in paris "}')])
+    assert len(executed) == 1
+
+
+def test_non_string_arguments_stay_exact(monkeypatch):
+    executed = []
+    monkeypatch.setattr(
+        lm_output_processor.voice_tools, "execute", lambda name, kwargs: executed.append(kwargs) or "ok"
+    )
+    proc = _make_processor(text_prompt_queue=Queue())
+    rc = _FakeRuntimeConfig()
+    _call_round(proc, rc, [("set_level", '{"n": 1}')])
+    _call_round(proc, rc, [("set_level", '{"n": 2}')])
+    assert len(executed) == 2
+
+
+def test_unguarded_tools_are_never_deduplicated(monkeypatch):
+    # Only read-only lookups are guarded; a state-changing or zero-argument
+    # tool legitimately repeats (restore -> design -> restore).
+    executed = []
+    monkeypatch.setattr(
+        lm_output_processor.voice_tools, "execute", lambda name, kwargs: executed.append(name) or "ok"
+    )
+    proc = _make_processor(text_prompt_queue=Queue())
+    rc = _FakeRuntimeConfig()
+    for name in ("restore_voice", "restore_voice", "save_voice", "save_voice", "send_to_hermes", "send_to_hermes"):
+        _call_round(proc, rc, [(name, "{}")])
+    assert executed.count("restore_voice") == 2
+    assert executed.count("save_voice") == 2
+    assert executed.count("send_to_hermes") == 2
+
+
+def test_guarded_set_is_the_read_only_lookups():
+    assert lm_output_processor._REPEAT_GUARDED_TOOLS == frozenset({"web_search", "get_weather", "sports_scores"})
+
+
+def test_bookkeeping_is_per_turn(monkeypatch):
+    executed = []
+    monkeypatch.setattr(
+        lm_output_processor.voice_tools, "execute", lambda name, kwargs: executed.append(name) or "ok"
+    )
+    proc = _make_processor(text_prompt_queue=Queue())
+    rc = _FakeRuntimeConfig()
+    _call_round(proc, rc, [("web_search", '{"query": "a"}')], turn_id="turn-1")
+    _call_round(proc, rc, [("web_search", '{"query": "a"}')], turn_id="turn-2")
+    assert len(executed) == 2
+
+
+def test_duplicate_still_counts_toward_the_round_cap(monkeypatch):
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", lambda name, kwargs: "ok")
+    tpq = Queue()
+    proc = _make_processor(text_prompt_queue=tpq)
+    rc = _FakeRuntimeConfig()
+    for _ in range(9):
+        _call_round(proc, rc, [("web_search", '{"query": "a"}')])
+    assert _outputs_by_call(rc) and rc.chat.tool_outputs[-1][1].output == lm_output_processor._SYNTHETIC_CAP_OUTPUT
+
+
+def test_call_that_raised_may_be_retried(monkeypatch):
+    attempts = []
+
+    def flaky(name, kwargs):
+        attempts.append(name)
+        if len(attempts) == 1:
+            raise TimeoutError("search timed out")
+        return "result"
+
+    monkeypatch.setattr(lm_output_processor.voice_tools, "execute", flaky)
+    proc = _make_processor(text_prompt_queue=Queue())
+    rc = _FakeRuntimeConfig()
+    _call_round(proc, rc, [("web_search", '{"query": "a"}')])
+    second = _call_round(proc, rc, [("web_search", '{"query": "a"}')])[0]
+    assert len(attempts) == 2
+    assert _outputs_by_call(rc)[second.call_id] == "result"

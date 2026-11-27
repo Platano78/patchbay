@@ -14,7 +14,8 @@ disagree, SETUP.md wins; tell the user about the mismatch.
 ## 2. Decide with the user first
 
 - **Where is their model server?** Get a base URL (`http://host:port/v1`) and check it:
-  `curl -sf <base>/models` must print JSON with a `"data"` array. If they don't know,
+  `curl -sf <base>/models` must print JSON with a `"data"` array (a hosted endpoint that needs a
+  key: add `-H "Authorization: Bearer $KEY"`). If they don't know,
   `setup.sh` runs a loopback scan (SETUP step 3 shows how to rerun it, or scan another host).
 - **Where will they open the cockpit?** Default: a browser on this same machine, at
   `http://localhost:8770`. Another device (phone, tablet, second computer) is a separate,
@@ -29,8 +30,10 @@ disagree, SETUP.md wins; tell the user about the mismatch.
 - **Never commit `brains.json`.** It is gitignored because it can name API key files.
 - **Before `./setup.sh`, tell the user what it downloads** — the size and licence table in
   SETUP step 0 (about 6 GB of disk in total; the speech models are CC-BY-4.0) — and get a yes.
+  The same goes for the optional `services/tyger/install.sh`: its weights are OpenMDW-1.1 and it
+  needs several GB and a GPU PyTorch build; it does not ask, so ask first.
 - **Ask before installing it as a service.** Running it in the foreground (step 4) and passing
-  the smoke check (step 5) finishes the setup. Installing systemd units makes it start at every
+  the smoke check (section 5 below) finishes the setup. Installing systemd units makes it start at every
   boot — offer that, say what it changes, and only do it if the user says yes.
 - Don't run the test suite unless the user asks, or you changed code.
 - Don't delete anything you didn't create. `setup.sh` refuses to reuse an existing
@@ -104,8 +107,10 @@ BRAINS_JSON=$PWD/brains.json \
   --responses_api_stream
 ```
 
-Ready when the log shows `WebSocket server ready, waiting for connections...` (the first start
-downloads ~2.7 GB of models first). Then, in another terminal:
+Ready when the log shows `WebSocket server ready, waiting for connections...`. The first start
+downloads ~2.7 GB of models first: expect 2-5 minutes with nothing cached. Don't restart it
+meanwhile; wait for that line (or poll `ss -ltn '( sport = :8765 )'` until it shows a listener).
+Then, in another terminal:
 
 ```bash
 python3 webclient/serve.py --port 8770
@@ -115,11 +120,13 @@ prints `Serving <path> on http://127.0.0.1:8770`. The user opens `http://localho
 
 ## 5. Verify it answers, without a microphone
 
-With the pipeline running:
+With the pipeline running (after the `WebSocket server ready` line):
 
 ```bash
 ~/speech-to-speech-main/.venv/bin/python3 examples/smoke_turn.py
 ```
+
+It needs no arguments and exits on its own within about two minutes; there is no need to read it.
 
 Success is exit code `0` and this shape (answer wording and byte count vary by model):
 
@@ -136,7 +143,7 @@ configuration. The pipeline has one shared session, so an open cockpit hears thi
 ## 6. Run it as a service
 
 **Optional, and only on the user's request.** Section 3 has the rule — *Ask before installing
-it as a service*: a foreground run (step 4) plus the smoke check (step 5) is a finished setup.
+it as a service*: a foreground run (step 4) plus the smoke check (section 5 above) is a finished setup.
 Do this section only after the user has said yes to auto-start. SETUP step 6,
 *Run as systemd services*, has both variants with the exact commands:
 

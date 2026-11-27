@@ -22,8 +22,8 @@ a clip exists for the active voice; otherwise the phrase is spoken as today.
 
 Idempotent: a clip that already exists is skipped (--force re-renders).
 
-    python3 examples/render_fillers.py --base-url http://HOST:PORT --dry-run
-    python3 examples/render_fillers.py --base-url http://HOST:PORT --voice ryan
+    ~/speech-to-speech-main/.venv/bin/python3 examples/render_fillers.py --base-url http://HOST:PORT --dry-run
+    ~/speech-to-speech-main/.venv/bin/python3 examples/render_fillers.py --base-url http://HOST:PORT --voice ryan
 """
 
 from __future__ import annotations
@@ -137,7 +137,19 @@ def main(argv: list[str] | None = None) -> int:
         print("no filler phrases are active (VOICE_TOOL_FILLERS=off?); nothing to render")
         return 0
 
-    voices = args.voice or _get_json(f"{base}/v1/audio/voices?model={urllib.parse.quote(args.model)}")["voices"]
+    if args.voice:
+        voices = args.voice
+    else:
+        voices_url = f"{base}/v1/audio/voices?model={urllib.parse.quote(args.model)}"
+        try:
+            voices = _get_json(voices_url)["voices"]
+        except (OSError, ValueError, KeyError, TypeError) as exc:  # URLError/HTTPError/timeouts are OSErrors
+            print(
+                f"could not get the voice list from {voices_url} ({type(exc).__name__}: {exc}); "
+                "check --base-url and that the speech server is running",
+                file=sys.stderr,
+            )
+            return 1
     print(f"{len(voices)} voice(s) x {len(phrases)} phrase(s) -> {root}  (rate {args.rate} Hz)")
     failures = rendered = skipped = 0
     for voice in voices:

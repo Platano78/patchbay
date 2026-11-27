@@ -308,6 +308,10 @@ def _real_gate(monkeypatch, installed):
 
     monkeypatch.delenv("VOICE_WAKE_WORD", raising=False)
     monkeypatch.setattr(wakeword_gate, "_openwakeword_installed", lambda: installed)
+    if installed:
+        # "Installed" must cover the model too: enabling the gate loads it now
+        # (load-on-enable), and a clean machine has no openwakeword to import.
+        monkeypatch.setattr(wakeword_gate.WakewordGate, "_load_model", lambda self: object())
     return wakeword_gate.WakewordGate()
 
 

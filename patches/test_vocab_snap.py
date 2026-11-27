@@ -366,3 +366,35 @@ class TestRealHookPoint:
         res = self._result(str(tmp_path / "absent.txt"), ["what is Vox EPM doing"])
         assert res["turns"][0]["chat_last"] == "what is Vox EPM doing"
         assert res["turns"][0]["event"] == ["what is Vox EPM doing"]
+
+
+# ── R3: the same real call path advances the user-utterance counter ───
+
+_UTTERANCE_PROBE = _PROBE.replace(
+    "from patches import s2s_pipeline as sp\n",
+    "import patches.voice_tools as vtools\n"
+    "sys.modules['speech_to_speech.voice_tools'] = vtools\n"
+    "speech_to_speech.voice_tools = vtools\n"
+    "from patches import s2s_pipeline as sp\n",
+    1,
+).replace(
+    'print("RESULT " + json.dumps({"turns": out, "partial": partial}))',
+    'print("RESULT " + json.dumps({"turns": out, "partial": partial, "utterances": vtools._USER_UTTERANCES}))',
+    1,
+)
+assert "import patches.voice_tools as vtools" in _UTTERANCE_PROBE and "vtools._USER_UTTERANCES" in _UTTERANCE_PROBE
+
+
+@pytest.mark.skipif(not _framework_importable(), reason="the real speech_to_speech framework is not installed in this venv")
+def test_real_notifier_advances_the_user_utterance_counter():
+    import json
+
+    env = dict(os.environ, VOICE_VOCAB_FILE="", PROBE_TEXTS=json.dumps(["yes please", "go ahead"]))
+    proc = subprocess.run(
+        [sys.executable, "-c", _UTTERANCE_PROBE], cwd=str(_REPO_ROOT), env=env, capture_output=True, text=True, timeout=180
+    )
+    assert proc.returncode == 0, proc.stderr[-1500:]
+    line = next(l for l in proc.stdout.splitlines() if l.startswith("RESULT "))
+    res = json.loads(line[len("RESULT "):])
+    # two final transcripts counted; the trailing PartialTranscription in the probe is not
+    assert res["utterances"] == 2
